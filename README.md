@@ -53,7 +53,7 @@ curl -H "Authorization: Bearer $GITHUB_TOKEN" \
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.1.0 \
+TUIMUX_VERSION=v0.1.1 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 

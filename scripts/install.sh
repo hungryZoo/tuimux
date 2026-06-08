@@ -12,7 +12,7 @@
 #     | bash
 #
 # Environment variables:
-#   TUIMUX_VERSION       Tag to install (e.g. v0.1.0). Default: latest release.
+#   TUIMUX_VERSION       Tag to install (e.g. v0.1.1). Default: latest release.
 #   TUIMUX_INSTALL_DIR   Where to put the binary. Default: ~/.local/bin, falling
 #                        back to /usr/local/bin if the former isn't writable.
 #   GITHUB_TOKEN         If set, releases are fetched via the GitHub API (required
@@ -110,9 +110,10 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   # octet-stream Accept header (this is what makes private-asset download work).
   info "Looking up asset id via GitHub API…"
   ASSET_ID="$(api_get "/releases/tags/${VERSION}" \
-    | tr ',' '\n' \
-    | grep -B2 "\"name\": \"${ASSET}\"" \
-    | grep '"id"' | head -n1 | grep -oE '[0-9]+')"
+    | grep -B20 "\"name\": \"${ASSET}\"" \
+    | grep '"id"' \
+    | tail -n1 \
+    | grep -oE '[0-9]+')"
   [ -n "$ASSET_ID" ] || die "asset ${ASSET} not found in release ${VERSION}."
   DOWNLOAD_URL="${API}/releases/assets/${ASSET_ID}"
   DL_ARGS=("${AUTH_ARGS[@]}" -H "Accept: application/octet-stream")
