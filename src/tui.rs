@@ -1,11 +1,9 @@
 //! The live terminal UI (`tuimux` with no subcommand).
 //!
-//! As of v0.1.4 the right sidebar is wired to a **real tmux server**: it lists
-//! real sessions and windows, clicking a window runs `select-window`, clicking
-//! `+ new` runs `new-window`, clicking a session row runs `switch-client` (only
-//! when tuimux itself is running inside tmux), and Detach runs `detach-client`.
-//! The center pane area is still a static mock — the `tmux -CC` control-mode
-//! renderer is the next milestone (SRS FR-CONN).
+//! As of v0.1.5 the UI renders a real tmux pane by polling `capture-pane` and
+//! sends keystrokes to tmux with `send-keys` when the main pane is focused. The
+//! right sidebar lists real sessions/windows, can create/switch/kill windows,
+//! create sessions, and detach.
 //!
 //! If there is no tmux server yet, tuimux creates a detached session named
 //! `tuimux` so the UI always has something real to show.
@@ -17,8 +15,8 @@ use std::io::{self, IsTerminal, Stdout};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -27,7 +25,6 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
-use crate::preview::PreviewData;
 use crate::tmux::{RealTmux, Session, Tmux, TmuxProbe, Window};
 
 /// Why the UI loop ended — affects the farewell message.
@@ -40,19 +37,25 @@ enum Exit {
 enum Hotspot {
     SessionButton,
     DetachButton,
+    MainPane,
     Window(usize),
+    WindowClose(usize),
     NewWindow,
     ModalSession(usize),
+    ModalNewSession,
     ModalDetach,
 }
 
 #[derive(Default, Clone, Copy)]
 struct Regions {
+    main_pane: Rect,
     session_button: Rect,
     detach_button: Rect,
     new_window: Rect,
     windows: [Rect; 8],
+    window_close: [Rect; 8],
     window_count: usize,
+    modal_new_session: Rect,
     modal_detach: Rect,
     modal_sessions: [Rect; 8],
     modal_session_count: usize,
@@ -69,6 +72,8 @@ struct UiState {
     /// Non-fatal, transient message shown in the status bar (e.g. why a switch
     /// was refused outside tmux, or that a window was created).
     status: Option<String>,
+    pane_lines: Vec<String>,
+    terminal_mode: bool,
     /// Monotonic counter behind the `tuimux-<n>` names created by the `n` key.
     new_session_counter: u32,
 }
@@ -87,6 +92,8 @@ impl UiState {
             windows: Vec::new(),
             current_session: String::new(),
             status: None,
+            pane_lines: Vec::new(),
+            terminal_mode: false,
             new_session_counter: 0,
         };
 
@@ -100,6 +107,7 @@ impl UiState {
         state.sessions = sessions;
         state.current_session = state.pick_current();
         state.reload_windows(tmux);
+        state.refresh_pane(tmux, 80, 24);
         state
     }
 
@@ -119,6 +127,17 @@ impl UiState {
         } else {
             tmux.list_windows(&self.current_session).unwrap_or_default()
         };
+    }
+
+    fn refresh_pane(&mut self, tmux: &Tmux<RealTmux>, width: u16, height: u16) {
+        if self.current_session.is_empty() {
+            self.pane_lines.clear();
+            return;
+        }
+        match tmux.capture_pane(&self.current_session, width, height) {
+            Ok(lines) => self.pane_lines = lines,
+            Err(e) => self.status = Some(format!("capture-pane failed: {e}")),
+        }
     }
 
     /// Re-read sessions and windows after a mutating command.
@@ -158,8 +177,7 @@ pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
     let mut state = UiState::bootstrap(&tmux);
 
     let mut terminal = setup()?;
-    let data = PreviewData::default();
-    let result = run_loop(&mut terminal, probe, &tmux, &data, &mut state);
+    let result = run_loop(&mut terminal, &tmux, &mut state);
     restore(&mut terminal)?;
 
     match result {
@@ -198,23 +216,40 @@ fn restore(terminal: &mut Term) -> io::Result<()> {
     terminal.show_cursor()
 }
 
-fn run_loop(
-    terminal: &mut Term,
-    probe: &TmuxProbe,
-    tmux: &Tmux<RealTmux>,
-    data: &PreviewData,
-    state: &mut UiState,
-) -> io::Result<Exit> {
+fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> io::Result<Exit> {
     loop {
-        terminal.draw(|f| ui(f, probe, tmux, data, state))?;
+        terminal.draw(|f| ui(f, state))?;
 
-        if !event::poll(Duration::from_millis(250))? {
+        if !event::poll(Duration::from_millis(120))? {
+            let area = state.regions.main_pane;
+            state.refresh_pane(
+                tmux,
+                area.width.saturating_sub(2),
+                area.height.saturating_sub(2),
+            );
             continue;
         }
 
         match event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 match (key.code, key.modifiers) {
+                    (KeyCode::F(12), _) if state.terminal_mode => {
+                        state.terminal_mode = false;
+                        state.status = Some("navigation mode".to_string());
+                    }
+                    _ if state.terminal_mode => {
+                        if let Some(keys) = key_event_to_send_keys(key) {
+                            if let Err(e) = tmux.send_keys(&state.current_session, &keys) {
+                                state.status = Some(format!("send-keys failed: {e}"));
+                            }
+                            let area = state.regions.main_pane;
+                            state.refresh_pane(
+                                tmux,
+                                area.width.saturating_sub(2),
+                                area.height.saturating_sub(2),
+                            );
+                        }
+                    }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Exit::Quit),
                     (KeyCode::Char('q'), _) => return Ok(Exit::Quit),
                     // `n` creates a fresh detached `tuimux-<n>` session, but only
@@ -252,11 +287,22 @@ fn run_loop(
                             let _ = tmux.detach();
                             return Ok(Exit::Detach);
                         }
+                        Some(Hotspot::MainPane) => {
+                            state.terminal_mode = true;
+                            state.status =
+                                Some("terminal mode (F12 returns to navigation)".to_string());
+                        }
+                        Some(Hotspot::WindowClose(idx)) => {
+                            kill_window(tmux, state, idx);
+                        }
                         Some(Hotspot::Window(idx)) => {
                             select_window(tmux, state, idx);
                         }
                         Some(Hotspot::NewWindow) => {
                             new_window(tmux, state);
+                        }
+                        Some(Hotspot::ModalNewSession) => {
+                            new_session(tmux, state);
                         }
                         Some(Hotspot::ModalSession(idx)) => {
                             switch_session(tmux, state, idx);
@@ -278,6 +324,19 @@ fn select_window(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
     match tmux.select_window(&state.current_session, index) {
         Ok(()) => state.refresh(tmux),
         Err(e) => state.status = Some(format!("select-window failed: {e}")),
+    }
+}
+
+fn kill_window(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
+    let Some(index) = state.windows.get(idx).map(|w| w.index) else {
+        return;
+    };
+    match tmux.kill_window(&state.current_session, index) {
+        Ok(()) => {
+            state.status = Some(format!("killed window {index}"));
+            state.refresh(tmux);
+        }
+        Err(e) => state.status = Some(format!("kill-window failed: {e}")),
     }
 }
 
@@ -327,55 +386,26 @@ fn switch_session(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
     }
 }
 
-fn ui(
-    f: &mut Frame,
-    probe: &TmuxProbe,
-    tmux: &Tmux<RealTmux>,
-    data: &PreviewData,
-    state: &mut UiState,
-) {
-    let root = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // status
-            Constraint::Min(5),    // body
-        ])
-        .split(f.size());
+fn ui(f: &mut Frame, state: &mut UiState) {
+    let root = f.size();
 
-    let tmux_desc = match &probe.version {
-        Some(v) => format!("tmux {v}"),
-        None => "tmux: not detected".to_string(),
-    };
-    let scope = if tmux.inside_tmux() {
-        "inside tmux"
-    } else {
-        "outside tmux"
-    };
     let session_label = if state.current_session.is_empty() {
         "(no session)"
     } else {
         &state.current_session
     };
-    let mut info = format!("  {session_label} · {tmux_desc} · {scope}");
-    if let Some(msg) = &state.status {
-        info.push_str(" · ");
-        info.push_str(msg);
-    }
-    let status = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " tuimux ",
-            Style::default().fg(Color::Black).bg(Color::Cyan),
-        ),
-        Span::raw(info),
-    ]));
-    f.render_widget(status, root[0]);
-
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(30), Constraint::Length(26)])
-        .split(root[1]);
+        .split(root);
 
-    render_main(f, body[0], &data.panes);
+    render_main(
+        f,
+        body[0],
+        &state.pane_lines,
+        state.terminal_mode,
+        &mut state.regions,
+    );
     render_sidebar(
         f,
         body[1],
@@ -413,13 +443,33 @@ fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a
     }
 }
 
-fn render_main(f: &mut Frame, area: Rect, panes: &[&str]) {
-    let lines: Vec<Line> = panes.iter().map(|p| Line::from(*p)).collect();
+fn render_main(
+    f: &mut Frame,
+    area: Rect,
+    pane_lines: &[String],
+    terminal_mode: bool,
+    regions: &mut Regions,
+) {
+    regions.main_pane = area;
+    let mut lines: Vec<Line> = if pane_lines.is_empty() {
+        vec![Line::from(
+            "tmux pane is empty; click here and type, F12 returns to navigation",
+        )]
+    } else {
+        pane_lines.iter().map(|p| Line::from(p.as_str())).collect()
+    };
+    if let Some(last) = lines.last_mut() {
+        last.spans.push(Span::raw(" "));
+    }
+    let border = if terminal_mode {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
     let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" MAIN AREA (tmux panes — mock) "),
+            .border_style(Style::default().fg(border)),
     );
     f.render_widget(para, area);
 }
@@ -481,7 +531,15 @@ fn render_windows(
             break;
         }
         let y = inner_top.saturating_add(row as u16);
-        regions.windows[row] = Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1);
+        let row_rect = Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1);
+        let close_rect = Rect::new(
+            row_rect.x.saturating_add(row_rect.width.saturating_sub(2)),
+            y,
+            2.min(row_rect.width),
+            1,
+        );
+        regions.windows[row] = row_rect;
+        regions.window_close[row] = close_rect;
         regions.window_count += 1;
 
         let marker = if win.active { "▸" } else { " " };
@@ -496,10 +554,10 @@ fn render_windows(
         } else {
             Style::default()
         };
-        win_items.push(ListItem::new(Line::from(Span::styled(
-            format!("{marker} {}: {}", win.index, win.name),
+        win_items.push(ListItem::new(Line::from(vec![Span::styled(
+            format_window_row(marker, win.index, &win.name, area.width.saturating_sub(2)),
             style,
-        ))));
+        )])));
     }
 
     let new_row = win_items.len();
@@ -583,7 +641,24 @@ fn render_session_modal(
     }
     f.render_widget(List::new(items), chunks[0]);
 
-    regions.modal_detach = chunks[1];
+    let actions = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(chunks[1]);
+    regions.modal_new_session = actions[0];
+    regions.modal_detach = actions[1];
+
+    let new_hot = hover == Some(Hotspot::ModalNewSession);
+    let new_button = Paragraph::new(Line::from(Span::styled(
+        "New Session",
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .block(button_block(None, Color::Green, new_hot));
+    f.render_widget(new_button, actions[0]);
+
     let hot = hover == Some(Hotspot::ModalDetach);
     let detach = Paragraph::new(Line::from(Span::styled(
         "Detach",
@@ -591,7 +666,51 @@ fn render_session_modal(
     )))
     .alignment(Alignment::Center)
     .block(button_block(None, Color::Red, hot));
-    f.render_widget(detach, chunks[1]);
+    f.render_widget(detach, actions[1]);
+}
+
+fn format_window_row(marker: &str, index: u32, name: &str, width: u16) -> String {
+    let width = width as usize;
+    let close = "✕";
+    if width <= 2 {
+        return close.to_string();
+    }
+    let label = format!("{marker} {index}: {name}");
+    let label_width = width.saturating_sub(2);
+    let label_len = label.chars().count();
+    if label_len >= label_width {
+        format!(
+            "{} {close}",
+            label.chars().take(label_width).collect::<String>()
+        )
+    } else {
+        format!("{}{} {close}", label, " ".repeat(label_width - label_len))
+    }
+}
+
+fn key_event_to_send_keys(key: KeyEvent) -> Option<Vec<String>> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(c) = key.code {
+            return Some(vec![format!("C-{}", c.to_ascii_lowercase())]);
+        }
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        if let KeyCode::Char(c) = key.code {
+            return Some(vec![format!("M-{c}")]);
+        }
+    }
+    match key.code {
+        KeyCode::Char(c) => Some(vec!["-l".to_string(), c.to_string()]),
+        KeyCode::Enter => Some(vec!["Enter".to_string()]),
+        KeyCode::Backspace => Some(vec!["BSpace".to_string()]),
+        KeyCode::Tab => Some(vec!["Tab".to_string()]),
+        KeyCode::Esc => Some(vec!["Escape".to_string()]),
+        KeyCode::Left => Some(vec!["Left".to_string()]),
+        KeyCode::Right => Some(vec!["Right".to_string()]),
+        KeyCode::Up => Some(vec!["Up".to_string()]),
+        KeyCode::Down => Some(vec!["Down".to_string()]),
+        _ => None,
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -621,9 +740,16 @@ fn hit_test(x: u16, y: u16, regions: &Regions, modal_open: bool) -> Option<Hotsp
                 return Some(Hotspot::ModalSession(idx));
             }
         }
+        if contains(regions.modal_new_session, x, y) {
+            return Some(Hotspot::ModalNewSession);
+        }
         if contains(regions.modal_detach, x, y) {
             return Some(Hotspot::ModalDetach);
         }
+    }
+
+    if contains(regions.main_pane, x, y) {
+        return Some(Hotspot::MainPane);
     }
 
     if contains(regions.session_button, x, y) {
@@ -633,6 +759,9 @@ fn hit_test(x: u16, y: u16, regions: &Regions, modal_open: bool) -> Option<Hotsp
         return Some(Hotspot::DetachButton);
     }
     for idx in 0..regions.window_count {
+        if contains(regions.window_close[idx], x, y) {
+            return Some(Hotspot::WindowClose(idx));
+        }
         if contains(regions.windows[idx], x, y) {
             return Some(Hotspot::Window(idx));
         }
@@ -648,4 +777,69 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
         && x < rect.x.saturating_add(rect.width)
         && y >= rect.y
         && y < rect.y.saturating_add(rect.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn key_mapping_sends_literal_text_and_named_keys_to_tmux() {
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some(vec!["-l".to_string(), "a".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(vec!["Enter".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(vec!["BSpace".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Left, KeyModifiers::NONE)),
+            Some(vec!["Left".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(vec!["C-c".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Char('x'), KeyModifiers::ALT)),
+            Some(vec!["M-x".to_string()])
+        );
+    }
+
+    #[test]
+    fn hit_test_prefers_window_close_x_over_window_row() {
+        let mut regions = Regions::default();
+        regions.windows[0] = Rect::new(10, 5, 20, 1);
+        regions.window_close[0] = Rect::new(28, 5, 2, 1);
+        regions.window_count = 1;
+
+        assert_eq!(
+            hit_test(28, 5, &regions, false),
+            Some(Hotspot::WindowClose(0))
+        );
+        assert_eq!(hit_test(12, 5, &regions, false), Some(Hotspot::Window(0)));
+    }
+
+    #[test]
+    fn hit_test_distinguishes_modal_new_session_and_detach_buttons() {
+        let mut regions = Regions::default();
+        regions.modal_new_session = Rect::new(5, 20, 12, 3);
+        regions.modal_detach = Rect::new(18, 20, 10, 3);
+
+        assert_eq!(
+            hit_test(6, 21, &regions, true),
+            Some(Hotspot::ModalNewSession)
+        );
+        assert_eq!(hit_test(19, 21, &regions, true), Some(Hotspot::ModalDetach));
+    }
 }

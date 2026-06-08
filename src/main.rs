@@ -1,8 +1,9 @@
 //! tuimux — a prefix-free, mouse-first TUI front-end for tmux.
 //!
 //! See `docs/prd.md` and `docs/srs.md` for the full design. This binary is an
-//! early MVP scaffold: the CLI plumbing, environment checks, layout preview, and
-//! a ratatui UI shell are real; the tmux control-mode client is the next step.
+//! early MVP: the CLI plumbing, environment checks, layout preview, session/window
+//! controls, and first tmux-backed pane interaction are real; full control-mode
+//! streaming remains the next step.
 
 mod doctor;
 mod preview;
@@ -25,8 +26,8 @@ use preview::PreviewData;
     about = "Prefix-free, mouse-first TUI front-end for tmux (VS Code-inspired layout)",
     long_about = "tuimux is a TUI front-end for tmux. It renders a VS Code-inspired layout \n\
                   (center panes, right Session/Detach/window controls) \n\
-                  and drives a tmux server over control mode.\n\n\
-                  This is an early MVP scaffold. Run with no flags to open the UI, or use \n\
+                  and drives a tmux server through tmux commands today, with full control-mode streaming planned.\n\n\
+                  This is an early 0.x MVP. Run with no flags to open the UI, or use \n\
                   --layout-preview / --doctor for non-interactive output."
 )]
 struct Cli {
@@ -57,7 +58,7 @@ fn main() -> ExitCode {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // --layout-preview: static text mock of the UI.
+    // --layout-preview: static text preview of the UI.
     if cli.layout_preview {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let data = PreviewData::default();

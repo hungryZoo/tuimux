@@ -1,9 +1,9 @@
 //! tmux discovery, command execution, and state parsing.
 //!
-//! tuimux is a front-end for a tmux server. v0.1.4 still does not implement the
-//! full `tmux -CC` control-mode renderer, but it does use real tmux commands for
-//! the session/window sidebar: list sessions, list windows, switch/create, and
-//! detach.
+//! tuimux is a front-end for a tmux server. v0.1.5 uses real tmux commands for
+//! the session/window/sidebar and a first functional pane loop: `capture-pane`
+//! for rendering and `send-keys` for keyboard input. Full `tmux -CC` streaming is
+//! still a later milestone.
 
 use std::fmt;
 use std::process::Command;
@@ -254,6 +254,36 @@ impl<R: TmuxRunner> Tmux<R> {
         self.runner.run(&new_window_args(session)).map(|_| ())
     }
 
+    pub fn kill_window(&self, session: &str, index: u32) -> Result<(), TmuxError> {
+        self.runner
+            .run(&kill_window_args(session, index))
+            .map(|_| ())
+    }
+
+    pub fn resize_window(&self, session: &str, width: u16, height: u16) -> Result<(), TmuxError> {
+        self.runner
+            .run(&resize_window_args(session, width, height))
+            .map(|_| ())
+    }
+
+    pub fn capture_pane(
+        &self,
+        session: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<Vec<String>, TmuxError> {
+        let _ = self.resize_window(session, width.max(1), height.max(1));
+        match self.runner.run(&capture_pane_args(session, width, height)) {
+            Ok(stdout) => Ok(parse_capture(&stdout)),
+            Err(err) if is_no_server_error(&err) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn send_keys(&self, session: &str, keys: &[String]) -> Result<(), TmuxError> {
+        self.runner.run(&send_keys_args(session, keys)).map(|_| ())
+    }
+
     pub fn detach(&self) -> Result<(), TmuxError> {
         if self.runner.inside_tmux() {
             self.runner.run(&detach_args()).map(|_| ())
@@ -303,6 +333,14 @@ pub(crate) fn parse_windows(raw: &str) -> Vec<Window> {
             })
         })
         .collect()
+}
+
+pub(crate) fn parse_capture(raw: &str) -> Vec<String> {
+    let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
 }
 
 pub(crate) fn list_sessions_args() -> Vec<String> {
@@ -362,6 +400,47 @@ pub(crate) fn new_window_args(session: &str) -> Vec<String> {
         "-t".to_string(),
         session.to_string(),
     ]
+}
+
+pub(crate) fn kill_window_args(session: &str, index: u32) -> Vec<String> {
+    vec![
+        "kill-window".to_string(),
+        "-t".to_string(),
+        format!("{session}:{index}"),
+    ]
+}
+
+pub(crate) fn resize_window_args(session: &str, width: u16, height: u16) -> Vec<String> {
+    vec![
+        "resize-window".to_string(),
+        "-t".to_string(),
+        session.to_string(),
+        "-x".to_string(),
+        width.max(1).to_string(),
+        "-y".to_string(),
+        height.max(1).to_string(),
+    ]
+}
+
+pub(crate) fn capture_pane_args(session: &str, _width: u16, height: u16) -> Vec<String> {
+    vec![
+        "capture-pane".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        session.to_string(),
+        "-S".to_string(),
+        format!("-{}", height.max(1)),
+    ]
+}
+
+pub(crate) fn send_keys_args(session: &str, keys: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "send-keys".to_string(),
+        "-t".to_string(),
+        session.to_string(),
+    ];
+    args.extend(keys.iter().cloned());
+    args
 }
 
 pub(crate) fn detach_args() -> Vec<String> {
@@ -511,5 +590,31 @@ mod tests {
         );
         assert_eq!(new_window_args("dev"), vec!["new-window", "-t", "dev"]);
         assert_eq!(detach_args(), vec!["detach-client"]);
+    }
+
+    #[test]
+    fn tmux_command_args_cover_real_pane_and_window_actions() {
+        assert_eq!(
+            capture_pane_args("dev", 80, 20),
+            vec!["capture-pane", "-p", "-t", "dev", "-S", "-20"]
+        );
+        assert_eq!(
+            send_keys_args("dev", &["-l".to_string(), "a".to_string()]),
+            vec!["send-keys", "-t", "dev", "-l", "a"]
+        );
+        assert_eq!(
+            kill_window_args("dev", 2),
+            vec!["kill-window", "-t", "dev:2"]
+        );
+        assert_eq!(
+            resize_window_args("dev", 100, 30),
+            vec!["resize-window", "-t", "dev", "-x", "100", "-y", "30"]
+        );
+    }
+
+    #[test]
+    fn parses_capture_output_and_trims_trailing_blank_lines() {
+        assert_eq!(parse_capture("alpha\nbeta\n\n"), vec!["alpha", "beta"]);
+        assert_eq!(parse_capture(""), Vec::<String>::new());
     }
 }

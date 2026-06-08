@@ -16,13 +16,13 @@ See:
 
 ## Current prerelease scope
 
-This is not the complete tmux control-mode implementation yet. The current binary is a testable MVP scaffold that includes:
+This is still a 0.x prerelease. The current binary now includes a functional tmux-backed TUI:
 
 - `tuimux --help`
 - `tuimux --version`
 - `tuimux --doctor` to check tmux and terminal readiness
 - `tuimux --layout-preview` to render the planned compact VS Code-like layout
-- a safe interactive TUI shell that shows real tmux sessions/windows in the right sidebar, supports window selection/creation, best-effort detach, session creation with `n` while the modal is open, and exits with `q`/`Esc`
+- a safe interactive TUI shell with no top header row, real tmux session/window controls, `New Session`, window close `✕`, and a real tmux pane rendered from `capture-pane` with keyboard input forwarded by `send-keys` after clicking the pane (`F12` returns to navigation mode)
 
 ## macOS install
 
@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.1.4 \
+TUIMUX_VERSION=v0.1.5 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 
@@ -77,4 +77,4 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.1.4` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.
+Pushing a tag like `v0.1.5` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.

@@ -1,17 +1,15 @@
 //! Simplified layout preview (SRS §5.1).
 //!
-//! Renders the tuimux screen as a static text mock: a center tmux pane area, a
-//! compact right sidebar with a button-like session name, a red Detach button,
+//! Renders the tuimux screen as a static text preview: a center tmux pane area,
+//! a compact right sidebar with a button-like session name, a red Detach button,
 //! vertical window tabs, and a centered session dialog scaffold. The early
 //! explorer, bottom menu bar, and PROCS panel were intentionally removed.
 
 use std::path::Path;
 
-/// Mock content for the regions that aren't wired to a real tmux server yet.
-/// In the live client these come from control-mode events; here they are static
-/// so the preview is reproducible.
+/// Preview content. The live client reads equivalent data from tmux commands;
+/// this static data keeps --layout-preview reproducible.
 pub struct PreviewData {
-    pub session: String,
     pub sessions: Vec<(&'static str, u32, bool)>, // (name, windows, active)
     pub windows: Vec<(u32, &'static str, bool)>,  // (index, name, active)
     pub panes: Vec<&'static str>,
@@ -20,7 +18,6 @@ pub struct PreviewData {
 impl Default for PreviewData {
     fn default() -> Self {
         PreviewData {
-            session: "dev".to_string(),
             sessions: vec![("dev", 3, true), ("work", 2, false), ("scratch", 1, false)],
             windows: vec![(1, "build", true), (2, "logs", false), (3, "ssh", false)],
             panes: vec![
@@ -78,8 +75,8 @@ pub fn render(_base: &Path, data: &PreviewData, width: usize, height: usize) -> 
     let right_w = 22usize;
     let main_w = width.saturating_sub(right_w + 3);
 
-    // Body height = total - top border - status - separator - bottom border.
-    let body_h = height.saturating_sub(4).max(8);
+    // Body height = total - top border - separator - bottom border.
+    let body_h = height.saturating_sub(3).max(8);
 
     let main = main_column(&data.panes, main_w, body_h);
     let right = right_column(data, right_w, body_h);
@@ -89,11 +86,6 @@ pub fn render(_base: &Path, data: &PreviewData, width: usize, height: usize) -> 
     out.push('┌');
     out.push_str(&"─".repeat(width - 2));
     out.push_str("┐\n");
-
-    let status = format!(" tuimux · {} · 1 client · scaffold preview ", data.session);
-    out.push('│');
-    out.push_str(&fit(&status, width - 2));
-    out.push_str("│\n");
 
     out.push('├');
     out.push_str(&"─".repeat(main_w));
@@ -121,8 +113,6 @@ pub fn render(_base: &Path, data: &PreviewData, width: usize, height: usize) -> 
 
 fn main_column(panes: &[&str], w: usize, h: usize) -> Vec<String> {
     let mut rows = Vec::with_capacity(h);
-    rows.push(fit("MAIN AREA (tmux panes — mock)", w));
-    rows.push(fit(&"─".repeat(w), w));
     for line in panes {
         if rows.len() >= h {
             break;
@@ -144,13 +134,25 @@ fn right_column(data: &PreviewData, w: usize, h: usize) -> Vec<String> {
             break;
         }
         let marker = if *active { "▸" } else { " " };
-        rows.push(fit(&format!("{marker} {idx}: {name}"), w));
+        rows.push(fit(
+            &row_with_close(&format!("{marker} {idx}: {name}"), w),
+            w,
+        ));
     }
     if rows.len() < h {
         rows.push(fit("  + new", w));
     }
 
     pad_rows(rows, w, h)
+}
+
+fn row_with_close(label: &str, w: usize) -> String {
+    if w <= 2 {
+        return fit("✕", w);
+    }
+    let close = "✕";
+    let label_w = w.saturating_sub(close.chars().count() + 1);
+    format!("{} {}", fit(label, label_w), close)
 }
 
 fn center_button(label: &str, w: usize) -> String {
@@ -191,7 +193,7 @@ fn overlay_session_dialog(out: &mut String, data: &PreviewData, width: usize) {
     out.push_str("│\n");
     out.push_str(&indent);
     out.push('│');
-    out.push_str(&fit(" [ Detach ]                 Esc", dialog_w - 2));
+    out.push_str(&fit(" [ New Session ]   [ Detach ]", dialog_w - 2));
     out.push_str("│\n");
     out.push_str(&indent);
     out.push('└');
@@ -249,8 +251,29 @@ mod tests {
         );
         assert!(out.contains("WINDOWS"));
         assert!(
+            out.contains('✕'),
+            "window rows should expose a right-side close button"
+        );
+        assert!(
+            out.contains("[ New Session ]"),
+            "session dialog should expose an explicit New Session button"
+        );
+        assert!(
             out.contains("● dev"),
             "session list still shows the active session name"
+        );
+
+        assert!(
+            !out.contains("MAIN AREA"),
+            "main pane border/header should not expose internal wording"
+        );
+        assert!(
+            !out.contains("mock"),
+            "preview should not call the main pane a mock"
+        );
+        assert!(
+            !out.contains(" tuimux ·"),
+            "top header/status row was removed"
         );
 
         assert!(
