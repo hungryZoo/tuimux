@@ -1,8 +1,8 @@
 //! tuimux — a prefix-free, mouse-first TUI front-end for tmux.
 //!
 //! See `docs/prd.md` and `docs/srs.md` for the full design. This binary is an
-//! early MVP. As of v0.1.7 the default path is intentionally tmux-native: it
-//! opens a real tmux client instead of trying to emulate a shell in ratatui.
+//! early MVP. The default path must show the tuimux ratatui interface; a plain
+//! native tmux client is available only as an explicit fallback.
 
 mod doctor;
 mod preview;
@@ -22,11 +22,10 @@ use preview::PreviewData;
 #[command(
     name = "tuimux",
     version,
-    about = "Prefix-free, mouse-first TUI front-end for tmux (tmux-native)",
-    long_about = "tuimux is a TUI front-end for tmux. Its default mode opens a real tmux client \n\
-                  instead of scraping and replaying a shell. That keeps ls, nano/vim/less, mouse \n\
-                  wheel, UTF-8/CJK text, alternate screen, and copy-mode behavior owned by tmux.\n\n\
-                  This is an early 0.x MVP. Run with no flags to attach a tmux session, or use \n\
+    about = "Prefix-free, mouse-first TUI front-end for tmux",
+    long_about = "tuimux is a TUI front-end for tmux. Its default mode opens the tuimux ratatui \n\
+                  interface with a mouse-first session/window sidebar over live tmux state.\n\n\
+                  This is an early 0.x MVP. Run with no flags to start the TUI, or use \n\
                   --layout-preview / --doctor for non-interactive output."
 )]
 struct Cli {
@@ -38,9 +37,13 @@ struct Cli {
     #[arg(long)]
     layout_preview: bool,
 
-    /// Run the experimental ratatui dashboard prototype instead of a native tmux client.
+    /// Run the ratatui dashboard. This is the default and kept for compatibility.
     #[arg(long, hide = true)]
     dashboard: bool,
+
+    /// Fallback: open a plain native tmux client instead of the tuimux TUI.
+    #[arg(long, hide = true)]
+    native_client: bool,
 
     /// tmux session to create/attach. Defaults to `tuimux`.
     #[arg(long, value_name = "NAME", default_value = "tuimux")]
@@ -92,10 +95,9 @@ fn main() -> ExitCode {
                 );
             }
 
-            let result = if cli.dashboard {
-                tui::run(&probe)
-            } else {
-                run_native_tmux(&probe, &cli.session)
+            let result = match choose_run_mode(&cli) {
+                RunMode::Dashboard => tui::run(&probe),
+                RunMode::NativeClient => run_native_tmux(&probe, &cli.session),
             };
 
             match result {
@@ -133,7 +135,52 @@ fn run_native_tmux(probe: &tmux::TmuxProbe, session: &str) -> std::io::Result<i3
     Ok(0)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    Dashboard,
+    NativeClient,
+}
+
+fn choose_run_mode(cli: &Cli) -> RunMode {
+    if cli.native_client {
+        RunMode::NativeClient
+    } else {
+        RunMode::Dashboard
+    }
+}
+
 /// Convert a small integer exit code into a `process::ExitCode`.
 fn code(rc: i32) -> ExitCode {
     ExitCode::from(rc.clamp(0, 255) as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cli_without_flags() -> Cli {
+        Cli {
+            doctor: false,
+            layout_preview: false,
+            dashboard: false,
+            native_client: false,
+            session: "tuimux".to_string(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn default_run_mode_is_ratatui_dashboard_not_plain_tmux_client() {
+        let cli = cli_without_flags();
+
+        assert_eq!(RunMode::Dashboard, choose_run_mode(&cli));
+    }
+
+    #[test]
+    fn explicit_native_client_mode_is_opt_in_only() {
+        let mut cli = cli_without_flags();
+        cli.native_client = true;
+
+        assert_eq!(RunMode::NativeClient, choose_run_mode(&cli));
+    }
 }

@@ -1,8 +1,8 @@
 # tuimux
 
-`tuimux` is an early Rust MVP for a prefix-free, mouse-first wrapper around tmux.
+`tuimux` is an early Rust MVP for a prefix-free, mouse-first TUI wrapper around tmux.
 
-The v0.1.7 reset is intentionally **tmux-native**: the default command opens a real tmux client instead of scraping `capture-pane` and replaying input with `send-keys`. That means `ls`, `clear`, `nano`/`vim`/`less`, mouse wheel/copy-mode, and Korean/CJK text are handled by tmux and your terminal — not by a fake shell renderer.
+v0.1.8 restores the expected tuimux TUI as the default. Running `tuimux` opens the ratatui interface with a live tmux-backed main pane plus right sidebar session/window controls. v0.1.7 accidentally made the default command launch plain tmux with no tuimux UI; that path is now opt-in only via the hidden `--native-client` fallback.
 
 See:
 
@@ -13,13 +13,13 @@ See:
 
 This is still a 0.x prerelease. Current behavior:
 
-- `tuimux` creates/attaches session `tuimux` through real tmux.
-- `tuimux --session dev` creates/attaches/switches to session `dev`.
-- tmux mouse mode is enabled with `tmux set-option -gq mouse on`.
-- outside tmux: runs `tmux -u attach-session -t <session>`.
-- inside tmux: runs `tmux switch-client -t <session>` to avoid nested clients.
+- `tuimux` opens the tuimux TUI by default.
+- The sidebar shows the current session, Detach, windows, `✕` window close buttons, and `+ new`.
+- The session dialog opens by default and includes session selection, `New Session`, and `Detach`.
+- Session/window operations use real tmux commands.
+- The main pane is a live tmux pane snapshot/input bridge; it is not yet a full terminal emulator.
+- `tuimux --native-client` is a hidden fallback that opens a plain tmux client if needed.
 - `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
-- the old ratatui dashboard prototype is hidden behind `--dashboard` and is not the default shell experience.
 
 ## macOS install
 
@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.1.7 \
+TUIMUX_VERSION=v0.1.8 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 
@@ -54,7 +54,7 @@ Verify:
 ```sh
 tuimux --version
 tuimux --doctor
-tuimux --session dev
+tuimux
 ```
 
 ## Build from source
@@ -74,4 +74,4 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.1.7` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.
+Pushing a tag like `v0.1.8` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.

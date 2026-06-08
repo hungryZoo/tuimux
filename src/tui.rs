@@ -1,8 +1,9 @@
-//! Experimental dashboard prototype (`tuimux --dashboard`).
+//! Default tuimux ratatui interface.
 //!
-//! The default v0.1.7 command path does **not** use this renderer; it opens a
-//! real tmux client. This module remains only as a hidden prototype for future
-//! sidebar/control-mode experiments.
+//! v0.1.8 restores this UI as the default after v0.1.7 accidentally launched a
+//! plain tmux client with no tuimux chrome. It remains an early live tmux-state
+//! dashboard: session/window controls are real, while pane rendering still uses
+//! `capture-pane` until a proper control-mode renderer lands.
 //!
 //! If there is no tmux server yet, tuimux creates a detached session named
 //! `tuimux` so the UI always has something real to show.

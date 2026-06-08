@@ -1,9 +1,8 @@
 //! tmux discovery, command execution, and state parsing.
 //!
-//! tuimux is a front-end for a tmux server. v0.1.7 defaults to a real tmux
-//! client (`tmux -u attach-session` / `switch-client`) instead of trying to
-//! emulate a shell with screen snapshots. The command helpers below still cover
-//! the experimental dashboard prototype and non-interactive state inspection.
+//! tuimux is a front-end for a tmux server. v0.1.8 restores the ratatui UI as
+//! the default; the native tmux client helpers remain as an explicit fallback
+//! and for non-interactive state inspection.
 
 use std::fmt;
 use std::process::Command;

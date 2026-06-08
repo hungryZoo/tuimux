@@ -148,7 +148,7 @@ jobs:
 
             Early MVP scaffold. macOS arm64 and x86_64 binaries are attached.
 
-            This prerelease resets the default UX to a real tmux client instead of a scraped shell renderer. `tuimux` now creates/attaches the target session with `tmux -u attach-session`, uses `switch-client` when already inside tmux, and enables `mouse on` so ls, nano/vim/less, wheel/copy-mode, and Korean/CJK text stay owned by tmux and the user's terminal.
+            This prerelease fixes the v0.1.7 regression where `tuimux` launched plain tmux with no tuimux UI. The default command now opens the tuimux ratatui interface again, with live tmux-backed session/window controls and right sidebar. The plain native tmux client path remains available only as the hidden `--native-client` fallback.
 
             ### Install (one-liner)
             ```sh
