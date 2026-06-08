@@ -88,15 +88,13 @@ api_get() {
 
 VERSION="${TUIMUX_VERSION:-}"
 if [ -z "$VERSION" ]; then
-  info "Resolving latest release tag…"
-  if [ -n "${GITHUB_TOKEN:-}" ]; then
-    # Private repos must go through the API.
-    VERSION="$(api_get /releases/latest | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
-  else
-    # Public: follow the /releases/latest redirect to read the tag without auth.
-    VERSION="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | sed -E 's#.*/tag/##')"
-  fi
-  [ -n "$VERSION" ] && [ "$VERSION" != "releases" ] || die "could not determine the latest release tag. Set TUIMUX_VERSION=vX.Y.Z explicitly."
+  info "Resolving latest release/prerelease tag…"
+  # GitHub's /releases/latest intentionally ignores prereleases. tuimux is still
+  # prerelease-only, so list releases and pick the newest tag instead. This works
+  # for public repos without auth and for private repos when GITHUB_TOKEN is set.
+  RELEASES_JSON="$(api_get '/releases?per_page=20')"
+  VERSION="$(printf '%s\n' "$RELEASES_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
+  [ -n "$VERSION" ] || die "could not determine the latest release tag. Set TUIMUX_VERSION=vX.Y.Z explicitly."
 fi
 info "Installing ${BINARY} ${BOLD}${VERSION}${RESET}"
 
