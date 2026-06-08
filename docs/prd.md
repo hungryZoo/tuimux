@@ -2,7 +2,7 @@
 
 - **문서 버전**: 0.8 (Draft)
 - **작성일**: 2026-06-08
-- **상태**: v0.1.8 TUI 기본값 복구 기준
+- **상태**: v0.1.9 TUI 기본값 복구 기준
 - **프로젝트명**: tuimux
 - **한 줄 요약**: tmux backend를 쓰되, 사용자가 실행하면 반드시 tuimux의 prefix-free/mouse-first TUI가 보이는 Rust 기반 wrapper.
 
@@ -44,13 +44,13 @@ v0.1.7은 `capture-pane` + `send-keys` shell emulation의 한계를 피하려고
 
 ## 4. 비목표
 
-- v0.1.8에서 완전한 VT parser/control-mode terminal renderer를 완성하지 않는다.
-- v0.1.8에서 plain tmux client를 기본 UX로 삼지 않는다.
+- v0.1.9에서 완전한 VT parser/control-mode terminal renderer를 완성하지 않는다.
+- v0.1.9에서 plain tmux client를 기본 UX로 삼지 않는다.
 - shell fidelity 문제를 “TUI 제거”로 해결하지 않는다.
 
 ---
 
-## 5. v0.1.8 사용자 경험
+## 5. v0.1.9 사용자 경험
 
 ### 기본 실행
 
@@ -85,7 +85,7 @@ tuimux --native-client --session dev
 
 ## 6. 향후 UX 방향
 
-v0.1.8 이후 main pane fidelity는 다음 중 하나로 개선한다.
+v0.1.9 이후 main pane fidelity는 다음 중 하나로 개선한다.
 
 ### Option A. tmux control-mode client
 
@@ -102,11 +102,11 @@ v0.1.8 이후 main pane fidelity는 다음 중 하나로 개선한다.
 ## 7. 성공 기준
 
 - `cargo test --quiet`가 통과한다.
-- `cargo run --quiet -- --version`은 `tuimux 0.1.8`을 출력한다.
+- `cargo run --quiet -- --version`은 `tuimux 0.1.9`을 출력한다.
 - `cargo run --quiet -- --layout-preview`에 `Session`, `Detach`, `WINDOWS`, `New Session`이 나타난다.
 - PTY smoke test에서 인자 없는 `tuimux` 실행 시 plain tmux attach escape가 아니라 tuimux UI 문자열이 나타난다.
 - `--native-client`는 opt-in으로만 plain tmux client를 실행한다.
-- release installer로 macOS v0.1.8 artifacts를 설치할 수 있다.
+- release installer로 macOS v0.1.9 artifacts를 설치할 수 있다.
 
 ---
 

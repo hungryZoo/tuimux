@@ -1,6 +1,6 @@
 //! Default tuimux ratatui interface.
 //!
-//! v0.1.8 restores this UI as the default after v0.1.7 accidentally launched a
+//! v0.1.9 keeps this UI as the default after v0.1.7 accidentally launched a
 //! plain tmux client with no tuimux chrome. It remains an early live tmux-state
 //! dashboard: session/window controls are real, while pane rendering still uses
 //! `capture-pane` until a proper control-mode renderer lands.
@@ -73,6 +73,7 @@ struct UiState {
     /// was refused outside tmux, or that a window was created).
     status: Option<String>,
     pane_lines: Vec<String>,
+    last_pane_size: Option<(u16, u16)>,
     terminal_mode: bool,
     /// Monotonic counter behind the `tuimux-<n>` names created by the `n` key.
     new_session_counter: u32,
@@ -93,6 +94,7 @@ impl UiState {
             current_session: String::new(),
             status: None,
             pane_lines: Vec::new(),
+            last_pane_size: None,
             terminal_mode: false,
             new_session_counter: 0,
         };
@@ -132,9 +134,18 @@ impl UiState {
     fn refresh_pane(&mut self, tmux: &Tmux<RealTmux>, width: u16, height: u16) {
         if self.current_session.is_empty() {
             self.pane_lines.clear();
+            self.last_pane_size = None;
             return;
         }
-        match tmux.capture_pane(&self.current_session, width, height) {
+        let size = (width.max(1), height.max(1));
+        if self.last_pane_size != Some(size) {
+            if let Err(e) = tmux.resize_window(&self.current_session, size.0, size.1) {
+                self.status = Some(format!("resize-window failed: {e}"));
+            } else {
+                self.last_pane_size = Some(size);
+            }
+        }
+        match tmux.capture_pane(&self.current_session, size.0, size.1) {
             Ok(lines) => self.pane_lines = lines,
             Err(e) => self.status = Some(format!("capture-pane failed: {e}")),
         }
@@ -147,6 +158,7 @@ impl UiState {
             self.current_session = self.pick_current();
         }
         self.reload_windows(tmux);
+        self.last_pane_size = None;
     }
 
     /// Next free `tuimux-<n>` session name, skipping any that already exist.
@@ -383,6 +395,7 @@ fn switch_session(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
         state.session_modal_open = false;
         state.status = Some(format!("selected session '{name}'"));
         state.reload_windows(tmux);
+        state.last_pane_size = None;
     }
 }
 
@@ -456,7 +469,7 @@ fn render_main(
             "tmux pane is empty; click here and type, F12 returns to navigation",
         )]
     } else {
-        pane_lines.iter().map(|p| Line::from(p.as_str())).collect()
+        pane_lines.iter().map(|p| pane_line_from_ansi(p)).collect()
     };
     if let Some(last) = lines.last_mut() {
         last.spans.push(Span::raw(" "));
@@ -472,6 +485,183 @@ fn render_main(
             .border_style(Style::default().fg(border)),
     );
     f.render_widget(para, area);
+}
+
+fn pane_line_from_ansi(raw: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut style = Style::default();
+    let mut text = String::new();
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            flush_span(&mut spans, &mut text, style);
+            if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                if let Some((seq, next)) = read_csi(raw, i + 2) {
+                    if seq.ends_with('m') {
+                        apply_sgr(&seq[..seq.len().saturating_sub(1)], &mut style);
+                    }
+                    i = next;
+                    continue;
+                }
+            } else if i + 1 < bytes.len() && bytes[i + 1] == b']' {
+                i = skip_osc(bytes, i + 2);
+                continue;
+            } else {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+        }
+
+        if let Some(ch) = raw[i..].chars().next() {
+            if ch == '\u{8}' || ch == '\r' {
+                i += ch.len_utf8();
+                continue;
+            }
+            text.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    flush_span(&mut spans, &mut text, style);
+    if spans.is_empty() {
+        spans.push(Span::raw(String::new()));
+    }
+    Line::from(spans)
+}
+
+fn flush_span(spans: &mut Vec<Span<'static>>, text: &mut String, style: Style) {
+    if !text.is_empty() {
+        spans.push(Span::styled(std::mem::take(text), style));
+    }
+}
+
+fn read_csi(raw: &str, start: usize) -> Option<(&str, usize)> {
+    let mut end = start;
+    for ch in raw[start..].chars() {
+        end += ch.len_utf8();
+        if ('@'..='~').contains(&ch) {
+            return Some((&raw[start..end], end));
+        }
+    }
+    None
+}
+
+fn skip_osc(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() {
+        if bytes[i] == 0x07 {
+            return i + 1;
+        }
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
+            return i + 2;
+        }
+        i += 1;
+    }
+    i
+}
+
+fn apply_sgr(params: &str, style: &mut Style) {
+    let mut nums: Vec<u16> = if params.is_empty() {
+        vec![0]
+    } else {
+        params
+            .split(';')
+            .map(|p| {
+                if p.is_empty() {
+                    0
+                } else {
+                    p.parse().unwrap_or(0)
+                }
+            })
+            .collect()
+    };
+    if nums.is_empty() {
+        nums.push(0);
+    }
+
+    let mut i = 0;
+    while i < nums.len() {
+        match nums[i] {
+            0 => *style = Style::default(),
+            1 => style.add_modifier |= Modifier::BOLD,
+            2 => style.add_modifier |= Modifier::DIM,
+            3 => style.add_modifier |= Modifier::ITALIC,
+            4 => style.add_modifier |= Modifier::UNDERLINED,
+            7 => style.add_modifier |= Modifier::REVERSED,
+            22 => {
+                style.add_modifier.remove(Modifier::BOLD | Modifier::DIM);
+                style.sub_modifier |= Modifier::BOLD | Modifier::DIM;
+            }
+            23 => {
+                style.add_modifier.remove(Modifier::ITALIC);
+                style.sub_modifier |= Modifier::ITALIC;
+            }
+            24 => {
+                style.add_modifier.remove(Modifier::UNDERLINED);
+                style.sub_modifier |= Modifier::UNDERLINED;
+            }
+            27 => {
+                style.add_modifier.remove(Modifier::REVERSED);
+                style.sub_modifier |= Modifier::REVERSED;
+            }
+            30..=37 => style.fg = Some(ansi_basic_color(nums[i] - 30, false)),
+            40..=47 => style.bg = Some(ansi_basic_color(nums[i] - 40, false)),
+            90..=97 => style.fg = Some(ansi_basic_color(nums[i] - 90, true)),
+            100..=107 => style.bg = Some(ansi_basic_color(nums[i] - 100, true)),
+            39 => style.fg = None,
+            49 => style.bg = None,
+            38 | 48 => {
+                let is_fg = nums[i] == 38;
+                if i + 2 < nums.len() && nums[i + 1] == 5 {
+                    let color = Color::Indexed(nums[i + 2].min(255) as u8);
+                    if is_fg {
+                        style.fg = Some(color);
+                    } else {
+                        style.bg = Some(color);
+                    }
+                    i += 2;
+                } else if i + 4 < nums.len() && nums[i + 1] == 2 {
+                    let color = Color::Rgb(
+                        nums[i + 2].min(255) as u8,
+                        nums[i + 3].min(255) as u8,
+                        nums[i + 4].min(255) as u8,
+                    );
+                    if is_fg {
+                        style.fg = Some(color);
+                    } else {
+                        style.bg = Some(color);
+                    }
+                    i += 4;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+fn ansi_basic_color(idx: u16, bright: bool) -> Color {
+    match (idx, bright) {
+        (0, false) => Color::Black,
+        (1, false) => Color::Red,
+        (2, false) => Color::Green,
+        (3, false) => Color::Yellow,
+        (4, false) => Color::Blue,
+        (5, false) => Color::Magenta,
+        (6, false) => Color::Cyan,
+        (7, false) => Color::Gray,
+        (0, true) => Color::DarkGray,
+        (1, true) => Color::LightRed,
+        (2, true) => Color::LightGreen,
+        (3, true) => Color::LightYellow,
+        (4, true) => Color::LightBlue,
+        (5, true) => Color::LightMagenta,
+        (6, true) => Color::LightCyan,
+        (7, true) => Color::White,
+        _ => Color::Reset,
+    }
 }
 
 fn render_sidebar(
@@ -731,12 +921,18 @@ fn key_event_to_send_keys(key: KeyEvent) -> Option<Vec<String>> {
         KeyCode::Char(c) => Some(vec!["-l".to_string(), c.to_string()]),
         KeyCode::Enter => Some(vec!["Enter".to_string()]),
         KeyCode::Backspace => Some(vec!["BSpace".to_string()]),
+        KeyCode::Delete => Some(vec!["Delete".to_string()]),
+        KeyCode::Home => Some(vec!["Home".to_string()]),
+        KeyCode::End => Some(vec!["End".to_string()]),
+        KeyCode::PageUp => Some(vec!["PageUp".to_string()]),
+        KeyCode::PageDown => Some(vec!["PageDown".to_string()]),
         KeyCode::Tab => Some(vec!["Tab".to_string()]),
         KeyCode::Esc => Some(vec!["Escape".to_string()]),
         KeyCode::Left => Some(vec!["Left".to_string()]),
         KeyCode::Right => Some(vec!["Right".to_string()]),
         KeyCode::Up => Some(vec!["Up".to_string()]),
         KeyCode::Down => Some(vec!["Down".to_string()]),
+        KeyCode::F(n) => Some(vec![format!("F{n}")]),
         _ => None,
     }
 }
@@ -831,6 +1027,30 @@ mod tests {
             Some(vec!["BSpace".to_string()])
         );
         assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Delete, KeyModifiers::NONE)),
+            Some(vec!["Delete".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::Home, KeyModifiers::NONE)),
+            Some(vec!["Home".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::End, KeyModifiers::NONE)),
+            Some(vec!["End".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::PageUp, KeyModifiers::NONE)),
+            Some(vec!["PageUp".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::PageDown, KeyModifiers::NONE)),
+            Some(vec!["PageDown".to_string()])
+        );
+        assert_eq!(
+            key_event_to_send_keys(key(KeyCode::F(5), KeyModifiers::NONE)),
+            Some(vec!["F5".to_string()])
+        );
+        assert_eq!(
             key_event_to_send_keys(key(KeyCode::Left, KeyModifiers::NONE)),
             Some(vec!["Left".to_string()])
         );
@@ -890,6 +1110,28 @@ mod tests {
         assert_eq!(last.content.as_ref(), "✕");
         assert_eq!(last.style.fg, Some(Color::Red));
         assert_eq!(last.style.bg, Some(Color::Black));
+    }
+
+    #[test]
+    fn ansi_sgr_parser_applies_color_and_removes_escape_glyphs() {
+        let line = pane_line_from_ansi("normal \x1b[31mred\x1b[0m done");
+        assert_eq!(line.spans.len(), 3);
+        assert_eq!(line.spans[0].content.as_ref(), "normal ");
+        assert_eq!(line.spans[1].content.as_ref(), "red");
+        assert_eq!(line.spans[1].style.fg, Some(Color::Red));
+        assert_eq!(line.spans[2].content.as_ref(), " done");
+        assert_eq!(line.spans[2].style.fg, None);
+    }
+
+    #[test]
+    fn ansi_sgr_parser_supports_256_color_truecolor_and_reverse() {
+        let line = pane_line_from_ansi("\x1b[38;5;196mhot\x1b[48;2;1;2;3;7mrev\x1b[0m");
+        assert_eq!(line.spans[0].style.fg, Some(Color::Indexed(196)));
+        assert_eq!(line.spans[1].style.bg, Some(Color::Rgb(1, 2, 3)));
+        assert!(line.spans[1]
+            .style
+            .add_modifier
+            .contains(Modifier::REVERSED));
     }
 
     #[test]

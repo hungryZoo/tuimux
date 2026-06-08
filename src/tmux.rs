@@ -1,6 +1,6 @@
 //! tmux discovery, command execution, and state parsing.
 //!
-//! tuimux is a front-end for a tmux server. v0.1.8 restores the ratatui UI as
+//! tuimux is a front-end for a tmux server. v0.1.9 keeps the ratatui UI as
 //! the default; the native tmux client helpers remain as an explicit fallback
 //! and for non-interactive state inspection.
 
@@ -297,12 +297,21 @@ impl<R: TmuxRunner> Tmux<R> {
         width: u16,
         height: u16,
     ) -> Result<Vec<String>, TmuxError> {
-        let _ = (width, height);
+        let _ = width;
         match self.runner.run(&capture_pane_args(session)) {
-            Ok(stdout) => Ok(parse_capture(&stdout)),
+            Ok(stdout) => Ok(parse_pane_screen(&stdout, height)),
             Err(err) if is_no_server_error(&err) => Ok(Vec::new()),
             Err(err) => Err(err),
         }
+    }
+
+    pub fn resize_window(&self, session: &str, width: u16, height: u16) -> Result<(), TmuxError> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        self.runner
+            .run(&resize_window_args(session, width, height))
+            .map(|_| ())
     }
 
     pub fn send_keys(&self, session: &str, keys: &[String]) -> Result<(), TmuxError> {
@@ -360,10 +369,17 @@ pub(crate) fn parse_windows(raw: &str) -> Vec<Window> {
         .collect()
 }
 
-pub(crate) fn parse_capture(raw: &str) -> Vec<String> {
-    let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+pub(crate) fn parse_pane_screen(raw: &str, height: u16) -> Vec<String> {
+    let mut lines: Vec<String> = raw.split('\n').map(str::to_string).collect();
+    if raw.ends_with('\n') {
         lines.pop();
+    }
+    let height = height as usize;
+    if height > 0 {
+        lines.truncate(height);
+        while lines.len() < height {
+            lines.push(String::new());
+        }
     }
     lines
 }
@@ -461,10 +477,22 @@ pub(crate) fn kill_window_args(session: &str, index: u32) -> Vec<String> {
     ]
 }
 
+pub(crate) fn resize_window_args(session: &str, width: u16, height: u16) -> Vec<String> {
+    vec![
+        "resize-window".to_string(),
+        "-t".to_string(),
+        format!("{session}:"),
+        "-x".to_string(),
+        width.to_string(),
+        "-y".to_string(),
+        height.to_string(),
+    ]
+}
+
 pub(crate) fn capture_pane_args(session: &str) -> Vec<String> {
     vec![
         "capture-pane".to_string(),
-        "-p".to_string(),
+        "-pe".to_string(),
         "-t".to_string(),
         session.to_string(),
     ]
@@ -642,7 +670,11 @@ mod tests {
     fn tmux_command_args_cover_real_pane_and_window_actions() {
         assert_eq!(
             capture_pane_args("dev"),
-            vec!["capture-pane", "-p", "-t", "dev"]
+            vec!["capture-pane", "-pe", "-t", "dev"]
+        );
+        assert_eq!(
+            resize_window_args("dev", 100, 30),
+            vec!["resize-window", "-t", "dev:", "-x", "100", "-y", "30"]
         );
         assert_eq!(
             send_keys_args("dev", &["-l".to_string(), "a".to_string()]),
@@ -655,8 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_capture_output_and_trims_trailing_blank_lines() {
-        assert_eq!(parse_capture("alpha\nbeta\n\n"), vec!["alpha", "beta"]);
-        assert_eq!(parse_capture(""), Vec::<String>::new());
+    fn parses_pane_screen_preserves_and_pads_blank_rows() {
+        assert_eq!(parse_pane_screen("alpha\n\n", 4), vec!["alpha", "", "", ""]);
     }
 }

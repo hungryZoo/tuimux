@@ -2,10 +2,10 @@
 
 - **문서 버전**: 0.8 (Draft)
 - **작성일**: 2026-06-08
-- **상태**: v0.1.8 TUI 기본값 복구 구현 명세
+- **상태**: v0.1.9 TUI 기본값 복구 구현 명세
 - **프로젝트명**: tuimux
 - **상위 문서**: [docs/prd.md](./prd.md) (PRD v0.8)
-- **한 줄 요약**: v0.1.8은 인자 없는 `tuimux`가 plain tmux client가 아니라 tuimux ratatui TUI를 실행하도록 복구한다.
+- **한 줄 요약**: v0.1.9은 인자 없는 `tuimux`가 plain tmux client가 아니라 tuimux ratatui TUI를 실행하도록 복구한다.
 
 ---
 
@@ -23,8 +23,8 @@
 
 ### 제외
 
-- v0.1.8에서 full `tmux -CC` custom client 구현.
-- v0.1.8에서 완전한 terminal emulator/VT parser 구현.
+- v0.1.9에서 full `tmux -CC` custom client 구현.
+- v0.1.9에서 완전한 terminal emulator/VT parser 구현.
 - plain tmux client를 기본 interactive UX로 사용하는 것.
 
 ---
@@ -85,11 +85,11 @@ Native fallback only:
 - **AC-1** `cargo test --quiet`가 통과한다.
 - **AC-2** run mode unit test가 인자 없는 `Cli`를 `RunMode::Dashboard`로 검증한다.
 - **AC-3** run mode unit test가 `native_client=true`일 때만 `RunMode::NativeClient`를 검증한다.
-- **AC-4** `cargo run --quiet -- --version`은 `tuimux 0.1.8`을 출력한다.
+- **AC-4** `cargo run --quiet -- --version`은 `tuimux 0.1.9`을 출력한다.
 - **AC-5** `cargo run --quiet -- --layout-preview`는 Session/Detach/WINDOWS/New Session UI를 출력한다.
 - **AC-6** PTY smoke test에서 인자 없는 `tuimux`가 tuimux UI 문자열을 렌더한다.
 - **AC-7** release workflow가 macOS arm64/x86_64 assets와 `SHA256SUMS`를 만든다.
-- **AC-8** raw installer가 `v0.1.8` asset을 설치한다.
+- **AC-8** raw installer가 `v0.1.9` asset을 설치한다.
 
 ---
 
