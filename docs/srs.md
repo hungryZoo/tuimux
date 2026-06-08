@@ -1,21 +1,21 @@
 # tuimux SRS (Software Requirements Specification)
 
-- **문서 버전**: 0.3 (Draft)
+- **문서 버전**: 0.4 (Draft)
 - **작성일**: 2026-06-08
-- **상태**: v0.3 스켈레톤 구현 대상 명세
+- **상태**: v0.4 스켈레톤 구현 대상 명세
 - **프로젝트명**: tuimux
-- **상위 문서**: [docs/prd.md](./prd.md) (PRD v0.3)
-- **한 줄 요약**: tmux control mode를 백엔드로 하는 Rust TUI 래퍼. v0.3은 좌측/하단/PROCS를 제거하고, 우측 Session 버튼 + 제목 없는 Detach 버튼 + 창 탭 + 헤더 없는 중앙 session dialog를 검증한다.
+- **상위 문서**: [docs/prd.md](./prd.md) (PRD v0.4)
+- **한 줄 요약**: tmux control mode를 백엔드로 하는 Rust TUI 래퍼. v0.4는 좌측/하단/PROCS를 제거하고, 우측 Session 버튼 + 제목 없는 Detach 버튼 + 창 탭 + 헤더 없는 중앙 session dialog를 검증한다.
 
 ---
 
 ## 1. 범위
 
-본 SRS는 v0.3 스켈레톤의 구현 가능한 요구사항을 정의한다.
+본 SRS는 v0.4 스켈레톤의 구현 가능한 요구사항을 정의한다.
 
 ### 포함
 
-- `ratatui` 기반 v0.3 레이아웃.
+- `ratatui` 기반 v0.4 레이아웃.
 - `crossterm` mouse event 기반 hover/click scaffold.
 - 우측 `Session` 버튼(테두리 title은 `Session`, 버튼 내부에는 현재 세션명 표시).
 - 우측 빨간 Detach 버튼(테두리 title/header 없음).
@@ -38,7 +38,7 @@
 
 ## 2. 용어
 
-- **Main area**: tmux pane들이 렌더될 중앙 영역. v0.3은 mock text.
+- **Main area**: tmux pane들이 렌더될 중앙 영역. v0.4는 mock text.
 - **Session button**: 우측 상단 버튼. 버튼 테두리 title은 `Session`, 버튼 내부 텍스트는 현재 세션명(예: `dev`)이다.
 - **Detach button**: session button 바로 아래의 빨간 버튼. 테두리 title/header 없이 버튼 내부에 `Detach`만 표시한다.
 - **Window tabs**: 우측의 세로 window 목록.
@@ -54,7 +54,7 @@
 - **FR-CLI-1 [M]** `tuimux --help`는 사용 가능한 옵션을 표시한다.
 - **FR-CLI-2 [M]** `tuimux --version`은 패키지 버전을 표시한다.
 - **FR-CLI-3 [M]** `tuimux --doctor`는 tmux 설치/버전과 터미널 환경을 점검한다.
-- **FR-CLI-4 [M]** `tuimux --layout-preview`는 v0.3 static layout을 출력한다.
+- **FR-CLI-4 [M]** `tuimux --layout-preview`는 v0.4 static layout을 출력한다.
 - **FR-CLI-5 [M]** 인자 없이 실행하면 interactive TUI shell을 연다. stdout이 TTY가 아니면 안전하게 거부한다.
 
 ### 3.2 레이아웃
@@ -80,8 +80,8 @@
 - **FR-DETACH-2 [M]** Detach button은 빨간색 계열로 표시한다.
 - **FR-DETACH-3 [M]** Detach button의 테두리에는 `Detach` title/header를 표시하지 않는다. 글자 `Detach`는 버튼 내부 중앙에만 표시한다.
 - **FR-DETACH-4 [M]** Detach button hover 시 버튼 배경/테두리를 강조한다.
-- **FR-DETACH-5 [M]** Detach button 클릭 또는 `d`는 v0.3 scaffold에서 detach exit path로 종료한다.
-- **FR-DETACH-6 [M]** 실제 control-mode 구현 후에는 `detach-client`를 송신하고 shell로 복귀한다.
+- **FR-DETACH-5 [M]** Detach button 클릭 또는 `d`는 v0.4 scaffold에서 detach exit path로 종료한다.
+- **FR-DETACH-6 [M]** `d` 또는 Detach click은 tmux 내부 실행 시 `detach-client`를 송신하고 종료한다. tmux 외부 실행 시에는 송신할 client가 없으므로 안전하게 UI만 종료한다.
 
 ### 3.5 Window tabs
 
@@ -89,7 +89,7 @@
 - **FR-WIN-2 [M]** 활성 window는 `▸`와 배경색 등으로 강조한다.
 - **FR-WIN-3 [M]** 각 window 탭은 hover 시 하이라이트된다.
 - **FR-WIN-4 [M]** `+ new` 항목을 표시하고 hover 시 버튼처럼 반응한다.
-- **FR-WIN-5 [L]** 실제 구현에서는 클릭 시 `select-window`, `new-window` 명령을 tmux로 보낸다.
+- **FR-WIN-5 [M]** window 탭 클릭 시 `select-window`, `+ new` 클릭 시 `new-window` 명령을 tmux로 보낸다.
 
 ### 3.6 Session dialog
 
@@ -103,7 +103,8 @@
 - **FR-DIALOG-8 [M]** 세션 항목 hover 시 행이 하이라이트된다.
 - **FR-DIALOG-9 [M]** dialog Detach button hover 시 빨간 버튼 강조가 적용된다.
 - **FR-DIALOG-10 [M]** `Esc`는 dialog가 열려 있으면 dialog를 닫고, 닫혀 있으면 TUI를 종료한다.
-- **FR-DIALOG-11 [L]** 실제 구현에서는 세션 항목 클릭 시 `switch-client -t <session>`을 송신한다.
+- **FR-DIALOG-11 [M]** 세션 항목 클릭 시 tmux 내부에서는 `switch-client -t <session>`을 송신한다. tmux 외부에서는 interactive `attach-session`을 실행하지 않고 TUI의 현재 target session만 전환해 window 목록/명령 target을 갱신한다.
+- **FR-DIALOG-12 [M]** dialog가 열려 있을 때 `n` 키는 `tuimux-<n>` 이름의 detached session을 생성하고 live state를 refresh한다.
 
 ### 3.7 Mouse / hover routing
 
@@ -158,7 +159,8 @@ Start
 
 SessionDialogOpen
  ├─ Esc / session button        -> AttachedScaffold
- ├─ session row click           -> AttachedScaffold  (v0.3 mock switch)
+ ├─ session row click           -> AttachedScaffold  (inside tmux: switch-client, outside tmux: local target select)
+ ├─ n                           -> create detached tuimux-<n> session
  ├─ Detach click / d            -> DetachedExit
  └─ mouse move                  -> Hover(modal target)
 ```
@@ -199,6 +201,7 @@ SessionDialogOpen
 
 ## 9. 변경 이력
 
+- **0.4 / 2026-06-08**: `list-sessions`/`list-windows` 기반 live state, `select-window`/`new-window`/`new-session`/`detach-client` command dispatch 요구사항을 스켈레톤에 반영. control-mode pane streaming은 다음 단계로 유지.
 - **0.3 / 2026-06-08**: Session 버튼 title을 `Session`으로 고정하고 내부에 현재 세션명을 표시. Detach 버튼 및 dialog Detach의 테두리 title 제거. dialog의 `Session picker`/`Sessions` 헤더 제거.
 - **0.2 / 2026-06-08**: 좌측 파일 탐색기, 하단 메뉴 바, PROCS 제거. 세션명 버튼/빨간 Detach/session dialog/hover 명세 추가.
 - **0.1 / 2026-06-08**: 초기 control-mode 래퍼 SRS.

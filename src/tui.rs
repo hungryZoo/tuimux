@@ -1,16 +1,19 @@
 //! The live terminal UI (`tuimux` with no subcommand).
 //!
-//! This is an MVP *scaffold*: it renders the revised compact layout with a mock
-//! tmux pane area and a right sidebar. The right sidebar has a button-like
-//! session name, a red Detach button, and vertical window tabs. Clicking the
-//! session button opens a centered session dialog. It does **not** yet drive a
-//! tmux control-mode session — that is the next milestone (SRS FR-CONN).
+//! As of v0.1.4 the right sidebar is wired to a **real tmux server**: it lists
+//! real sessions and windows, clicking a window runs `select-window`, clicking
+//! `+ new` runs `new-window`, clicking a session row runs `switch-client` (only
+//! when tuimux itself is running inside tmux), and Detach runs `detach-client`.
+//! The center pane area is still a static mock — the `tmux -CC` control-mode
+//! renderer is the next milestone (SRS FR-CONN).
+//!
+//! If there is no tmux server yet, tuimux creates a detached session named
+//! `tuimux` so the UI always has something real to show.
 //!
 //! If stdout is not a TTY we refuse to enter raw mode and instead print guidance,
 //! so piping or running under CI stays safe (PRD "keep safe").
 
 use std::io::{self, IsTerminal, Stdout};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{
@@ -25,7 +28,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use crate::preview::PreviewData;
-use crate::tmux::TmuxProbe;
+use crate::tmux::{RealTmux, Session, Tmux, TmuxProbe, Window};
 
 /// Why the UI loop ended — affects the farewell message.
 enum Exit {
@@ -59,16 +62,83 @@ struct UiState {
     session_modal_open: bool,
     hover: Option<Hotspot>,
     regions: Regions,
+    /// Live tmux state, refreshed after every mutating command.
+    sessions: Vec<Session>,
+    windows: Vec<Window>,
+    current_session: String,
+    /// Non-fatal, transient message shown in the status bar (e.g. why a switch
+    /// was refused outside tmux, or that a window was created).
+    status: Option<String>,
+    /// Monotonic counter behind the `tuimux-<n>` names created by the `n` key.
+    new_session_counter: u32,
 }
 
-impl Default for UiState {
-    fn default() -> Self {
-        UiState {
-            // Open by default in the scaffold so users immediately see the dialog
-            // direction; click the session button or Esc to toggle it.
+impl UiState {
+    /// Build initial state from the live server, creating a detached `tuimux`
+    /// session if no server is running yet.
+    fn bootstrap(tmux: &Tmux<RealTmux>) -> Self {
+        let mut state = UiState {
+            // Open by default so users immediately see the session dialog; click
+            // the session button or Esc to toggle it.
             session_modal_open: true,
             hover: None,
             regions: Regions::default(),
+            sessions: Vec::new(),
+            windows: Vec::new(),
+            current_session: String::new(),
+            status: None,
+            new_session_counter: 0,
+        };
+
+        let mut sessions = tmux.list_sessions().unwrap_or_default();
+        if sessions.is_empty() {
+            if let Err(e) = tmux.new_session("tuimux") {
+                state.status = Some(format!("could not create session 'tuimux': {e}"));
+            }
+            sessions = tmux.list_sessions().unwrap_or_default();
+        }
+        state.sessions = sessions;
+        state.current_session = state.pick_current();
+        state.reload_windows(tmux);
+        state
+    }
+
+    /// Choose the session to focus: the attached one if any, else the first.
+    fn pick_current(&self) -> String {
+        self.sessions
+            .iter()
+            .find(|s| s.attached)
+            .or_else(|| self.sessions.first())
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
+    fn reload_windows(&mut self, tmux: &Tmux<RealTmux>) {
+        self.windows = if self.current_session.is_empty() {
+            Vec::new()
+        } else {
+            tmux.list_windows(&self.current_session).unwrap_or_default()
+        };
+    }
+
+    /// Re-read sessions and windows after a mutating command.
+    fn refresh(&mut self, tmux: &Tmux<RealTmux>) {
+        self.sessions = tmux.list_sessions().unwrap_or_default();
+        if !self.sessions.iter().any(|s| s.name == self.current_session) {
+            self.current_session = self.pick_current();
+        }
+        self.reload_windows(tmux);
+    }
+
+    /// Next free `tuimux-<n>` session name, skipping any that already exist.
+    fn next_session_name(&self) -> (String, u32) {
+        let mut n = self.new_session_counter + 1;
+        loop {
+            let name = format!("tuimux-{n}");
+            if !self.sessions.iter().any(|s| s.name == name) {
+                return (name, n);
+            }
+            n += 1;
         }
     }
 }
@@ -84,11 +154,12 @@ pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
         return Ok(2);
     }
 
+    let tmux = Tmux::new(RealTmux::new(probe.binary.clone()));
+    let mut state = UiState::bootstrap(&tmux);
+
     let mut terminal = setup()?;
     let data = PreviewData::default();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut state = UiState::default();
-    let result = run_loop(&mut terminal, probe, &data, &cwd, &mut state);
+    let result = run_loop(&mut terminal, probe, &tmux, &data, &mut state);
     restore(&mut terminal)?;
 
     match result {
@@ -97,7 +168,11 @@ pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
             Ok(0)
         }
         Ok(Exit::Detach) => {
-            println!("tuimux: detached. (MVP scaffold — no tmux session was attached yet.)");
+            if tmux.inside_tmux() {
+                println!("tuimux: detached the tmux client.");
+            } else {
+                println!("tuimux: exited (not running inside tmux — nothing to detach).");
+            }
             Ok(0)
         }
         Err(e) => Err(e),
@@ -126,12 +201,12 @@ fn restore(terminal: &mut Term) -> io::Result<()> {
 fn run_loop(
     terminal: &mut Term,
     probe: &TmuxProbe,
+    tmux: &Tmux<RealTmux>,
     data: &PreviewData,
-    _cwd: &std::path::Path,
     state: &mut UiState,
 ) -> io::Result<Exit> {
     loop {
-        terminal.draw(|f| ui(f, probe, data, state))?;
+        terminal.draw(|f| ui(f, probe, tmux, data, state))?;
 
         if !event::poll(Duration::from_millis(250))? {
             continue;
@@ -142,6 +217,11 @@ fn run_loop(
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Exit::Quit),
                     (KeyCode::Char('q'), _) => return Ok(Exit::Quit),
+                    // `n` creates a fresh detached `tuimux-<n>` session, but only
+                    // while the modal is open so it can't fire by accident.
+                    (KeyCode::Char('n'), _) if state.session_modal_open => {
+                        new_session(tmux, state);
+                    }
                     (KeyCode::Esc, _) if state.session_modal_open => {
                         state.session_modal_open = false;
                     }
@@ -149,7 +229,10 @@ fn run_loop(
                     (KeyCode::Char('s'), KeyModifiers::ALT) => {
                         state.session_modal_open = !state.session_modal_open;
                     }
-                    (KeyCode::Char('d'), _) => return Ok(Exit::Detach),
+                    (KeyCode::Char('d'), _) => {
+                        let _ = tmux.detach();
+                        return Ok(Exit::Detach);
+                    }
                     _ => {}
                 }
             }
@@ -166,11 +249,17 @@ fn run_loop(
                             state.session_modal_open = !state.session_modal_open;
                         }
                         Some(Hotspot::DetachButton) | Some(Hotspot::ModalDetach) => {
+                            let _ = tmux.detach();
                             return Ok(Exit::Detach);
                         }
-                        Some(Hotspot::ModalSession(_)) => {
-                            // Scaffold only: pretend the selected session switched.
-                            state.session_modal_open = false;
+                        Some(Hotspot::Window(idx)) => {
+                            select_window(tmux, state, idx);
+                        }
+                        Some(Hotspot::NewWindow) => {
+                            new_window(tmux, state);
+                        }
+                        Some(Hotspot::ModalSession(idx)) => {
+                            switch_session(tmux, state, idx);
                         }
                         _ => {}
                     }
@@ -182,7 +271,69 @@ fn run_loop(
     }
 }
 
-fn ui(f: &mut Frame, probe: &TmuxProbe, data: &PreviewData, state: &mut UiState) {
+fn select_window(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
+    let Some(index) = state.windows.get(idx).map(|w| w.index) else {
+        return;
+    };
+    match tmux.select_window(&state.current_session, index) {
+        Ok(()) => state.refresh(tmux),
+        Err(e) => state.status = Some(format!("select-window failed: {e}")),
+    }
+}
+
+fn new_window(tmux: &Tmux<RealTmux>, state: &mut UiState) {
+    match tmux.new_window(&state.current_session) {
+        Ok(()) => {
+            state.status = Some(format!("created a window in '{}'", state.current_session));
+            state.refresh(tmux);
+        }
+        Err(e) => state.status = Some(format!("new-window failed: {e}")),
+    }
+}
+
+fn new_session(tmux: &Tmux<RealTmux>, state: &mut UiState) {
+    let (name, counter) = state.next_session_name();
+    match tmux.new_session(&name) {
+        Ok(()) => {
+            state.new_session_counter = counter;
+            state.status = Some(format!("created session '{name}'"));
+            state.refresh(tmux);
+        }
+        Err(e) => state.status = Some(format!("new-session failed: {e}")),
+    }
+}
+
+fn switch_session(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
+    let Some(name) = state.sessions.get(idx).map(|s| s.name.clone()) else {
+        return;
+    };
+    if tmux.inside_tmux() {
+        match tmux.switch_session(&name) {
+            Ok(()) => {
+                state.current_session = name;
+                state.session_modal_open = false;
+                state.refresh(tmux);
+            }
+            Err(e) => state.status = Some(format!("switch-client failed: {e}")),
+        }
+    } else {
+        // Outside tmux, do not run `attach-session` from inside the TUI. Instead,
+        // select the session as the sidebar target so window inspection/creation
+        // still works until the control-mode attach renderer lands.
+        state.current_session = name.clone();
+        state.session_modal_open = false;
+        state.status = Some(format!("selected session '{name}'"));
+        state.reload_windows(tmux);
+    }
+}
+
+fn ui(
+    f: &mut Frame,
+    probe: &TmuxProbe,
+    tmux: &Tmux<RealTmux>,
+    data: &PreviewData,
+    state: &mut UiState,
+) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -195,15 +346,27 @@ fn ui(f: &mut Frame, probe: &TmuxProbe, data: &PreviewData, state: &mut UiState)
         Some(v) => format!("tmux {v}"),
         None => "tmux: not detected".to_string(),
     };
+    let scope = if tmux.inside_tmux() {
+        "inside tmux"
+    } else {
+        "outside tmux"
+    };
+    let session_label = if state.current_session.is_empty() {
+        "(no session)"
+    } else {
+        &state.current_session
+    };
+    let mut info = format!("  {session_label} · {tmux_desc} · {scope}");
+    if let Some(msg) = &state.status {
+        info.push_str(" · ");
+        info.push_str(msg);
+    }
     let status = Paragraph::new(Line::from(vec![
         Span::styled(
             " tuimux ",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
-        Span::raw(format!(
-            "  {} · {} · scaffold preview",
-            data.session, tmux_desc
-        )),
+        Span::raw(info),
     ]));
     f.render_widget(status, root[0]);
 
@@ -212,11 +375,24 @@ fn ui(f: &mut Frame, probe: &TmuxProbe, data: &PreviewData, state: &mut UiState)
         .constraints([Constraint::Min(30), Constraint::Length(26)])
         .split(root[1]);
 
-    render_main(f, body[0], data);
-    render_sidebar(f, body[1], data, state);
+    render_main(f, body[0], &data.panes);
+    render_sidebar(
+        f,
+        body[1],
+        session_label,
+        &state.windows,
+        state.hover,
+        &mut state.regions,
+    );
 
     if state.session_modal_open {
-        render_session_modal(f, data, state);
+        render_session_modal(
+            f,
+            &state.sessions,
+            &state.current_session,
+            state.hover,
+            &mut state.regions,
+        );
     }
 }
 
@@ -237,8 +413,8 @@ fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a
     }
 }
 
-fn render_main(f: &mut Frame, area: Rect, data: &PreviewData) {
-    let lines: Vec<Line> = data.panes.iter().map(|p| Line::from(*p)).collect();
+fn render_main(f: &mut Frame, area: Rect, panes: &[&str]) {
+    let lines: Vec<Line> = panes.iter().map(|p| Line::from(*p)).collect();
     let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
         Block::default()
             .borders(Borders::ALL)
@@ -248,7 +424,14 @@ fn render_main(f: &mut Frame, area: Rect, data: &PreviewData) {
     f.render_widget(para, area);
 }
 
-fn render_sidebar(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiState) {
+fn render_sidebar(
+    f: &mut Frame,
+    area: Rect,
+    session_label: &str,
+    windows: &[Window],
+    hover: Option<Hotspot>,
+    regions: &mut Regions,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -258,19 +441,19 @@ fn render_sidebar(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiS
         ])
         .split(area);
 
-    state.regions.session_button = chunks[0];
-    state.regions.detach_button = chunks[1];
+    regions.session_button = chunks[0];
+    regions.detach_button = chunks[1];
 
-    let session_hot = state.hover == Some(Hotspot::SessionButton);
+    let session_hot = hover == Some(Hotspot::SessionButton);
     let session = Paragraph::new(Line::from(Span::styled(
-        data.session.clone(),
+        session_label.to_string(),
         Style::default().add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
     .block(button_block(Some("Session"), Color::Cyan, session_hot));
     f.render_widget(session, chunks[0]);
 
-    let detach_hot = state.hover == Some(Hotspot::DetachButton);
+    let detach_hot = hover == Some(Hotspot::DetachButton);
     let detach = Paragraph::new(Line::from(Span::styled(
         "Detach",
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -279,27 +462,33 @@ fn render_sidebar(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiS
     .block(button_block(None, Color::Red, detach_hot));
     f.render_widget(detach, chunks[1]);
 
-    render_windows(f, chunks[2], data, state);
+    render_windows(f, chunks[2], windows, hover, regions);
 }
 
-fn render_windows(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiState) {
+fn render_windows(
+    f: &mut Frame,
+    area: Rect,
+    windows: &[Window],
+    hover: Option<Hotspot>,
+    regions: &mut Regions,
+) {
     let mut win_items: Vec<ListItem> = Vec::new();
-    state.regions.window_count = 0;
+    regions.window_count = 0;
 
     let inner_top = area.y.saturating_add(1);
-    for (row, (idx, name, active)) in data.windows.iter().enumerate() {
-        if row >= state.regions.windows.len() {
+    for (row, win) in windows.iter().enumerate() {
+        if row >= regions.windows.len() {
             break;
         }
         let y = inner_top.saturating_add(row as u16);
-        state.regions.windows[row] = Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1);
-        state.regions.window_count += 1;
+        regions.windows[row] = Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1);
+        regions.window_count += 1;
 
-        let marker = if *active { "▸" } else { " " };
-        let is_hot = state.hover == Some(Hotspot::Window(row));
+        let marker = if win.active { "▸" } else { " " };
+        let is_hot = hover == Some(Hotspot::Window(row));
         let style = if is_hot {
             Style::default().fg(Color::Black).bg(Color::Green)
-        } else if *active {
+        } else if win.active {
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Blue)
@@ -308,19 +497,19 @@ fn render_windows(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiS
             Style::default()
         };
         win_items.push(ListItem::new(Line::from(Span::styled(
-            format!("{marker} {idx}: {name}"),
+            format!("{marker} {}: {}", win.index, win.name),
             style,
         ))));
     }
 
     let new_row = win_items.len();
-    state.regions.new_window = Rect::new(
+    regions.new_window = Rect::new(
         area.x + 1,
         inner_top.saturating_add(new_row as u16),
         area.width.saturating_sub(2),
         1,
     );
-    let new_hot = state.hover == Some(Hotspot::NewWindow);
+    let new_hot = hover == Some(Hotspot::NewWindow);
     let new_style = if new_hot {
         Style::default().fg(Color::Black).bg(Color::Green)
     } else {
@@ -339,7 +528,13 @@ fn render_windows(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiS
     f.render_widget(windows, area);
 }
 
-fn render_session_modal(f: &mut Frame, data: &PreviewData, state: &mut UiState) {
+fn render_session_modal(
+    f: &mut Frame,
+    sessions: &[Session],
+    current_session: &str,
+    hover: Option<Hotspot>,
+    regions: &mut Regions,
+) {
     let area = centered_rect(48, 44, f.size());
     f.render_widget(Clear, area);
 
@@ -354,10 +549,10 @@ fn render_session_modal(f: &mut Frame, data: &PreviewData, state: &mut UiState) 
         .border_style(Style::default().fg(Color::Cyan));
     f.render_widget(block, area);
 
-    state.regions.modal_session_count = 0;
+    regions.modal_session_count = 0;
     let mut items = Vec::new();
-    for (idx, (name, windows, active)) in data.sessions.iter().enumerate() {
-        if idx >= state.regions.modal_sessions.len() {
+    for (idx, sess) in sessions.iter().enumerate() {
+        if idx >= regions.modal_sessions.len() {
             break;
         }
         let row_rect = Rect::new(
@@ -366,14 +561,15 @@ fn render_session_modal(f: &mut Frame, data: &PreviewData, state: &mut UiState) 
             chunks[0].width,
             1,
         );
-        state.regions.modal_sessions[idx] = row_rect;
-        state.regions.modal_session_count += 1;
+        regions.modal_sessions[idx] = row_rect;
+        regions.modal_session_count += 1;
 
-        let mark = if *active { "●" } else { " " };
-        let hot = state.hover == Some(Hotspot::ModalSession(idx));
+        let active = sess.name == current_session;
+        let mark = if active { "●" } else { " " };
+        let hot = hover == Some(Hotspot::ModalSession(idx));
         let style = if hot {
             Style::default().fg(Color::Black).bg(Color::Cyan)
-        } else if *active {
+        } else if active {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
@@ -381,14 +577,14 @@ fn render_session_modal(f: &mut Frame, data: &PreviewData, state: &mut UiState) 
             Style::default()
         };
         items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!(" {mark} {name}"), style),
-            Span::raw(format!("  {windows} windows")),
+            Span::styled(format!(" {mark} {}", sess.name), style),
+            Span::raw(format!("  {} windows", sess.windows)),
         ])));
     }
     f.render_widget(List::new(items), chunks[0]);
 
-    state.regions.modal_detach = chunks[1];
-    let hot = state.hover == Some(Hotspot::ModalDetach);
+    regions.modal_detach = chunks[1];
+    let hot = hover == Some(Hotspot::ModalDetach);
     let detach = Paragraph::new(Line::from(Span::styled(
         "Detach",
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),

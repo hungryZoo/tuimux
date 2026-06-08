@@ -1,53 +1,34 @@
-//! tmux discovery and version handling.
+//! tmux discovery, command execution, and state parsing.
 //!
-//! tuimux (per the SRS) is a *front-end* for a tmux server reached over control
-//! mode (`tmux -CC`). The control-mode client itself is future work; for the MVP
-//! this module covers what the `--doctor` and default-run paths need today:
-//! locating the `tmux` binary and parsing `tmux -V` into something comparable.
+//! tuimux is a front-end for a tmux server. v0.1.4 still does not implement the
+//! full `tmux -CC` control-mode renderer, but it does use real tmux commands for
+//! the session/window sidebar: list sessions, list windows, switch/create, and
+//! detach.
 
 use std::fmt;
 use std::process::Command;
 
 /// Minimum tmux version tuimux targets. Control mode exists earlier, but 3.0 is
-/// the floor we document and test against (it is what ships on current macOS via
-/// Homebrew and recent Linux distros).
+/// the floor we document and test against.
 pub const MIN_SUPPORTED: TmuxVersion = TmuxVersion {
     major: 3,
     minor: 0,
     suffix_ascii: 0,
 };
 
-/// A parsed tmux version such as `3.0a` or `next-3.4`.
-///
-/// tmux versions are `MAJOR.MINOR` optionally followed by a single lowercase
-/// letter (`a`, `b`, …) denoting a patch release. We capture the letter as its
-/// ASCII byte (0 = no suffix) so ordering is trivial and total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TmuxVersion {
     pub major: u32,
     pub minor: u32,
-    /// ASCII value of the patch letter, or 0 when absent. `a` == 97.
     pub suffix_ascii: u8,
 }
 
 impl TmuxVersion {
-    /// Parse the output of `tmux -V` (e.g. `"tmux 3.0a"`), or a bare version
-    /// string (`"3.4"`, `"next-3.4"`). Returns `None` if no `MAJOR.MINOR` core
-    /// can be found.
     pub fn parse(raw: &str) -> Option<TmuxVersion> {
-        // Strip an optional leading "tmux " program name.
         let s = raw.trim();
         let s = s.strip_prefix("tmux").map(str::trim_start).unwrap_or(s);
-
-        // Skip any non-numeric prefix (e.g. the "next-" of a development build,
-        // or "openbsd-") to land on the first digit of the version core. This
-        // also drops trailing noise that contains dashes, like
-        // "3.2a (some-distro-build)", because we start the token at the digit.
         let start = s.find(|c: char| c.is_ascii_digit())?;
         let s = &s[start..];
-
-        // Collect the leading number.number[letter] token, ignoring any trailing
-        // commentary some builds append.
         let token: String = s
             .chars()
             .take_while(|c| c.is_ascii_digit() || *c == '.' || c.is_ascii_alphabetic())
@@ -55,23 +36,17 @@ impl TmuxVersion {
         if token.is_empty() {
             return None;
         }
-
-        // Split off a trailing alphabetic suffix (the patch letter).
         let digits_end = token
             .find(|c: char| c.is_ascii_alphabetic())
             .unwrap_or(token.len());
         let (numeric, suffix) = token.split_at(digits_end);
-
         let mut parts = numeric.split('.');
         let major: u32 = parts.next()?.parse().ok()?;
-        // A missing minor (e.g. just "3") is treated as ".0".
         let minor: u32 = match parts.next() {
             Some(m) if !m.is_empty() => m.parse().ok()?,
             _ => 0,
         };
-
         let suffix_ascii = suffix.bytes().next().unwrap_or(0);
-
         Some(TmuxVersion {
             major,
             minor,
@@ -79,7 +54,6 @@ impl TmuxVersion {
         })
     }
 
-    /// Whether this version meets tuimux's minimum requirement.
     pub fn is_supported(&self) -> bool {
         *self >= MIN_SUPPORTED
     }
@@ -111,31 +85,20 @@ impl Ord for TmuxVersion {
     }
 }
 
-/// Result of probing the environment for a usable tmux.
 #[derive(Debug, Clone)]
 pub struct TmuxProbe {
-    /// Path/name used to invoke tmux (currently always `"tmux"` from `PATH`).
     pub binary: String,
-    /// Raw `tmux -V` output, trimmed (e.g. `"tmux 3.0a"`).
     pub raw_version: String,
-    /// Parsed version, if `tmux -V` was understood.
     pub version: Option<TmuxVersion>,
 }
 
 impl TmuxProbe {
-    /// True when tmux is present and meets the minimum version. Used by callers
-    /// that want a single yes/no gate instead of inspecting `version`.
     #[allow(dead_code)]
     pub fn is_usable(&self) -> bool {
         self.version.map(|v| v.is_supported()).unwrap_or(false)
     }
 }
 
-/// Run `tmux -V` and parse the result.
-///
-/// Returns `Err` with a human-friendly message if tmux is missing or could not
-/// be executed. A present-but-unparsable version is *not* an error here — it is
-/// surfaced via `TmuxProbe { version: None, .. }` so callers can decide.
 pub fn probe() -> Result<TmuxProbe, String> {
     let binary = "tmux";
     let output = Command::new(binary).arg("-V").output().map_err(|e| {
@@ -158,6 +121,251 @@ pub fn probe() -> Result<TmuxProbe, String> {
         raw_version,
         version,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Session {
+    pub name: String,
+    pub windows: u32,
+    pub attached: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    pub index: u32,
+    pub name: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TmuxError {
+    Spawn(String),
+    Failed { status: Option<i32>, stderr: String },
+}
+
+impl fmt::Display for TmuxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmuxError::Spawn(msg) => write!(f, "{msg}"),
+            TmuxError::Failed { status, stderr } => {
+                write!(f, "tmux command failed")?;
+                if let Some(code) = status {
+                    write!(f, " with exit code {code}")?;
+                }
+                if !stderr.trim().is_empty() {
+                    write!(f, ": {}", stderr.trim())?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for TmuxError {}
+
+pub trait TmuxRunner {
+    fn run(&self, args: &[String]) -> Result<String, TmuxError>;
+    fn inside_tmux(&self) -> bool;
+}
+
+#[derive(Debug, Clone)]
+pub struct RealTmux {
+    pub binary: String,
+}
+
+impl RealTmux {
+    pub fn new(binary: impl Into<String>) -> Self {
+        Self {
+            binary: binary.into(),
+        }
+    }
+}
+
+impl TmuxRunner for RealTmux {
+    fn run(&self, args: &[String]) -> Result<String, TmuxError> {
+        let output = Command::new(&self.binary)
+            .args(args)
+            .output()
+            .map_err(|e| TmuxError::Spawn(format!("could not run `{}`: {e}", self.binary)))?;
+        if !output.status.success() {
+            return Err(TmuxError::Failed {
+                status: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn inside_tmux(&self) -> bool {
+        std::env::var_os("TMUX").is_some()
+    }
+}
+
+pub struct Tmux<R: TmuxRunner> {
+    runner: R,
+}
+
+impl<R: TmuxRunner> Tmux<R> {
+    pub fn new(runner: R) -> Self {
+        Self { runner }
+    }
+
+    /// Whether tuimux itself is running inside a tmux client (the `TMUX` env var
+    /// is set). The UI uses this to decide whether switching a session is safe:
+    /// inside tmux we `switch-client`; outside we must not `attach-session`
+    /// (that would spawn an interactive tmux on top of us), so we just report it.
+    pub fn inside_tmux(&self) -> bool {
+        self.runner.inside_tmux()
+    }
+
+    pub fn list_sessions(&self) -> Result<Vec<Session>, TmuxError> {
+        match self.runner.run(&list_sessions_args()) {
+            Ok(stdout) => Ok(parse_sessions(&stdout)),
+            Err(err) if is_no_server_error(&err) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn list_windows(&self, session: &str) -> Result<Vec<Window>, TmuxError> {
+        match self.runner.run(&list_windows_args(session)) {
+            Ok(stdout) => Ok(parse_windows(&stdout)),
+            Err(err) if is_no_server_error(&err) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn switch_session(&self, name: &str) -> Result<(), TmuxError> {
+        self.runner
+            .run(&switch_session_args(name, self.runner.inside_tmux()))
+            .map(|_| ())
+    }
+
+    pub fn new_session(&self, name: &str) -> Result<(), TmuxError> {
+        self.runner.run(&new_session_args(name)).map(|_| ())
+    }
+
+    pub fn select_window(&self, session: &str, index: u32) -> Result<(), TmuxError> {
+        self.runner
+            .run(&select_window_args(session, index))
+            .map(|_| ())
+    }
+
+    pub fn new_window(&self, session: &str) -> Result<(), TmuxError> {
+        self.runner.run(&new_window_args(session)).map(|_| ())
+    }
+
+    pub fn detach(&self) -> Result<(), TmuxError> {
+        if self.runner.inside_tmux() {
+            self.runner.run(&detach_args()).map(|_| ())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn is_no_server_error(err: &TmuxError) -> bool {
+    match err {
+        TmuxError::Failed { stderr, .. } => stderr.contains("no server running"),
+        TmuxError::Spawn(_) => false,
+    }
+}
+
+pub(crate) fn parse_sessions(raw: &str) -> Vec<Session> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let name = parts.next()?.trim();
+            let windows = parts.next()?.trim().parse().ok()?;
+            let attached = parts.next()?.trim() == "1";
+            if name.is_empty() {
+                return None;
+            }
+            Some(Session {
+                name: name.to_string(),
+                windows,
+                attached,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn parse_windows(raw: &str) -> Vec<Window> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let index = parts.next()?.trim().parse().ok()?;
+            let name = parts.next()?.trim();
+            let active = parts.next()?.trim() == "1";
+            Some(Window {
+                index,
+                name: name.to_string(),
+                active,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn list_sessions_args() -> Vec<String> {
+    vec![
+        "list-sessions".to_string(),
+        "-F".to_string(),
+        "#{session_name}\t#{session_windows}\t#{session_attached}".to_string(),
+    ]
+}
+
+pub(crate) fn list_windows_args(session: &str) -> Vec<String> {
+    vec![
+        "list-windows".to_string(),
+        "-t".to_string(),
+        session.to_string(),
+        "-F".to_string(),
+        "#{window_index}\t#{window_name}\t#{window_active}".to_string(),
+    ]
+}
+
+pub(crate) fn switch_session_args(session: &str, inside_tmux: bool) -> Vec<String> {
+    if inside_tmux {
+        vec![
+            "switch-client".to_string(),
+            "-t".to_string(),
+            session.to_string(),
+        ]
+    } else {
+        vec![
+            "attach-session".to_string(),
+            "-t".to_string(),
+            session.to_string(),
+        ]
+    }
+}
+
+pub(crate) fn new_session_args(session: &str) -> Vec<String> {
+    vec![
+        "new-session".to_string(),
+        "-d".to_string(),
+        "-s".to_string(),
+        session.to_string(),
+    ]
+}
+
+pub(crate) fn select_window_args(session: &str, index: u32) -> Vec<String> {
+    vec![
+        "select-window".to_string(),
+        "-t".to_string(),
+        format!("{session}:{index}"),
+    ]
+}
+
+pub(crate) fn new_window_args(session: &str) -> Vec<String> {
+    vec![
+        "new-window".to_string(),
+        "-t".to_string(),
+        session.to_string(),
+    ]
+}
+
+pub(crate) fn detach_args() -> Vec<String> {
+    vec!["detach-client".to_string()]
 }
 
 #[cfg(test)]
@@ -239,5 +447,69 @@ mod tests {
         assert!(TmuxVersion::parse("3.0").unwrap().is_supported());
         assert!(TmuxVersion::parse("3.0a").unwrap().is_supported());
         assert!(TmuxVersion::parse("3.4").unwrap().is_supported());
+    }
+
+    #[test]
+    fn parses_sessions_from_tmux_tab_format() {
+        let sessions = parse_sessions("dev\t3\t1\nmy work\t2\t0\n\n");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].name, "dev");
+        assert_eq!(sessions[0].windows, 3);
+        assert!(sessions[0].attached);
+        assert_eq!(sessions[1].name, "my work");
+        assert_eq!(sessions[1].windows, 2);
+        assert!(!sessions[1].attached);
+    }
+
+    #[test]
+    fn parses_windows_from_tmux_tab_format_and_skips_bad_lines() {
+        let windows = parse_windows("1\tbuild\t1\nnot-enough\n2\tlogs\t0\n");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].index, 1);
+        assert_eq!(windows[0].name, "build");
+        assert!(windows[0].active);
+        assert_eq!(windows[1].index, 2);
+        assert_eq!(windows[1].name, "logs");
+        assert!(!windows[1].active);
+    }
+
+    #[test]
+    fn tmux_command_args_use_safe_machine_readable_formats() {
+        assert_eq!(
+            list_sessions_args(),
+            vec![
+                "list-sessions",
+                "-F",
+                "#{session_name}\t#{session_windows}\t#{session_attached}"
+            ]
+        );
+        assert_eq!(
+            list_windows_args("dev"),
+            vec![
+                "list-windows",
+                "-t",
+                "dev",
+                "-F",
+                "#{window_index}\t#{window_name}\t#{window_active}"
+            ]
+        );
+        assert_eq!(
+            switch_session_args("work", true),
+            vec!["switch-client", "-t", "work"]
+        );
+        assert_eq!(
+            switch_session_args("work", false),
+            vec!["attach-session", "-t", "work"]
+        );
+        assert_eq!(
+            new_session_args("scratch"),
+            vec!["new-session", "-d", "-s", "scratch"]
+        );
+        assert_eq!(
+            select_window_args("dev", 2),
+            vec!["select-window", "-t", "dev:2"]
+        );
+        assert_eq!(new_window_args("dev"), vec!["new-window", "-t", "dev"]);
+        assert_eq!(detach_args(), vec!["detach-client"]);
     }
 }

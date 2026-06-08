@@ -148,7 +148,7 @@ jobs:
 
             Early MVP scaffold. macOS arm64 and x86_64 binaries are attached.
 
-            This prerelease updates the scaffold UX: no left explorer, no bottom menu, no PROCS panel; the right sidebar now has a `Session` button, an untitled red Detach button, window tabs, and a centered headerless session dialog.
+            This prerelease updates the scaffold UX: no left explorer, no bottom menu, no PROCS panel; the right sidebar now reads real tmux sessions/windows, keeps the `Session` button and untitled red Detach button, supports window selection/creation, and shows a centered headerless session dialog.
 
             ### Install (one-liner)
             ```sh
