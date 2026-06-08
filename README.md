@@ -33,21 +33,10 @@ Runtime dependency:
 brew install tmux
 ```
 
-### Public repo one-liner
+### One-line installer
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
-```
-
-### Private repo one-liner
-
-Because this repository is currently private, both the installer script and release assets need GitHub authentication. Use a token with `repo` scope:
-
-```sh
-export GITHUB_TOKEN="<github-token-with-repo-scope>"
-curl -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh \
-  | bash
 ```
 
 Install a specific prerelease tag:
