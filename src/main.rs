@@ -1,9 +1,8 @@
 //! tuimux — a prefix-free, mouse-first TUI front-end for tmux.
 //!
 //! See `docs/prd.md` and `docs/srs.md` for the full design. This binary is an
-//! early MVP: the CLI plumbing, environment checks, layout preview, session/window
-//! controls, and first tmux-backed pane interaction are real; full control-mode
-//! streaming remains the next step.
+//! early MVP. As of v0.1.7 the default path is intentionally tmux-native: it
+//! opens a real tmux client instead of trying to emulate a shell in ratatui.
 
 mod doctor;
 mod preview;
@@ -23,11 +22,11 @@ use preview::PreviewData;
 #[command(
     name = "tuimux",
     version,
-    about = "Prefix-free, mouse-first TUI front-end for tmux (VS Code-inspired layout)",
-    long_about = "tuimux is a TUI front-end for tmux. It renders a VS Code-inspired layout \n\
-                  (center panes, right Session/Detach/window controls) \n\
-                  and drives a tmux server through tmux commands today, with full control-mode streaming planned.\n\n\
-                  This is an early 0.x MVP. Run with no flags to open the UI, or use \n\
+    about = "Prefix-free, mouse-first TUI front-end for tmux (tmux-native)",
+    long_about = "tuimux is a TUI front-end for tmux. Its default mode opens a real tmux client \n\
+                  instead of scraping and replaying a shell. That keeps ls, nano/vim/less, mouse \n\
+                  wheel, UTF-8/CJK text, alternate screen, and copy-mode behavior owned by tmux.\n\n\
+                  This is an early 0.x MVP. Run with no flags to attach a tmux session, or use \n\
                   --layout-preview / --doctor for non-interactive output."
 )]
 struct Cli {
@@ -39,7 +38,15 @@ struct Cli {
     #[arg(long)]
     layout_preview: bool,
 
-    /// Directory to use for the file explorer (default: current directory).
+    /// Run the experimental ratatui dashboard prototype instead of a native tmux client.
+    #[arg(long, hide = true)]
+    dashboard: bool,
+
+    /// tmux session to create/attach. Defaults to `tuimux`.
+    #[arg(long, value_name = "NAME", default_value = "tuimux")]
+    session: String,
+
+    /// Directory to use for future workspace features (default: current directory).
     #[arg(long, value_name = "PATH")]
     cwd: Option<PathBuf>,
 }
@@ -47,7 +54,6 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    // --doctor: full environment checklist, scriptable exit code.
     if cli.doctor {
         return code(doctor::run());
     }
@@ -58,7 +64,6 @@ fn main() -> ExitCode {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // --layout-preview: static text preview of the UI.
     if cli.layout_preview {
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let data = PreviewData::default();
@@ -69,33 +74,34 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Default: probe tmux, report it, then enter the UI.
     match tmux::probe() {
         Ok(probe) => {
-            match &probe.version {
-                Some(v) if v.is_supported() => {
-                    eprintln!("tuimux: found {} {}", probe.binary, v);
-                }
-                Some(v) => {
+            if let Some(v) = probe.version {
+                if !v.is_supported() {
                     eprintln!(
-                        "tuimux: warning — {} {} is older than the supported {}. \
-                         Some features may not work. Try: brew install tmux",
+                        "tuimux: warning — {} {} is older than the supported {}. Some features may not work.",
                         probe.binary,
                         v,
                         tmux::MIN_SUPPORTED
                     );
                 }
-                None => {
-                    eprintln!(
-                        "tuimux: warning — could not parse tmux version from `{}`.",
-                        probe.raw_version
-                    );
-                }
+            } else {
+                eprintln!(
+                    "tuimux: warning — could not parse tmux version from `{}`.",
+                    probe.raw_version
+                );
             }
-            match tui::run(&probe) {
+
+            let result = if cli.dashboard {
+                tui::run(&probe)
+            } else {
+                run_native_tmux(&probe, &cli.session)
+            };
+
+            match result {
                 Ok(rc) => code(rc),
                 Err(e) => {
-                    eprintln!("tuimux: UI error: {e}");
+                    eprintln!("tuimux: {e}");
                     ExitCode::FAILURE
                 }
             }
@@ -111,6 +117,20 @@ fn main() -> ExitCode {
             code(1)
         }
     }
+}
+
+fn run_native_tmux(probe: &tmux::TmuxProbe, session: &str) -> std::io::Result<i32> {
+    let client = tmux::Tmux::new(tmux::RealTmux::new(probe.binary.clone()));
+    client
+        .ensure_session(session)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    client
+        .enable_mouse()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    client
+        .open_native_client(session)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    Ok(0)
 }
 
 /// Convert a small integer exit code into a `process::ExitCode`.

@@ -1,9 +1,8 @@
-//! The live terminal UI (`tuimux` with no subcommand).
+//! Experimental dashboard prototype (`tuimux --dashboard`).
 //!
-//! As of v0.1.6 the UI renders a real tmux pane by polling visible-screen `capture-pane` and
-//! sends keystrokes to tmux with `send-keys` when the main pane is focused. The
-//! right sidebar lists real sessions/windows, can create/switch/kill windows,
-//! create sessions, and detach.
+//! The default v0.1.7 command path does **not** use this renderer; it opens a
+//! real tmux client. This module remains only as a hidden prototype for future
+//! sidebar/control-mode experiments.
 //!
 //! If there is no tmux server yet, tuimux creates a detached session named
 //! `tuimux` so the UI always has something real to show.

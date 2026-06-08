@@ -1,9 +1,9 @@
 //! tmux discovery, command execution, and state parsing.
 //!
-//! tuimux is a front-end for a tmux server. v0.1.6 still uses tmux commands,
-//! but avoids pretending to be a terminal emulator: visible-pane capture does
-//! not read scrollback history, key forwarding ignores repeat / release events,
-//! and tmux keeps owning shell semantics.
+//! tuimux is a front-end for a tmux server. v0.1.7 defaults to a real tmux
+//! client (`tmux -u attach-session` / `switch-client`) instead of trying to
+//! emulate a shell with screen snapshots. The command helpers below still cover
+//! the experimental dashboard prototype and non-interactive state inspection.
 
 use std::fmt;
 use std::process::Command;
@@ -165,6 +165,7 @@ impl std::error::Error for TmuxError {}
 
 pub trait TmuxRunner {
     fn run(&self, args: &[String]) -> Result<String, TmuxError>;
+    fn status(&self, args: &[String]) -> Result<(), TmuxError>;
     fn inside_tmux(&self) -> bool;
 }
 
@@ -194,6 +195,20 @@ impl TmuxRunner for RealTmux {
             });
         }
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    fn status(&self, args: &[String]) -> Result<(), TmuxError> {
+        let status = Command::new(&self.binary)
+            .args(args)
+            .status()
+            .map_err(|e| TmuxError::Spawn(format!("could not run `{}`: {e}", self.binary)))?;
+        if !status.success() {
+            return Err(TmuxError::Failed {
+                status: status.code(),
+                stderr: String::new(),
+            });
+        }
+        Ok(())
     }
 
     fn inside_tmux(&self) -> bool {
@@ -242,6 +257,23 @@ impl<R: TmuxRunner> Tmux<R> {
 
     pub fn new_session(&self, name: &str) -> Result<(), TmuxError> {
         self.runner.run(&new_session_args(name)).map(|_| ())
+    }
+
+    pub fn ensure_session(&self, name: &str) -> Result<(), TmuxError> {
+        if self.list_sessions()?.iter().any(|s| s.name == name) {
+            Ok(())
+        } else {
+            self.new_session(name)
+        }
+    }
+
+    pub fn enable_mouse(&self) -> Result<(), TmuxError> {
+        self.runner.run(&set_mouse_args()).map(|_| ())
+    }
+
+    pub fn open_native_client(&self, session: &str) -> Result<(), TmuxError> {
+        self.runner
+            .status(&native_client_args(session, self.runner.inside_tmux()))
     }
 
     pub fn select_window(&self, session: &str, index: u32) -> Result<(), TmuxError> {
@@ -378,6 +410,32 @@ pub(crate) fn new_session_args(session: &str) -> Vec<String> {
         "-s".to_string(),
         session.to_string(),
     ]
+}
+
+pub(crate) fn set_mouse_args() -> Vec<String> {
+    vec![
+        "set-option".to_string(),
+        "-gq".to_string(),
+        "mouse".to_string(),
+        "on".to_string(),
+    ]
+}
+
+pub(crate) fn native_client_args(session: &str, inside_tmux: bool) -> Vec<String> {
+    if inside_tmux {
+        vec![
+            "switch-client".to_string(),
+            "-t".to_string(),
+            session.to_string(),
+        ]
+    } else {
+        vec![
+            "-u".to_string(),
+            "attach-session".to_string(),
+            "-t".to_string(),
+            session.to_string(),
+        ]
+    }
 }
 
 pub(crate) fn select_window_args(session: &str, index: u32) -> Vec<String> {
@@ -563,6 +621,15 @@ mod tests {
         assert_eq!(
             new_session_args("scratch"),
             vec!["new-session", "-d", "-s", "scratch"]
+        );
+        assert_eq!(set_mouse_args(), vec!["set-option", "-gq", "mouse", "on"]);
+        assert_eq!(
+            native_client_args("dev", false),
+            vec!["-u", "attach-session", "-t", "dev"]
+        );
+        assert_eq!(
+            native_client_args("dev", true),
+            vec!["switch-client", "-t", "dev"]
         );
         assert_eq!(
             select_window_args("dev", 2),

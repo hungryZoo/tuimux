@@ -148,7 +148,7 @@ jobs:
 
             Early MVP scaffold. macOS arm64 and x86_64 binaries are attached.
 
-            This prerelease fixes tmux-native shell behavior: window close `✕` now has its own hover feedback, key forwarding ignores repeat/release events to avoid duplicate Enter, pane capture no longer reads scrollback so `clear` works, and full-screen programs such as nano render through tmux visible-screen capture.
+            This prerelease resets the default UX to a real tmux client instead of a scraped shell renderer. `tuimux` now creates/attaches the target session with `tmux -u attach-session`, uses `switch-client` when already inside tmux, and enables `mouse on` so ls, nano/vim/less, wheel/copy-mode, and Korean/CJK text stay owned by tmux and the user's terminal.
 
             ### Install (one-liner)
             ```sh

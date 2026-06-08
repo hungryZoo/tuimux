@@ -1,187 +1,123 @@
 # tuimux PRD (Product Requirements Document)
 
-- **문서 버전**: 0.6 (Draft)
+- **문서 버전**: 0.7 (Draft)
 - **작성일**: 2026-06-08
-- **상태**: 스켈레톤 구현/UX 검증용 요구사항
+- **상태**: v0.1.7 tmux-native 재설계 기준
 - **프로젝트명**: tuimux
-- **한 줄 요약**: tmux를 백엔드로 쓰되, prefix 키 없이 마우스와 단순한 TUI 버튼으로 세션·창·패널을 다루는 Rust 기반 TUI 래퍼.
+- **한 줄 요약**: tmux를 대체하거나 흉내 내지 않고, tmux의 실제 client UX 위에 prefix 부담을 줄이는 최소 도구를 얹는 Rust 기반 wrapper.
 
 ---
 
-## 1. 개요
+## 1. 문제 재정의
 
-tuimux는 tmux의 핵심 가치(세션 지속성, detach/attach, 여러 창/패널 관리)는 유지하되, tmux prefix 키와 명령 암기 부담을 줄이는 TUI 프론트엔드다.
+v0.1.5~v0.1.6의 `capture-pane` + `send-keys` 방식은 실제 shell처럼 보이려 했지만, 사용자가 체감한 결과는 “shell을 따라 하는 가짜 화면”이었다.
 
-v0.6 UX 방향은 “쉘인 척하는 화면”이 아니라 **tmux가 관리하는 실제 쉘 + 우측의 최소 조작 영역**이다. 이전 초안의 좌측 파일 탐색기, 하단 메뉴 바, 우측 PROCS 패널은 MVP에서 제외한다.
+실제 문제:
 
-핵심 차별점:
+- `ls` 출력/색/커서/폭이 자연스럽지 않다.
+- `nano`, `vim`, `less` 같은 alternate-screen/full-screen 앱이 깨진다.
+- mouse wheel/copy-mode 흐름이 tmux보다 못하다.
+- 한글/CJK wide character width와 터미널 escape semantics를 ratatui text snapshot으로 정확히 재현하기 어렵다.
 
-1. **No prefix-key**: `Ctrl-b`류 prefix 없이 마우스/단일 단축키로 조작한다.
-2. **단순한 화면**: 중앙은 tmux pane, 우측은 Session 버튼·Detach 버튼·창 탭만 둔다.
-3. **Session 버튼 중심 UX**: 우측 상단 버튼은 세션명이 아니라 `Session`으로 라벨링하고, 버튼 내부에 현재 세션명을 보여준다. 클릭하면 중앙에 헤더 없는 dialog 형태의 세션 선택/Detach 창이 뜬다.
-4. **마우스 반응성**: 모든 버튼/탭/모달 항목은 hover 시 색상·강조 등 즉각적인 반응을 보여야 한다.
-5. **tmux 백엔드 우선**: tuimux는 자체 shell/PTY를 흉내 내지 않고 tmux의 visible screen, clear, full-screen app 동작을 따른다.
-
----
-
-## 2. 목표
-
-- **G1. 학습 비용 최소화**: 사용자가 화면의 버튼과 탭만 보고 세션 전환, 창 전환, detach를 이해한다.
-- **G2. 작업 영역 우선**: 화면 대부분을 tmux pane에 할당하고 보조 UI는 우측에 압축한다.
-- **G3. 지속성**: detach/SSH 끊김 후에도 tmux 세션과 프로세스가 유지된다.
-- **G4. 마우스 우선**: 버튼 hover, 클릭, 탭 클릭이 TUI 안에서 자연스럽게 동작한다.
-- **G5. tmux-native 우선 검증**: full control-mode 구현 전에도 `clear`, nano 같은 full-screen 앱, key forwarding이 tmux 의미론을 깨지 않아야 한다.
-
-### 성공 지표
-
-- 신규 사용자가 문서 없이 Session 버튼과 Detach 버튼의 의미를 이해한다.
-- `tuimux --layout-preview`와 기본 TUI 실행 화면이 v0.6 레이아웃을 일관되게 보여준다.
-- hover 가능한 모든 UI 요소가 시각적으로 반응한다.
-- prerelease installer로 macOS에서 설치/실행 검증 가능하다.
+결론: **tuimux는 terminal emulator가 아니다.** tmux의 철학을 따르면 shell, PTY, alternate screen, mouse, UTF-8/CJK 처리는 tmux client와 terminal이 맡아야 한다.
 
 ---
 
-## 3. 비목표
+## 2. 제품 원칙
 
-- **NG1. 좌측 파일 탐색기**: MVP에서 제외한다. 파일 목록/크기/클릭 동작은 후순위다.
-- **NG2. 하단 메뉴 바**: MVP에서 제외한다. Detach는 우측 세션 영역과 세션 dialog 안에 둔다.
-- **NG3. PROCS 패널**: MVP에서 제외한다. 프로세스 가시성은 추후 overlay 또는 별도 view로 재검토한다.
-- **NG4. 드롭다운 장식**: 세션명 옆 `session:` prefix나 `▾` glyph는 쓰지 않는다.
-- **NG5. tmux 설정/플러그인 호환성**: `.tmux.conf`, tpm 등과의 완전 호환은 목표가 아니다.
-- **NG6. 자체 terminal multiplexer 엔진**: 초기 MVP에서는 직접 PTY/VT 엔진을 만들지 않는다.
-
----
-
-## 4. 사용자 페르소나
-
-### P1. 원격 서버 개발자
-- SSH로 서버에 접속해 빌드/학습/서버를 돌린다.
-- tmux를 쓰지만 prefix 키를 자주 잊는다.
-- **니즈**: 보이는 버튼으로 detach/attach를 안전하게 수행.
-
-### P2. 터미널 입문자
-- GUI처럼 보이는 세션/창 전환을 원한다.
-- **니즈**: Session 버튼, 창 탭, hover 반응으로 “클릭 가능한 곳”을 직관적으로 파악.
-
-### P3. 도구에 민감한 시니어
-- 화면을 낭비하는 보조 패널을 싫어한다.
-- **니즈**: 작업 pane을 넓게 유지하고, 조작 UI는 최소화.
+1. **tmux-native first**: 기본 실행은 실제 `tmux -u attach-session` 또는 tmux 내부 `switch-client`다.
+2. **No fake shell**: 기본 UX에서 `capture-pane` polling과 `send-keys` replay로 shell을 흉내 내지 않는다.
+3. **Mouse-on baseline**: tuimux는 최소한 `tmux set-option -gq mouse on`을 보장해 tmux 기본 mouse/copy-mode 경험보다 나빠지지 않아야 한다.
+4. **UTF-8/CJK 보존**: `tmux -u` native client 경로로 한글/이모지/CJK width를 tmux와 terminal에 맡긴다.
+5. **Full-screen apps work**: nano/vim/less/htop 같은 앱은 tmux client에서 직접 동작해야 한다.
+6. **0.x honest scope**: 아직 custom sidebar overlay/control-mode UI가 완성되지 않았으면 기본 shell 경험을 망가뜨리는 UI를 기본값으로 두지 않는다.
 
 ---
 
-## 5. MVP 요구사항
+## 3. 목표
 
-### 5.1 레이아웃
+- **G1. 실제 shell 품질 회복**: `ls`, `clear`, `nano`, mouse wheel, 한글 입력/출력이 일반 tmux client 수준으로 동작한다.
+- **G2. tmux 지속성 유지**: session, window, detach/attach는 tmux가 담당한다.
+- **G3. prefix 부담 완화의 기반 마련**: v0.1.7은 안정적인 native client를 기본값으로 하고, 이후 tmux control-mode 또는 tmux popup 기반 UI를 단계적으로 추가한다.
+- **G4. 부끄럽지 않은 MVP**: tmux mouse-on보다 못한 shell 모조품을 기본 실행 경로에서 제거한다.
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-├──────────────────────────────────────────────────────┬─────────────┤
-│                                                      │ ┌─Session─┐ │
-│                                                      │ │   dev   │ │ ← Session 버튼
-│       실제 tmux pane 출력/입력                       │ └─────────┘ │
-│                                                      │ ┌─────────┐ │
-│       pane 0 / pane 1 / pane 2                       │ │ Detach  │ │ ← title/header 없는 빨간 버튼
-│                                                      │ └─────────┘ │
-│                                                      │ WINDOWS     │
-│                                                      │ ▸ 1 build  ✕│
-│                                                      │   2 logs   ✕│
-│                                                      │   3 ssh    ✕│
-│                                                      │   + new     │
-└──────────────────────────────────────────────────────┴─────────────┘
+---
+
+## 4. 비목표
+
+- v0.1.7에서 custom right sidebar를 실제 shell 위에 완성하지 않는다.
+- v0.1.7에서 자체 terminal emulator, PTY multiplexer, VT parser를 구현하지 않는다.
+- v0.1.7에서 `capture-pane` renderer를 기본 interactive shell로 사용하지 않는다.
+- tmux 설정 전체를 tuimux가 장악하지 않는다. 단, mouse on은 제품 baseline으로 설정한다.
+
+---
+
+## 5. v0.1.7 사용자 경험
+
+### 기본 실행
+
+```sh
+tuimux
 ```
 
-- 중앙: 현재 tmux window의 pane 영역.
-- 우측 상단: 테두리 title이 `Session`인 버튼. 버튼 내부에는 현재 세션명(예: `dev`)을 표시한다.
-- 세션명 앞에 `session:` prefix를 붙이지 않고, 드롭다운 glyph도 쓰지 않는다.
-- Session 버튼 아래: title/header 없이 글자 `Detach`만 중앙에 보이는 빨간 Detach 버튼.
-- 그 아래: 현재 세션의 window 세로 탭.
-- 좌측 파일 탐색기 없음.
-- 하단 메뉴 바 없음.
-- PROCS 영역 없음.
+동작:
 
-### 5.2 세션 dialog
+1. tmux 설치/버전을 확인한다.
+2. 기본 session `tuimux`가 없으면 `tmux new-session -d -s tuimux`로 만든다.
+3. `tmux set-option -gq mouse on`을 적용한다.
+4. tmux 밖이면 `tmux -u attach-session -t tuimux`를 실행한다.
+5. tmux 안이면 nested attach를 하지 않고 `tmux switch-client -t tuimux`를 실행한다.
 
-Session 버튼 클릭 시 중앙에 dialog처럼 뜬다. dialog 외곽선에는 `Session picker` 같은 title/header를 넣지 않는다.
+### session 지정
 
-```
-        ┌────────────────────────────────────────┐
-        │  ● dev        3 windows                │
-        │    work       2 windows                │
-        │    scratch    1 window                 │
-        │                                        │
-        │     [ New Session ]     [ Detach ]     │
-        └────────────────────────────────────────┘
+```sh
+tuimux --session dev
 ```
 
-요구사항:
+`dev` session을 만들거나 attach/switch한다.
 
-- dialog에는 별도 헤더/제목 줄을 두지 않는다.
-- 현재 세션은 강조 표시한다.
-- 세션 항목 클릭 시 해당 세션으로 전환한다.
-- dialog 내부 하단에 `New Session` 버튼과 빨간 Detach 버튼을 둔다.
-- `Esc` 또는 바깥 클릭으로 닫는다.
-- dialog가 떠도 기본 화면의 레이아웃은 유지되고, overlay만 중앙에 올라온다.
+### preview/doctor
 
-### 5.3 마우스/hover
-
-- Session 버튼 hover: 강조 색상 변경.
-- Detach 버튼 hover: 빨간색 배경/테두리 등으로 강조. 단, 버튼 테두리 title/header는 표시하지 않는다.
-- window 탭 hover: 선택 가능한 행임을 표시. 각 window 행 오른쪽 `✕`는 경고 없이 해당 window를 닫는다.
-- `+ new` hover: 버튼처럼 강조.
-- dialog 세션 항목 hover: 행 하이라이트.
-- dialog Detach hover: 빨간 버튼 강조.
-
-### 5.4 기능 범위
-
-v0.6에 포함:
-
-- `--help`, `--version`, `--doctor`.
-- `--layout-preview`에서 v0.6 레이아웃 출력.
-- 기본 TUI에서 v0.6 레이아웃 렌더.
-- header 없는 compact TUI와 session dialog.
-- mouse hover 상태 반영.
-- 실제 tmux session/window 조회, 전환, 생성.
-- window 행 오른쪽 `✕` 클릭 시 경고 없이 `kill-window`.
-- 중앙 영역의 실제 tmux visible screen 출력(`capture-pane`) 및 클릭 후 키 입력 전달(`send-keys`, F12로 navigation 복귀).
-- `clear` 후 과거 scrollback이 다시 보이지 않아야 하며, nano/less/vim 같은 full-screen 앱은 tmux가 보여주는 현재 화면을 렌더해야 한다.
-- key repeat/release 이벤트는 tmux로 forwarding하지 않아 중복 Enter 같은 부작용을 방지한다.
-- `q`/`Esc` 종료, `d` detach command.
-- installer/release pipeline.
-
-아직 제외:
-
-- full `tmux -CC` streaming renderer.
-- multi-pane split/resize 조작 UI.
-- ANSI 색상/커서의 완전한 렌더링.
+- `tuimux --doctor`: 환경 진단.
+- `tuimux --layout-preview`: 향후 UI 방향을 non-interactive text로 확인.
+- 숨겨진 `--dashboard`: 이전 ratatui dashboard prototype. 기본값이 아니며 실제 shell 용도로 권장하지 않는다.
 
 ---
 
-## 6. 아키텍처 결정
+## 6. 향후 UX 방향
 
-- **TD-1 언어**: Rust.
-- **TD-2 TUI**: `ratatui` + `crossterm`.
-- **TD-3 백엔드**: v0.6은 tmux CLI 명령(`list-*`, visible-screen `capture-pane`, `send-keys`) 기반. 장기적으로 full control mode streaming.
-- **TD-4 입력**: 마우스 이벤트는 UI 영역 hit-test 후 처리. pane 영역 클릭 시 terminal mode로 들어가 키 입력을 tmux에 전달하고 F12로 navigation mode에 복귀.
-- **TD-5 UX 원칙**: 작업 영역을 넓게, 보조 UI를 우측으로 최소화.
+v0.1.7 이후 prefix-free UX는 다음 중 하나로만 진행한다.
+
+### Option A. tmux control-mode client
+
+- `tmux -CC` protocol을 사용한다.
+- pane `%output` byte stream을 VT parser로 렌더한다.
+- 입력/mouse는 protocol에 맞게 전달한다.
+- 장점: tmux session/window/pane backend를 유지하면서 custom UI 가능.
+
+### Option B. tmux popup/native bindings
+
+- 기본 shell은 tmux client 그대로 둔다.
+- Session picker, window close, new session 같은 조작은 tmux popup/menu/bindings로 제공한다.
+- 장점: tmux 철학에 가장 가깝고 shell 품질이 절대 깨지지 않는다.
+
+둘 중 어느 방향이든, `capture-pane` snapshot을 interactive terminal로 쓰는 방식은 폐기한다.
 
 ---
 
-## 7. 마일스톤
+## 7. 성공 기준
 
-- **M0 — 스켈레톤**: 설치, preview, doctor, compact layout, hover/dialog.
-- **M1 — tmux CLI 연결**: tmux server attach, session/window 목록 읽기.
-- **M2 — window/session 전환**: UI 클릭 → tmux command 송신.
-- **M3 — pane 출력/입력**: `capture-pane` 렌더링, `send-keys` passthrough.
-- **M4 — pane 조작**: split/new/close/resize.
-- **M5 — polish**: 도움말, palette, 접근성, 성능.
+- `script`/PTY에서 `tuimux --session <test>` 실행 후 실제 tmux client escape sequence가 나타난다.
+- session 안에서 `ls`, `echo 한글`, `clear`, `nano`가 tmux client 기준으로 동작한다.
+- `tmux show-option -gqv mouse`가 `on`이다.
+- `tuimux --version`은 `0.1.7`을 출력한다.
+- release installer로 macOS artifacts를 설치할 수 있다.
 
 ---
 
 ## 8. 변경 이력
 
-- **0.6 / 2026-06-08**: tmux 철학에 맞게 visible screen capture로 보정해 `clear`/nano 동작을 개선. key repeat/release forwarding 차단으로 중복 Enter 방지. window `✕` hover를 독립 반응으로 수정.
-- **0.5 / 2026-06-08**: top header row 제거, dialog New Session action 추가, window별 `✕` kill 버튼 추가, main area를 `capture-pane`/`send-keys` 기반 실제 tmux pane interaction으로 전환.
-- **0.4 / 2026-06-08**: 실제 tmux CLI 기반 session/window 조회, window 선택/생성, session 선택/생성, best-effort detach를 스켈레톤 TUI에 연결. 중앙 pane 렌더링은 여전히 control-mode 다음 단계.
-- **0.3 / 2026-06-08**: 우측 상단 버튼 title을 현재 세션명(`dev`)이 아니라 `Session`으로 변경. Detach 버튼 테두리 title 제거. 세션 dialog의 `Session picker`/`Sessions` 헤더 제거.
-- **0.2 / 2026-06-08**: 좌측 파일 탐색기, 하단 메뉴 바, PROCS 제거. 우측 세션명 버튼, 빨간 Detach 버튼, 중앙 세션 dialog, hover 반응 요구사항 반영.
-- **0.1 / 2026-06-08**: 초기 초안.
+- **0.7 / 2026-06-08**: shell emulation 폐기. 기본 실행을 real tmux native client attach/switch로 재설계. mouse on, UTF-8 native client, nano/ls/wheel/CJK 보존을 핵심 기준으로 변경.
+- **0.6 / 2026-06-08**: visible screen capture와 key repeat 차단으로 부분 보정했으나 architecture 한계가 남음.
+- **0.5 / 2026-06-08**: `capture-pane`/`send-keys` 기반 interactive shell 시도.
+- **0.4 이하**: compact right sidebar, session/window command scaffold, installer/release 기반 구축.

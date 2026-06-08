@@ -1,13 +1,8 @@
 # tuimux
 
-`tuimux` is an early Rust MVP for a VS Code-inspired, mouse-first TUI front-end for tmux.
+`tuimux` is an early Rust MVP for a prefix-free, mouse-first wrapper around tmux.
 
-The long-term goal is to use `tmux` as the backend/session engine and provide a simpler full-TUI wrapper:
-
-- center tmux pane area
-- compact right sidebar with a `Session` button, red **Detach** button, and vertical window tabs
-- centered, headerless session dialog for switching sessions or detaching
-- no tmux prefix-key workflow for normal operations
+The v0.1.7 reset is intentionally **tmux-native**: the default command opens a real tmux client instead of scraping `capture-pane` and replaying input with `send-keys`. That means `ls`, `clear`, `nano`/`vim`/`less`, mouse wheel/copy-mode, and Korean/CJK text are handled by tmux and your terminal — not by a fake shell renderer.
 
 See:
 
@@ -16,13 +11,15 @@ See:
 
 ## Current prerelease scope
 
-This is still a 0.x prerelease. The current binary now includes a functional tmux-backed TUI:
+This is still a 0.x prerelease. Current behavior:
 
-- `tuimux --help`
-- `tuimux --version`
-- `tuimux --doctor` to check tmux and terminal readiness
-- `tuimux --layout-preview` to render the planned compact VS Code-like layout
-- a safe interactive TUI shell with no top header row, real tmux session/window controls, `New Session`, window close `✕`, and a real tmux pane rendered from visible-screen `capture-pane` with keyboard input forwarded by `send-keys` after clicking the pane (`F12` returns to navigation mode). Capture is visible-screen-only, so `clear` and full-screen programs such as `nano` follow tmux semantics.
+- `tuimux` creates/attaches session `tuimux` through real tmux.
+- `tuimux --session dev` creates/attaches/switches to session `dev`.
+- tmux mouse mode is enabled with `tmux set-option -gq mouse on`.
+- outside tmux: runs `tmux -u attach-session -t <session>`.
+- inside tmux: runs `tmux switch-client -t <session>` to avoid nested clients.
+- `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
+- the old ratatui dashboard prototype is hidden behind `--dashboard` and is not the default shell experience.
 
 ## macOS install
 
@@ -41,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.1.6 \
+TUIMUX_VERSION=v0.1.7 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 
@@ -57,7 +54,7 @@ Verify:
 ```sh
 tuimux --version
 tuimux --doctor
-tuimux --layout-preview
+tuimux --session dev
 ```
 
 ## Build from source
@@ -77,4 +74,4 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.1.6` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.
+Pushing a tag like `v0.1.7` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.
