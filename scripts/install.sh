@@ -37,6 +37,7 @@ need_cmd uname
 need_cmd curl
 need_cmd tar
 need_cmd mktemp
+need_cmd dirname
 
 OS="$(uname -s)"
 if [ "$OS" != "Darwin" ]; then
@@ -78,7 +79,10 @@ if [ -z "$VERSION" ]; then
   # GitHub's /releases/latest intentionally ignores prereleases. tuimux is still
   # prerelease-only, so list releases and pick the newest tag instead.
   RELEASES_JSON="$(api_get '/releases?per_page=20')"
-  VERSION="$(echo "$RELEASES_JSON" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
+  # Do not use `grep -m1` in a pipe under `set -o pipefail`: grep may close the
+  # pipe early, make the writer receive SIGPIPE, and terminate the installer
+  # right after the "Resolving…" line. Let sed consume the whole JSON instead.
+  VERSION="$(printf '%s\n' "$RELEASES_JSON" | sed -n -E 's/.*"tag_name" *: *"([^"]+)".*/\1/p' | sed -n '1p')"
   [ -n "$VERSION" ] || die "could not determine the latest release tag. Set TUIMUX_VERSION=vX.Y.Z explicitly."
 fi
 info "Installing ${BINARY} ${BOLD}${VERSION}${RESET}"
@@ -121,6 +125,9 @@ BIN_PATH="$(find "$TMP" -type f -name "$BINARY" -perm -u+x | head -n1)"
 # ---------------------------------------------------------------------------
 choose_dir() {
   if [ -n "${TUIMUX_INSTALL_DIR:-}" ]; then echo "$TUIMUX_INSTALL_DIR"; return; fi
+  local existing=""
+  existing="$(command -v "$BINARY" 2>/dev/null || true)"
+  if [ -n "$existing" ]; then dirname "$existing"; return; fi
   local home_bin="${HOME}/.local/bin"
   mkdir -p "$home_bin" 2>/dev/null || true
   if [ -w "$home_bin" ] || [ ! -e "$home_bin" ]; then echo "$home_bin"; return; fi
