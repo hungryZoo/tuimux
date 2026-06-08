@@ -1,6 +1,6 @@
 //! The live terminal UI (`tuimux` with no subcommand).
 //!
-//! As of v0.1.5 the UI renders a real tmux pane by polling `capture-pane` and
+//! As of v0.1.6 the UI renders a real tmux pane by polling visible-screen `capture-pane` and
 //! sends keystrokes to tmux with `send-keys` when the main pane is focused. The
 //! right sidebar lists real sessions/windows, can create/switch/kill windows,
 //! create sessions, and detach.
@@ -543,21 +543,13 @@ fn render_windows(
         regions.window_count += 1;
 
         let marker = if win.active { "▸" } else { " " };
-        let is_hot = hover == Some(Hotspot::Window(row));
-        let style = if is_hot {
-            Style::default().fg(Color::Black).bg(Color::Green)
-        } else if win.active {
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        win_items.push(ListItem::new(Line::from(vec![Span::styled(
-            format_window_row(marker, win.index, &win.name, area.width.saturating_sub(2)),
-            style,
-        )])));
+        win_items.push(ListItem::new(window_row_line(
+            marker,
+            win,
+            area.width.saturating_sub(2),
+            hover,
+            row,
+        )));
     }
 
     let new_row = win_items.len();
@@ -669,26 +661,62 @@ fn render_session_modal(
     f.render_widget(detach, actions[1]);
 }
 
-fn format_window_row(marker: &str, index: u32, name: &str, width: u16) -> String {
+fn window_row_line(
+    marker: &str,
+    win: &Window,
+    width: u16,
+    hover: Option<Hotspot>,
+    row: usize,
+) -> Line<'static> {
     let width = width as usize;
-    let close = "✕";
+    let close_hot = hover == Some(Hotspot::WindowClose(row));
     if width <= 2 {
-        return close.to_string();
+        return Line::from(Span::styled("✕".to_string(), close_style(close_hot)));
     }
-    let label = format!("{marker} {index}: {name}");
+
+    let label = format!("{marker} {}: {}", win.index, win.name);
     let label_width = width.saturating_sub(2);
     let label_len = label.chars().count();
-    if label_len >= label_width {
-        format!(
-            "{} {close}",
-            label.chars().take(label_width).collect::<String>()
-        )
+    let label_text = if label_len >= label_width {
+        label.chars().take(label_width).collect::<String>()
     } else {
-        format!("{}{} {close}", label, " ".repeat(label_width - label_len))
+        format!("{}{}", label, " ".repeat(label_width - label_len))
+    };
+
+    let row_hot = hover == Some(Hotspot::Window(row));
+    let row_style = if row_hot {
+        Style::default().fg(Color::Black).bg(Color::Green)
+    } else if win.active {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    Line::from(vec![
+        Span::styled(label_text, row_style),
+        Span::raw(" "),
+        Span::styled("✕", close_style(close_hot)),
+    ])
+}
+
+fn close_style(hot: bool) -> Style {
+    if hot {
+        Style::default()
+            .fg(Color::Red)
+            .bg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Red)
     }
 }
 
 fn key_event_to_send_keys(key: KeyEvent) -> Option<Vec<String>> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         if let KeyCode::Char(c) = key.code {
             return Some(vec![format!("C-{}", c.to_ascii_lowercase())]);
@@ -817,6 +845,26 @@ mod tests {
     }
 
     #[test]
+    fn only_press_key_events_are_forwarded_to_tmux() {
+        let press = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let repeat = KeyEvent {
+            kind: KeyEventKind::Repeat,
+            ..press
+        };
+        let release = KeyEvent {
+            kind: KeyEventKind::Release,
+            ..press
+        };
+
+        assert_eq!(
+            key_event_to_send_keys(press),
+            Some(vec!["Enter".to_string()])
+        );
+        assert_eq!(key_event_to_send_keys(repeat), None);
+        assert_eq!(key_event_to_send_keys(release), None);
+    }
+
+    #[test]
     fn hit_test_prefers_window_close_x_over_window_row() {
         let mut regions = Regions::default();
         regions.windows[0] = Rect::new(10, 5, 20, 1);
@@ -828,6 +876,20 @@ mod tests {
             Some(Hotspot::WindowClose(0))
         );
         assert_eq!(hit_test(12, 5, &regions, false), Some(Hotspot::Window(0)));
+    }
+
+    #[test]
+    fn close_x_hover_gets_its_own_red_style() {
+        let active = Window {
+            index: 1,
+            name: "build".to_string(),
+            active: true,
+        };
+        let row = window_row_line("▸", &active, 20, Some(Hotspot::WindowClose(0)), 0);
+        let last = row.spans.last().expect("close span");
+        assert_eq!(last.content.as_ref(), "✕");
+        assert_eq!(last.style.fg, Some(Color::Red));
+        assert_eq!(last.style.bg, Some(Color::Black));
     }
 
     #[test]

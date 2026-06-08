@@ -1,21 +1,21 @@
 # tuimux SRS (Software Requirements Specification)
 
-- **문서 버전**: 0.5 (Draft)
+- **문서 버전**: 0.6 (Draft)
 - **작성일**: 2026-06-08
-- **상태**: v0.5 기능 구현 대상 명세
+- **상태**: v0.6 기능 구현 대상 명세
 - **프로젝트명**: tuimux
-- **상위 문서**: [docs/prd.md](./prd.md) (PRD v0.5)
-- **한 줄 요약**: tmux control mode를 최종 백엔드로 지향하는 Rust TUI 래퍼. v0.5는 compact UI에서 실제 tmux session/window 제어와 `capture-pane`/`send-keys` 기반 main pane interaction을 제공한다.
+- **상위 문서**: [docs/prd.md](./prd.md) (PRD v0.6)
+- **한 줄 요약**: tmux control mode를 최종 백엔드로 지향하는 Rust TUI 래퍼. v0.6은 compact UI에서 실제 tmux session/window 제어와 visible-screen `capture-pane`/`send-keys` 기반 main pane interaction을 더 tmux-native하게 보정한다.
 
 ---
 
 ## 1. 범위
 
-본 SRS는 v0.5 스켈레톤의 구현 가능한 요구사항을 정의한다.
+본 SRS는 v0.6의 구현 가능한 요구사항을 정의한다.
 
 ### 포함
 
-- `ratatui` 기반 v0.5 레이아웃.
+- `ratatui` 기반 v0.6 레이아웃.
 - `crossterm` mouse event 기반 hover/click routing.
 - 우측 `Session` 버튼(테두리 title은 `Session`, 버튼 내부에는 현재 세션명 표시).
 - 우측 빨간 Detach 버튼(테두리 title/header 없음).
@@ -37,7 +37,7 @@
 
 ## 2. 용어
 
-- **Main area**: tmux pane들이 렌더될 중앙 영역. v0.5는 `capture-pane`으로 실제 active pane text를 렌더한다.
+- **Main area**: tmux pane들이 렌더될 중앙 영역. v0.6은 scrollback history가 아니라 tmux visible screen `capture-pane`으로 실제 active pane text를 렌더한다.
 - **Session button**: 우측 상단 버튼. 버튼 테두리 title은 `Session`, 버튼 내부 텍스트는 현재 세션명(예: `dev`)이다.
 - **Detach button**: session button 바로 아래의 빨간 버튼. 테두리 title/header 없이 버튼 내부에 `Detach`만 표시한다.
 - **Window tabs**: 우측의 세로 window 목록.
@@ -53,14 +53,14 @@
 - **FR-CLI-1 [M]** `tuimux --help`는 사용 가능한 옵션을 표시한다.
 - **FR-CLI-2 [M]** `tuimux --version`은 패키지 버전을 표시한다.
 - **FR-CLI-3 [M]** `tuimux --doctor`는 tmux 설치/버전과 터미널 환경을 점검한다.
-- **FR-CLI-4 [M]** `tuimux --layout-preview`는 v0.5 static layout을 출력한다.
+- **FR-CLI-4 [M]** `tuimux --layout-preview`는 v0.6 static layout을 출력한다.
 - **FR-CLI-5 [M]** 인자 없이 실행하면 interactive TUI shell을 연다. stdout이 TTY가 아니면 안전하게 거부한다.
 
 ### 3.2 레이아웃
 
 - **FR-LAYOUT-1 [M]** 화면은 `body`만 구성한다. top status/header row와 하단 메뉴 바는 없어야 한다.
 - **FR-LAYOUT-2 [M]** body는 `main area + right sidebar` 두 영역만 가진다. 좌측 파일 탐색기는 없어야 한다.
-- **FR-LAYOUT-3 [M]** main area는 tmux capture-pane 기반의 실제 active pane 내용을 표시한다.
+- **FR-LAYOUT-3 [M]** main area는 tmux visible-screen `capture-pane` 기반의 실제 active pane 내용을 표시한다. scrollback `-S`를 사용해 지워진 과거 history를 다시 보여주지 않는다.
 - **FR-LAYOUT-4 [M]** right sidebar는 위에서부터 session button, Detach button, window tabs 순서로 배치한다.
 - **FR-LAYOUT-5 [M]** PROCS 영역은 렌더하지 않는다.
 
@@ -91,6 +91,7 @@
 - **FR-WIN-5 [M]** window 탭 클릭 시 `select-window`, `+ new` 클릭 시 `new-window` 명령을 tmux로 보낸다.
 - **FR-WIN-6 [M]** 각 window 행은 이름을 왼쪽 정렬하고 행 맨 오른쪽에 `✕` 버튼을 표시한다.
 - **FR-WIN-7 [M]** window 행의 `✕` 클릭 시 경고 없이 `kill-window -t <session>:<index>`를 보낸다.
+- **FR-WIN-8 [M]** window 행의 `✕` hover는 window row hover와 독립적으로 빨간 강조를 표시한다.
 
 ### 3.6 Session dialog
 
@@ -114,6 +115,13 @@
 - **FR-MOUSE-3 [M]** mouse move/down 이벤트마다 현재 hover target을 계산한다.
 - **FR-MOUSE-4 [M]** hover target에 맞춰 색상/배경/테두리를 변경한다.
 - **FR-MOUSE-5 [M]** modal이 열려 있을 때 modal 항목이 sidebar보다 우선 hit-test된다.
+
+### 3.8 tmux-native pane behavior
+
+- **FR-PANE-1 [M]** terminal mode에서 `KeyEventKind::Press`만 tmux `send-keys`로 전달한다. repeat/release 이벤트는 버려 중복 Enter를 방지한다.
+- **FR-PANE-2 [M]** `clear` 실행 후 `capture-pane` 결과에는 지워진 과거 명령 출력이 다시 보이지 않아야 한다.
+- **FR-PANE-3 [M]** nano/less/vim 같은 full-screen 앱 실행 중에는 tmux가 보여주는 현재 visible screen을 렌더해야 한다.
+- **FR-PANE-4 [M]** tuimux는 shell/PTY/VT emulator를 자체 구현한 것처럼 동작하지 않고 tmux에 shell semantics를 맡긴다.
 
 ---
 
@@ -186,6 +194,8 @@ SessionDialogOpen
 - **AC-5** mouse hover target에 따라 스타일이 바뀌는 코드 경로가 있다.
 - **AC-6** macOS release asset과 `SHA256SUMS`가 GitHub prerelease에 업로드된다.
 - **AC-7** raw one-line installer가 최신 prerelease를 설치한다.
+- **AC-8** 실제 tmux sandbox에서 `clear` 후 이전 출력이 capture되지 않고, nano 화면 문구가 capture된다.
+- **AC-9** unit test가 key repeat/release가 tmux로 전달되지 않음과 window `✕` hover style을 검증한다.
 
 ---
 
@@ -201,6 +211,7 @@ SessionDialogOpen
 
 ## 9. 변경 이력
 
+- **0.6 / 2026-06-08**: `capture-pane`에서 scrollback `-S` 사용 제거, repeat/release key forwarding 차단, window close `✕` 전용 hover style, nano/clear 회귀 검증 요구사항 반영.
 - **0.5 / 2026-06-08**: top header row 없음, `capture-pane` main renderer, `send-keys` keyboard forwarding, `kill-window` X 버튼, dialog New Session action 요구사항 반영.
 - **0.4 / 2026-06-08**: `list-sessions`/`list-windows` 기반 live state, `select-window`/`new-window`/`new-session`/`detach-client` command dispatch 요구사항을 스켈레톤에 반영. control-mode pane streaming은 다음 단계로 유지.
 - **0.3 / 2026-06-08**: Session 버튼 title을 `Session`으로 고정하고 내부에 현재 세션명을 표시. Detach 버튼 및 dialog Detach의 테두리 title 제거. dialog의 `Session picker`/`Sessions` 헤더 제거.

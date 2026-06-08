@@ -22,7 +22,7 @@ This is still a 0.x prerelease. The current binary now includes a functional tmu
 - `tuimux --version`
 - `tuimux --doctor` to check tmux and terminal readiness
 - `tuimux --layout-preview` to render the planned compact VS Code-like layout
-- a safe interactive TUI shell with no top header row, real tmux session/window controls, `New Session`, window close `✕`, and a real tmux pane rendered from `capture-pane` with keyboard input forwarded by `send-keys` after clicking the pane (`F12` returns to navigation mode)
+- a safe interactive TUI shell with no top header row, real tmux session/window controls, `New Session`, window close `✕`, and a real tmux pane rendered from visible-screen `capture-pane` with keyboard input forwarded by `send-keys` after clicking the pane (`F12` returns to navigation mode). Capture is visible-screen-only, so `clear` and full-screen programs such as `nano` follow tmux semantics.
 
 ## macOS install
 
@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.1.5 \
+TUIMUX_VERSION=v0.1.6 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 
@@ -77,4 +77,4 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.1.5` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.
+Pushing a tag like `v0.1.6` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.

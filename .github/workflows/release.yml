@@ -148,7 +148,7 @@ jobs:
 
             Early MVP scaffold. macOS arm64 and x86_64 binaries are attached.
 
-            This prerelease makes the TUI functional: no top header row, real tmux pane capture/input in the main area, a New Session dialog action, window close `✕` buttons, real session/window controls, and the existing compact right sidebar.
+            This prerelease fixes tmux-native shell behavior: window close `✕` now has its own hover feedback, key forwarding ignores repeat/release events to avoid duplicate Enter, pane capture no longer reads scrollback so `clear` works, and full-screen programs such as nano render through tmux visible-screen capture.
 
             ### Install (one-liner)
             ```sh

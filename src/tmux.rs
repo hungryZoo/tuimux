@@ -1,9 +1,9 @@
 //! tmux discovery, command execution, and state parsing.
 //!
-//! tuimux is a front-end for a tmux server. v0.1.5 uses real tmux commands for
-//! the session/window/sidebar and a first functional pane loop: `capture-pane`
-//! for rendering and `send-keys` for keyboard input. Full `tmux -CC` streaming is
-//! still a later milestone.
+//! tuimux is a front-end for a tmux server. v0.1.6 still uses tmux commands,
+//! but avoids pretending to be a terminal emulator: visible-pane capture does
+//! not read scrollback history, key forwarding ignores repeat / release events,
+//! and tmux keeps owning shell semantics.
 
 use std::fmt;
 use std::process::Command;
@@ -260,20 +260,14 @@ impl<R: TmuxRunner> Tmux<R> {
             .map(|_| ())
     }
 
-    pub fn resize_window(&self, session: &str, width: u16, height: u16) -> Result<(), TmuxError> {
-        self.runner
-            .run(&resize_window_args(session, width, height))
-            .map(|_| ())
-    }
-
     pub fn capture_pane(
         &self,
         session: &str,
         width: u16,
         height: u16,
     ) -> Result<Vec<String>, TmuxError> {
-        let _ = self.resize_window(session, width.max(1), height.max(1));
-        match self.runner.run(&capture_pane_args(session, width, height)) {
+        let _ = (width, height);
+        match self.runner.run(&capture_pane_args(session)) {
             Ok(stdout) => Ok(parse_capture(&stdout)),
             Err(err) if is_no_server_error(&err) => Ok(Vec::new()),
             Err(err) => Err(err),
@@ -410,26 +404,12 @@ pub(crate) fn kill_window_args(session: &str, index: u32) -> Vec<String> {
     ]
 }
 
-pub(crate) fn resize_window_args(session: &str, width: u16, height: u16) -> Vec<String> {
-    vec![
-        "resize-window".to_string(),
-        "-t".to_string(),
-        session.to_string(),
-        "-x".to_string(),
-        width.max(1).to_string(),
-        "-y".to_string(),
-        height.max(1).to_string(),
-    ]
-}
-
-pub(crate) fn capture_pane_args(session: &str, _width: u16, height: u16) -> Vec<String> {
+pub(crate) fn capture_pane_args(session: &str) -> Vec<String> {
     vec![
         "capture-pane".to_string(),
         "-p".to_string(),
         "-t".to_string(),
         session.to_string(),
-        "-S".to_string(),
-        format!("-{}", height.max(1)),
     ]
 }
 
@@ -595,8 +575,8 @@ mod tests {
     #[test]
     fn tmux_command_args_cover_real_pane_and_window_actions() {
         assert_eq!(
-            capture_pane_args("dev", 80, 20),
-            vec!["capture-pane", "-p", "-t", "dev", "-S", "-20"]
+            capture_pane_args("dev"),
+            vec!["capture-pane", "-p", "-t", "dev"]
         );
         assert_eq!(
             send_keys_args("dev", &["-l".to_string(), "a".to_string()]),
@@ -605,10 +585,6 @@ mod tests {
         assert_eq!(
             kill_window_args("dev", 2),
             vec!["kill-window", "-t", "dev:2"]
-        );
-        assert_eq!(
-            resize_window_args("dev", 100, 30),
-            vec!["resize-window", "-t", "dev", "-x", "100", "-y", "30"]
         );
     }
 
