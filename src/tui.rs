@@ -220,7 +220,7 @@ fn ui(f: &mut Frame, probe: &TmuxProbe, data: &PreviewData, state: &mut UiState)
     }
 }
 
-fn button_block<'a>(title: &'a str, color: Color, hot: bool) -> Block<'a> {
+fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a> {
     let style = if hot {
         Style::default()
             .fg(Color::Black)
@@ -229,10 +229,12 @@ fn button_block<'a>(title: &'a str, color: Color, hot: bool) -> Block<'a> {
     } else {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(style)
-        .title(Span::styled(format!(" {title} "), style))
+    let block = Block::default().borders(Borders::ALL).border_style(style);
+    if let Some(title) = title {
+        block.title(Span::styled(format!(" {title} "), style))
+    } else {
+        block
+    }
 }
 
 fn render_main(f: &mut Frame, area: Rect, data: &PreviewData) {
@@ -265,7 +267,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiS
         Style::default().add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block(&data.session, Color::Cyan, session_hot));
+    .block(button_block(Some("Session"), Color::Cyan, session_hot));
     f.render_widget(session, chunks[0]);
 
     let detach_hot = state.hover == Some(Hotspot::DetachButton);
@@ -274,7 +276,7 @@ fn render_sidebar(f: &mut Frame, area: Rect, data: &PreviewData, state: &mut UiS
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block("Detach", Color::Red, detach_hot));
+    .block(button_block(None, Color::Red, detach_hot));
     f.render_widget(detach, chunks[1]);
 
     render_windows(f, chunks[2], data, state);
@@ -343,27 +345,14 @@ fn render_session_modal(f: &mut Frame, data: &PreviewData, state: &mut UiState) 
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
         .margin(1)
         .split(area);
 
-    let title = Paragraph::new(Line::from(Span::styled(
-        "Sessions",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .alignment(Alignment::Center);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Session picker ");
+        .border_style(Style::default().fg(Color::Cyan));
     f.render_widget(block, area);
-    f.render_widget(title, chunks[0]);
 
     state.regions.modal_session_count = 0;
     let mut items = Vec::new();
@@ -372,9 +361,9 @@ fn render_session_modal(f: &mut Frame, data: &PreviewData, state: &mut UiState) 
             break;
         }
         let row_rect = Rect::new(
-            chunks[1].x,
-            chunks[1].y.saturating_add(idx as u16),
-            chunks[1].width,
+            chunks[0].x,
+            chunks[0].y.saturating_add(idx as u16),
+            chunks[0].width,
             1,
         );
         state.regions.modal_sessions[idx] = row_rect;
@@ -396,17 +385,17 @@ fn render_session_modal(f: &mut Frame, data: &PreviewData, state: &mut UiState) 
             Span::raw(format!("  {windows} windows")),
         ])));
     }
-    f.render_widget(List::new(items), chunks[1]);
+    f.render_widget(List::new(items), chunks[0]);
 
-    state.regions.modal_detach = chunks[2];
+    state.regions.modal_detach = chunks[1];
     let hot = state.hover == Some(Hotspot::ModalDetach);
     let detach = Paragraph::new(Line::from(Span::styled(
         "Detach",
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block("Detach", Color::Red, hot));
-    f.render_widget(detach, chunks[2]);
+    .block(button_block(None, Color::Red, hot));
+    f.render_widget(detach, chunks[1]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

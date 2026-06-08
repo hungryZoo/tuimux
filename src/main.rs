@@ -24,7 +24,7 @@ use preview::PreviewData;
     version,
     about = "Prefix-free, mouse-first TUI front-end for tmux (VS Code-inspired layout)",
     long_about = "tuimux is a TUI front-end for tmux. It renders a VS Code-inspired layout \n\
-                  (left file explorer, center panes, right session/window tabs, bottom menu) \n\
+                  (center panes, right Session/Detach/window controls) \n\
                   and drives a tmux server over control mode.\n\n\
                   This is an early MVP scaffold. Run with no flags to open the UI, or use \n\
                   --layout-preview / --doctor for non-interactive output."

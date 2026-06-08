@@ -135,7 +135,7 @@ fn main_column(panes: &[&str], w: usize, h: usize) -> Vec<String> {
 fn right_column(data: &PreviewData, w: usize, h: usize) -> Vec<String> {
     let mut rows = Vec::with_capacity(h);
 
-    rows.push(center_button(&data.session, w));
+    rows.push(center_button("Session", w));
     rows.push(center_button("Detach", w));
     rows.push(fit(&"─".repeat(w), w));
     rows.push(fit("WINDOWS", w));
@@ -172,7 +172,7 @@ fn overlay_session_dialog(out: &mut String, data: &PreviewData, width: usize) {
     out.push('\n');
     out.push_str(&indent);
     out.push('┌');
-    out.push_str(&fit("──── Sessions ", dialog_w - 2));
+    out.push_str(&"─".repeat(dialog_w - 2));
     out.push_str("┐\n");
     for (name, windows, active) in &data.sessions {
         out.push_str(&indent);
@@ -240,19 +240,31 @@ mod tests {
         );
 
         assert!(
-            out.contains("[ dev ]"),
-            "session name should look button-like"
+            out.contains("[ Session ]"),
+            "sidebar session button should be labeled Session, not the session name"
         );
         assert!(
             out.contains("[ Detach ]"),
-            "detach belongs under the session button"
+            "detach should render as a button label only"
         );
         assert!(out.contains("WINDOWS"));
         assert!(
-            out.contains("┌──── Sessions"),
-            "preview should show session dialog scaffold"
+            out.contains("● dev"),
+            "session list still shows the active session name"
         );
 
+        assert!(
+            !out.contains("[ dev ]"),
+            "sidebar button label should not be dev"
+        );
+        assert!(
+            !out.contains("Session picker"),
+            "dialog header/title was removed"
+        );
+        assert!(
+            !out.contains("┌──── Sessions"),
+            "dialog border title was removed"
+        );
         assert!(!out.contains("EXPLORER"), "left file explorer was removed");
         assert!(!out.contains("PROCS"), "right PROCS panel was removed");
         assert!(!out.contains("Detach Alt-d"), "bottom menu bar was removed");

@@ -4,10 +4,9 @@
 
 The long-term goal is to use `tmux` as the backend/session engine and provide a simpler full-TUI wrapper:
 
-- left file explorer with file sizes
 - center tmux pane area
-- right sidebar with current session and vertical window tabs
-- bottom clickable menu bar with **Detach**
+- compact right sidebar with a `Session` button, red **Detach** button, and vertical window tabs
+- centered, headerless session dialog for switching sessions or detaching
 - no tmux prefix-key workflow for normal operations
 
 See:
@@ -22,7 +21,7 @@ This is not the complete tmux control-mode implementation yet. The current binar
 - `tuimux --help`
 - `tuimux --version`
 - `tuimux --doctor` to check tmux and terminal readiness
-- `tuimux --layout-preview` to render the planned VS Code-like layout
+- `tuimux --layout-preview` to render the planned compact VS Code-like layout
 - a safe interactive TUI shell that shows the revised compact layout (main panes + right session controls), includes hover-aware buttons, and exits with `q`/`Esc`
 
 ## macOS install
@@ -42,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.1.2 \
+TUIMUX_VERSION=v0.1.3 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 
@@ -78,4 +77,4 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.1.0` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.
+Pushing a tag like `v0.1.3` triggers `.github/workflows/release.yml`, which builds macOS arm64 and x86_64 archives and publishes a GitHub prerelease.
