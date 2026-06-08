@@ -1,0 +1,27 @@
+[package]
+name = "tuimux"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A prefix-free, mouse-first TUI front-end for tmux (VS Code-inspired layout)"
+license = "MIT"
+repository = "https://github.com/hungryZoo/tuimux"
+readme = "README.md"
+keywords = ["tmux", "tui", "terminal", "multiplexer"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "tuimux"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.27"
+ratatui = "0.26"
+
+[profile.release]
+strip = true
+lto = "thin"
+opt-level = "z"
+codegen-units = 1
+panic = "abort"

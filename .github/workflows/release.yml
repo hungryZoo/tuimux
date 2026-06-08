@@ -1,0 +1,168 @@
+name: release
+
+# Build macOS arm64 + x86_64 assets and publish a GitHub *prerelease* whenever a
+# v* tag is pushed. The repo can stay private; downloads then require a token
+# (see scripts/install.sh, which supports GITHUB_TOKEN).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0). Used for manual runs."
+        required: true
+
+permissions:
+  contents: write # needed to create the release and upload assets
+
+env:
+  BINARY: tuimux
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tarball
+        id: pkg
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          STAGE="${BINARY}-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${STAGE}"
+
+          cp "target/${{ matrix.target }}/release/${BINARY}" "dist/${STAGE}/"
+          cp README.md "dist/${STAGE}/" 2>/dev/null || true
+          [ -f LICENSE ] && cp LICENSE "dist/${STAGE}/" || true
+
+          # Short install notes bundled with the binary.
+          cat > "dist/${STAGE}/INSTALL.txt" <<EOF
+          tuimux ${VERSION} — macOS (${{ matrix.arch }} / ${{ matrix.target }})
+
+          1. Ensure tmux is installed:   brew install tmux
+          2. Move the binary onto your PATH, e.g.:
+               install -m 0755 ${BINARY} ~/.local/bin/${BINARY}
+          3. If macOS blocks it (Gatekeeper):
+               xattr -d com.apple.quarantine ~/.local/bin/${BINARY}
+          4. Verify:
+               ${BINARY} --version
+               ${BINARY} --doctor
+
+          Or use the one-line installer:
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+          EOF
+
+          ARCHIVE="${STAGE}.tar.gz"
+          tar -C dist -czf "$ARCHIVE" "$STAGE"
+          shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+
+          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.pkg.outputs.archive }}.sha256
+          retention-days: 7
+
+  release:
+    name: publish prerelease
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble assets + SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          # Flatten the per-target artifact dirs into one folder.
+          find artifacts -type f -name '*.tar.gz' -exec cp {} release/ \;
+          cd release
+          # One combined checksum file across all archives.
+          shasum -a 256 *.tar.gz > SHA256SUMS
+          echo "Release assets:"; ls -la; echo; cat SHA256SUMS
+
+      - name: Create GitHub prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: tuimux ${{ steps.ver.outputs.version }}
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## tuimux ${{ steps.ver.outputs.version }} (prerelease)
+
+            Early MVP scaffold. macOS arm64 and x86_64 binaries are attached.
+
+            ### Install (one-liner)
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+            ```
+            If this repository is **private**, both the raw installer and the release assets need a token with `repo` scope:
+            ```sh
+            export GITHUB_TOKEN="<github-token-with-repo-scope>"
+            curl -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh \
+              | bash
+            ```
+
+            Requires `tmux` at runtime (`brew install tmux`). Verify with `tuimux --doctor`.
+
+            Checksums are in `SHA256SUMS`.
+          files: |
+            release/*.tar.gz
+            release/SHA256SUMS
