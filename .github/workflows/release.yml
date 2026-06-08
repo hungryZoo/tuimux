@@ -148,16 +148,11 @@ jobs:
 
             Early MVP scaffold. macOS arm64 and x86_64 binaries are attached.
 
+            This prerelease updates the scaffold UX: no left explorer, no bottom menu, no PROCS panel; the right sidebar now has a session button, red Detach button, window tabs, and a centered session dialog.
+
             ### Install (one-liner)
             ```sh
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
-            ```
-            If this repository is **private**, both the raw installer and the release assets need a token with `repo` scope:
-            ```sh
-            export GITHUB_TOKEN="<github-token-with-repo-scope>"
-            curl -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh \
-              | bash
             ```
 
             Requires `tmux` at runtime (`brew install tmux`). Verify with `tuimux --doctor`.

@@ -1,31 +1,27 @@
-//! VS Code-inspired layout preview (SRS §5.1).
+//! Simplified layout preview (SRS §5.1).
 //!
-//! Renders the tuimux screen as a static text mock: a left file explorer with
-//! sizes, a center "main area" standing in for tmux panes, a right sidebar with
-//! the session name + vertical window tabs + a PROCS list, and an always-visible
-//! bottom menu bar containing **Detach**.
-//!
-//! This is deliberately data-driven so the same composition can back both the
-//! non-interactive `--layout-preview` output and (later) the live ratatui UI.
+//! Renders the tuimux screen as a static text mock: a center tmux pane area, a
+//! compact right sidebar with a button-like session name, a red Detach button,
+//! vertical window tabs, and a centered session dialog scaffold. The early
+//! explorer, bottom menu bar, and PROCS panel were intentionally removed.
 
 use std::path::Path;
-
-use crate::files::FileListing;
 
 /// Mock content for the regions that aren't wired to a real tmux server yet.
 /// In the live client these come from control-mode events; here they are static
 /// so the preview is reproducible.
 pub struct PreviewData {
     pub session: String,
-    pub windows: Vec<(u32, &'static str, bool)>, // (index, name, active)
+    pub sessions: Vec<(&'static str, u32, bool)>, // (name, windows, active)
+    pub windows: Vec<(u32, &'static str, bool)>,  // (index, name, active)
     pub panes: Vec<&'static str>,
-    pub procs: Vec<(&'static str, &'static str)>, // (status glyph + cmd, pid/info)
 }
 
 impl Default for PreviewData {
     fn default() -> Self {
         PreviewData {
             session: "dev".to_string(),
+            sessions: vec![("dev", 3, true), ("work", 2, false), ("scratch", 1, false)],
             windows: vec![(1, "build", true), (2, "logs", false), (3, "ssh", false)],
             panes: vec![
                 "pane 0 (focus)            pane 1",
@@ -36,11 +32,6 @@ impl Default for PreviewData {
                 "pane 2",
                 "$ tail -f app.log",
                 "  [14:03:11] GET /  200",
-            ],
-            procs: vec![
-                ("● cargo build", "pid 4211"),
-                ("● htop", "pid 4250"),
-                ("✓ cargo test", "ok"),
             ],
         }
     }
@@ -53,7 +44,6 @@ fn fit(s: &str, width: usize) -> String {
     if count == width {
         s.to_string()
     } else if count > width {
-        // Reserve one column for an ellipsis when we have to cut.
         if width == 0 {
             String::new()
         } else if width == 1 {
@@ -67,65 +57,51 @@ fn fit(s: &str, width: usize) -> String {
     }
 }
 
-/// Build a "name … size" row that fits `width`, right-aligning the size.
-fn name_size_row(name: &str, size: &str, width: usize) -> String {
-    let size_len = size.chars().count();
-    if width <= size_len + 1 {
+/// Build a "name … info" row that fits `width`, right-aligning the info.
+fn name_info_row(name: &str, info: &str, width: usize) -> String {
+    let info_len = info.chars().count();
+    if width <= info_len + 1 {
         return fit(name, width);
     }
-    let name_room = width - size_len - 1;
+    let name_room = width - info_len - 1;
     let name_fit = fit(name, name_room);
-    format!("{name_fit} {size}")
+    format!("{name_fit} {info}")
 }
 
-/// Render the full layout to a string (newline-separated rows), sized to
+/// Render the simplified layout to a string (newline-separated rows), sized to
 /// `width` × `height` columns/rows. Reasonable minimums are enforced.
-pub fn render(base: &Path, data: &PreviewData, width: usize, height: usize) -> String {
+pub fn render(_base: &Path, data: &PreviewData, width: usize, height: usize) -> String {
     let width = width.max(60);
     let height = height.max(16);
 
-    // Column inner widths. Outer border + 2 separators consume 4 columns.
-    let left_w = 16usize;
-    let right_w = 20usize;
-    let main_w = width.saturating_sub(left_w + right_w + 4);
+    // Main + right sidebar. Outer border + separator consume 3 columns.
+    let right_w = 22usize;
+    let main_w = width.saturating_sub(right_w + 3);
 
-    // Body height = total - top border - status - bottom border - menu - menu border.
-    let body_h = height.saturating_sub(5).max(8);
+    // Body height = total - top border - status - separator - bottom border.
+    let body_h = height.saturating_sub(4).max(8);
 
-    let listing = FileListing::read(base);
-    let left = left_column(&listing, left_w, body_h);
     let main = main_column(&data.panes, main_w, body_h);
     let right = right_column(data, right_w, body_h);
 
     let mut out = String::new();
 
-    // Top border.
     out.push('┌');
     out.push_str(&"─".repeat(width - 2));
     out.push_str("┐\n");
 
-    // Status line (spans full inner width).
-    let status = format!(
-        " tuimux · session: {} · 1 client · layout preview ",
-        data.session
-    );
+    let status = format!(" tuimux · {} · 1 client · scaffold preview ", data.session);
     out.push('│');
     out.push_str(&fit(&status, width - 2));
     out.push_str("│\n");
 
-    // Separator between status and body, with column tees.
     out.push('├');
-    out.push_str(&"─".repeat(left_w));
-    out.push('┬');
     out.push_str(&"─".repeat(main_w));
     out.push('┬');
     out.push_str(&"─".repeat(right_w));
     out.push_str("┤\n");
 
-    // Body rows.
     for i in 0..body_h {
-        out.push('│');
-        out.push_str(&left[i]);
         out.push('│');
         out.push_str(&main[i]);
         out.push('│');
@@ -133,59 +109,14 @@ pub fn render(base: &Path, data: &PreviewData, width: usize, height: usize) -> S
         out.push_str("│\n");
     }
 
-    // Separator between body and menu bar.
-    out.push('├');
-    out.push_str(&"─".repeat(left_w));
-    out.push('┴');
+    out.push('└');
     out.push_str(&"─".repeat(main_w));
     out.push('┴');
     out.push_str(&"─".repeat(right_w));
-    out.push_str("┤\n");
-
-    // Bottom menu bar — always visible, Detach first (FR-BAR-3/4).
-    let menu =
-        " [Detach Alt-d]  [New Alt-n]  [Split Alt-|]  [Close Alt-w]  [? Help]  [Palette Alt-p] ";
-    out.push('│');
-    out.push_str(&fit(menu, width - 2));
-    out.push_str("│\n");
-
-    // Bottom border.
-    out.push('└');
-    out.push_str(&"─".repeat(width - 2));
     out.push('┘');
 
+    overlay_session_dialog(&mut out, data, width);
     out
-}
-
-fn left_column(listing: &FileListing, w: usize, h: usize) -> Vec<String> {
-    let mut rows = Vec::with_capacity(h);
-    rows.push(fit("EXPLORER", w));
-    let base = listing.base_path.display().to_string();
-    rows.push(fit(&base, w));
-    rows.push(fit(&"─".repeat(w), w));
-
-    for entry in &listing.entries {
-        if rows.len() >= h {
-            break;
-        }
-        if entry.is_dir {
-            rows.push(name_size_row(&format!("▸ {}/", entry.name), "dir", w));
-        } else {
-            rows.push(name_size_row(
-                &format!("  {}", entry.name),
-                &entry.size_display,
-                w,
-            ));
-        }
-    }
-
-    if let Some(err) = &listing.error {
-        if rows.len() < h {
-            rows.push(fit(&format!("! {err}"), w));
-        }
-    }
-
-    pad_rows(rows, w, h)
 }
 
 fn main_column(panes: &[&str], w: usize, h: usize) -> Vec<String> {
@@ -203,8 +134,9 @@ fn main_column(panes: &[&str], w: usize, h: usize) -> Vec<String> {
 
 fn right_column(data: &PreviewData, w: usize, h: usize) -> Vec<String> {
     let mut rows = Vec::with_capacity(h);
-    // Session name line — clickable in the live UI (opens the session modal).
-    rows.push(fit(&format!("session: {} ▾", data.session), w));
+
+    rows.push(center_button(&data.session, w));
+    rows.push(center_button("Detach", w));
     rows.push(fit(&"─".repeat(w), w));
     rows.push(fit("WINDOWS", w));
     for (idx, name, active) in &data.windows {
@@ -217,19 +149,54 @@ fn right_column(data: &PreviewData, w: usize, h: usize) -> Vec<String> {
     if rows.len() < h {
         rows.push(fit("  + new", w));
     }
-    if rows.len() < h {
-        rows.push(fit(&"─".repeat(w), w));
-    }
-    if rows.len() < h {
-        rows.push(fit("PROCS", w));
-    }
-    for (cmd, info) in &data.procs {
-        if rows.len() >= h {
-            break;
-        }
-        rows.push(name_size_row(cmd, info, w));
-    }
+
     pad_rows(rows, w, h)
+}
+
+fn center_button(label: &str, w: usize) -> String {
+    let button = format!("[ {label} ]");
+    let len = button.chars().count();
+    if len >= w {
+        return fit(&button, w);
+    }
+    let left = (w - len) / 2;
+    let right = w - len - left;
+    format!("{}{}{}", " ".repeat(left), button, " ".repeat(right))
+}
+
+fn overlay_session_dialog(out: &mut String, data: &PreviewData, width: usize) {
+    let dialog_w = 34usize.min(width.saturating_sub(4)).max(24);
+    let pad = (width.saturating_sub(dialog_w)) / 2;
+    let indent = " ".repeat(pad);
+
+    out.push('\n');
+    out.push_str(&indent);
+    out.push('┌');
+    out.push_str(&fit("──── Sessions ", dialog_w - 2));
+    out.push_str("┐\n");
+    for (name, windows, active) in &data.sessions {
+        out.push_str(&indent);
+        out.push('│');
+        let mark = if *active { "●" } else { " " };
+        out.push_str(&name_info_row(
+            &format!(" {mark} {name}"),
+            &format!("{windows} win"),
+            dialog_w - 2,
+        ));
+        out.push_str("│\n");
+    }
+    out.push_str(&indent);
+    out.push('│');
+    out.push_str(&fit(" ─────────────────────────────", dialog_w - 2));
+    out.push_str("│\n");
+    out.push_str(&indent);
+    out.push('│');
+    out.push_str(&fit(" [ Detach ]                 Esc", dialog_w - 2));
+    out.push_str("│\n");
+    out.push_str(&indent);
+    out.push('└');
+    out.push_str(&"─".repeat(dialog_w - 2));
+    out.push('┘');
 }
 
 /// Ensure exactly `h` rows, each exactly `w` columns wide.
@@ -254,27 +221,45 @@ mod tests {
     }
 
     #[test]
-    fn name_size_row_right_aligns_size() {
-        let row = name_size_row("main.rs", "12K", 16);
+    fn name_info_row_right_aligns_info() {
+        let row = name_info_row("main.rs", "12K", 16);
         assert_eq!(row.chars().count(), 16);
         assert!(row.ends_with("12K"));
         assert!(row.starts_with("main.rs"));
     }
 
     #[test]
-    fn render_produces_rectangular_output_with_menu() {
+    fn render_produces_rectangular_output_with_simplified_sidebar() {
         let data = PreviewData::default();
         let out = render(Path::new(env!("CARGO_MANIFEST_DIR")), &data, 80, 24);
-        let lines: Vec<&str> = out.lines().collect();
-        // Every visual row should be the same display width.
+        let lines: Vec<&str> = out.lines().take(24).collect();
         let widths: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
         assert!(
             widths.iter().all(|&x| x == widths[0]),
             "rows are not rectangular: {widths:?}"
         );
-        assert!(out.contains("Detach Alt-d"), "menu bar must contain Detach");
+
+        assert!(
+            out.contains("[ dev ]"),
+            "session name should look button-like"
+        );
+        assert!(
+            out.contains("[ Detach ]"),
+            "detach belongs under the session button"
+        );
         assert!(out.contains("WINDOWS"));
-        assert!(out.contains("EXPLORER"));
-        assert!(out.contains("session: dev"));
+        assert!(
+            out.contains("┌──── Sessions"),
+            "preview should show session dialog scaffold"
+        );
+
+        assert!(!out.contains("EXPLORER"), "left file explorer was removed");
+        assert!(!out.contains("PROCS"), "right PROCS panel was removed");
+        assert!(!out.contains("Detach Alt-d"), "bottom menu bar was removed");
+        assert!(
+            !out.contains("session:"),
+            "session label prefix was removed"
+        );
+        assert!(!out.contains('▾'), "dropdown glyph was removed");
     }
 }

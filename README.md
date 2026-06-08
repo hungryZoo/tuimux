@@ -23,7 +23,7 @@ This is not the complete tmux control-mode implementation yet. The current binar
 - `tuimux --version`
 - `tuimux --doctor` to check tmux and terminal readiness
 - `tuimux --layout-preview` to render the planned VS Code-like layout
-- a safe interactive TUI shell that shows the planned layout and exits with `q`/`Esc`
+- a safe interactive TUI shell that shows the revised compact layout (main panes + right session controls), includes hover-aware buttons, and exits with `q`/`Esc`
 
 ## macOS install
 
@@ -42,7 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.1.1 \
+TUIMUX_VERSION=v0.1.2 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 

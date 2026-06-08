@@ -5,11 +5,9 @@
 //! a ratatui UI shell are real; the tmux control-mode client is the next step.
 
 mod doctor;
-mod files;
 mod preview;
 mod tmux;
 mod tui;
-mod util;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
