@@ -14,11 +14,12 @@ use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use serde::{Deserialize, Serialize};
 use vt100::{Color as VtColor, MouseProtocolEncoding, MouseProtocolMode};
 
 const SCROLLBACK: usize = 10_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalColor {
     Default,
     Indexed(u8),
@@ -35,7 +36,7 @@ impl From<VtColor> for TerminalColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalStyle {
     pub fg: TerminalColor,
     pub bg: TerminalColor,
@@ -78,13 +79,13 @@ impl Default for TerminalStyle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSpan {
     pub text: String,
     pub style: TerminalStyle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionRange {
     pub start_row: u16,
     pub start_col: u16,

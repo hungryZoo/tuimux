@@ -6,6 +6,7 @@
 
 mod clipboard;
 mod doctor;
+mod mux_backend;
 mod native_mux;
 mod preview;
 mod terminal;
@@ -48,6 +49,18 @@ struct Cli {
     #[arg(long, hide = true)]
     native_client: bool,
 
+    /// Internal: run the Rust-native multiplexer daemon.
+    #[arg(long, hide = true)]
+    daemon: bool,
+
+    /// Internal: socket path for daemon mode.
+    #[arg(long, hide = true, value_name = "PATH")]
+    socket: Option<PathBuf>,
+
+    /// Internal: stop the Rust-native multiplexer daemon for the selected session.
+    #[arg(long, hide = true)]
+    stop_server: bool,
+
     /// tuimux session to create. Defaults to `tuimux`.
     #[arg(long, value_name = "NAME", default_value = "tuimux")]
     session: String,
@@ -60,15 +73,33 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    if cli.doctor {
-        return code(doctor::run());
-    }
-
     let base = cli
         .cwd
         .clone()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
+
+    if cli.daemon {
+        let Some(socket) = cli.socket.clone() else {
+            eprintln!("tuimux: --daemon requires --socket <PATH>");
+            return ExitCode::FAILURE;
+        };
+        return code(mux_backend::run_daemon(socket, &cli.session, base));
+    }
+
+    if cli.stop_server {
+        return match mux_backend::stop_daemon(&cli.session) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("tuimux: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if cli.doctor {
+        return code(doctor::run());
+    }
 
     if cli.layout_preview {
         let (cols, rows) = crossterm_terminal::size().unwrap_or((80, 24));
@@ -171,6 +202,9 @@ mod tests {
             layout_preview: false,
             dashboard: false,
             native_client: false,
+            daemon: false,
+            socket: None,
+            stop_server: false,
             session: "tuimux".to_string(),
             cwd: None,
         }

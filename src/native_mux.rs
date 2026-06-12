@@ -7,17 +7,18 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::terminal::PtyTerminal;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub name: String,
     pub windows: u32,
     pub attached: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
     pub index: u32,
     pub name: String,

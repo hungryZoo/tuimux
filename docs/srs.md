@@ -1,65 +1,77 @@
 # tuimux SRS
 
-- **문서 버전**: 1.0
-- **대상 릴리스**: v0.2.0-alpha.5
+- **문서 버전**: 1.1
+- **대상 릴리스**: v0.2.0-alpha.6
 - **작성일**: 2026-06-13
-- **상태**: Rust-native in-process multiplexer 알파 명세
+- **상태**: Rust-native daemon-backed multiplexer 알파 명세
 
 ## 1. 목적
 
-tuimux는 더 이상 기본 실행 경로에서 tmux server/client에 의존하지 않는다. 사용자가 `tuimux`를 실행하면 tuimux 프로세스가 직접 세션, 윈도우, PTY child process, 터미널 screen model, 입력 라우팅, 선택/복사 흐름을 관리해야 한다.
+tuimux는 기본 실행 경로에서 tmux server/client에 의존하지 않는 Rust-native terminal multiplexer다. 사용자가 `tuimux`를 실행하면 UI client는 tuimux daemon에 attach하고, daemon은 세션, 윈도우, PTY child process, terminal screen model을 직접 소유해야 한다.
 
-tmux의 C 코드는 세션/윈도우 개념, PTY ownership, 입력 라우팅, mouse mode 처리의 참고 구현으로만 사용한다. 제품 코드는 Rust로 직접 구현한다.
+tmux의 C 코드는 세션/윈도우/PTY ownership/입력 라우팅/mouse mode 처리의 참고 자료로만 사용한다. 제품 코드는 Rust로 직접 구현한다.
 
 ## 2. 범위
 
 ### 2.1 포함 범위
 
-- Rust-native 세션 목록과 활성 세션 관리.
-- Rust-native 윈도우 목록, 생성, 선택, 종료.
-- 각 윈도우별 실제 PTY-backed shell 실행.
-- `vt100` parser 기반 screen model 렌더링.
-- ratatui 기반 TUI chrome, navigation/sidebar mode, terminal fullscreen mode.
-- mouse drag selection, mouse-up 이후 선택 유지.
-- 선택 영역이 있을 때 Ctrl-C를 child process SIGINT가 아니라 system clipboard copy로 처리.
-- paste event를 active PTY로 전달하되 bracketed paste mode를 존중.
-- child application이 mouse tracking을 켠 경우 normal mouse는 child로 전달하고, Shift-drag는 tuimux selection으로 처리.
-- tmux는 hidden `--native-client` fallback에서만 사용.
-- macOS Apple Silicon 프리릴리즈 설치 스크립트.
+- Unix/macOS에서 Rust-native daemon process를 자동 실행하고 Unix socket으로 attach한다.
+- UI detach/종료 후에도 daemon-owned session/window/PTY child process를 유지한다.
+- Rust-native 세션 목록, 활성 세션, 윈도우 목록, 윈도우 생성/선택/종료를 제공한다.
+- 각 윈도우는 실제 PTY-backed shell을 실행한다.
+- `vt100` parser 기반 screen model을 ratatui로 렌더링한다.
+- terminal fullscreen mode와 navigation/sidebar mode를 제공한다.
+- mouse drag selection은 mouse-up 이후 유지된다.
+- 선택 영역이 있을 때 Ctrl-C는 child process SIGINT가 아니라 system clipboard copy로 처리된다.
+- paste event는 active PTY로 전달하되 bracketed paste mode를 존중한다.
+- child application이 mouse tracking을 켠 경우 normal mouse는 child로 전달하고, Shift-drag는 tuimux selection으로 처리한다.
+- tmux는 hidden `--native-client` fallback에서만 사용한다.
+- macOS Apple Silicon 프리릴리즈 설치 스크립트를 제공한다.
 
 ### 2.2 제외 범위
 
-- tmux와 동일한 persistent daemon/server.
-- detach 이후에도 session/process가 살아남는 기능.
+- tmux command language, control mode, plugin/config 호환성.
 - split pane layout.
-- tmux plugin/config 호환성.
-- tmux command language 호환성.
-- tmux control-mode protocol 구현.
-- Windows/Linux 프리릴리즈 asset.
+- daemon 재시작 후 session 복구를 위한 disk persistence.
+- 동시 다중 attach의 독립 cursor/viewport 정책.
+- Windows named-pipe daemon backend.
+- Linux/Windows 프리릴리즈 asset.
 
-현재 `Detach`는 영속 detach가 아니라 tuimux UI 종료에 가깝다. 영속 세션은 다음 backend 단계의 P0 후보다.
+현재 `Detach`는 UI client 종료이며 daemon과 child PTY는 계속 살아남는다. 다만 `tuimux --stop-server`, daemon crash, host reboot 후에는 세션 복구를 보장하지 않는다.
 
 ## 3. 기능 요구사항
 
 ### 3.1 CLI
 
-- **FR-CLI-1 [P0]** 인자 없는 `tuimux`는 Rust-native tuimux TUI를 실행해야 한다.
-- **FR-CLI-2 [P0]** `--native-client`를 지정한 경우에만 plain tmux client fallback을 실행해야 한다.
-- **FR-CLI-3 [P0]** `--doctor`는 tmux 부재를 실패로 처리하지 않아야 한다.
-- **FR-CLI-4 [P0]** `--doctor`는 `TERM`이 비어 있거나 `dumb`이면 실패해야 한다.
-- **FR-CLI-5 [P1]** `--layout-preview`는 CI/문서 확인용 정적 preview를 출력해야 한다.
+- **FR-CLI-1 [P0]** 인자 없는 `tuimux`는 Rust-native tuimux TUI client를 실행해야 한다.
+- **FR-CLI-2 [P0]** Unix/macOS 기본 실행은 daemon에 attach해야 하며, daemon이 없으면 자동 spawn해야 한다.
+- **FR-CLI-3 [P0]** daemon spawn/connect 실패는 조용한 in-process fallback으로 숨기지 말고 사용자에게 실패로 드러나야 한다.
+- **FR-CLI-4 [P0]** `--native-client`를 지정한 경우에만 plain tmux client fallback을 실행해야 한다.
+- **FR-CLI-5 [P0]** `--doctor`는 tmux 부재를 기본 실행 실패로 처리하지 않아야 한다.
+- **FR-CLI-6 [P0]** `--doctor`는 `TERM`이 비어 있거나 `dumb`이면 실패해야 한다.
+- **FR-CLI-7 [P1]** `--layout-preview`는 CI/문서 확인용 정적 preview를 출력해야 한다.
+- **FR-CLI-8 [P1]** 내부용 `--daemon`, `--socket`, `--stop-server`는 운영/테스트 lifecycle을 지원해야 한다.
 
-### 3.2 Native Multiplexer
+### 3.2 Daemon Backend
 
-- **FR-MUX-1 [P0]** tuimux는 시작 시 초기 session 하나와 shell window 하나를 직접 생성해야 한다.
-- **FR-MUX-2 [P0]** session 생성은 외부 tmux 명령 없이 `NativeMux` 상태와 PTY child process를 생성해야 한다.
+- **FR-DMN-1 [P0]** daemon은 UI process와 별도 process로 실행되어야 한다.
+- **FR-DMN-2 [P0]** macOS/Unix spawn 시 daemon은 parent process group/session에서 분리되어 UI 종료 후에도 유지되어야 한다.
+- **FR-DMN-3 [P0]** socket path는 macOS Unix socket path length 제한을 넘지 않도록 `/tmp/tuimux-$USER/<session-hash>.sock` 형태의 짧은 경로를 사용해야 한다.
+- **FR-DMN-4 [P0]** daemon은 JSON line request/response protocol로 snapshot, key, paste, mouse, session/window command를 처리해야 한다.
+- **FR-DMN-5 [P0]** `--stop-server --session <name>`은 해당 session daemon에 shutdown request를 보내야 한다.
+- **FR-DMN-6 [P1]** stale socket이 있으면 새 daemon spawn 전에 제거해야 한다.
+
+### 3.3 Native Multiplexer
+
+- **FR-MUX-1 [P0]** daemon은 시작 시 초기 session 하나와 shell window 하나를 직접 생성해야 한다.
+- **FR-MUX-2 [P0]** session 생성은 외부 tmux 명령 없이 native state와 PTY child process를 생성해야 한다.
 - **FR-MUX-3 [P0]** session 선택은 active session index만 변경하고 host terminal이나 외부 tmux client를 조작하지 않아야 한다.
 - **FR-MUX-4 [P0]** window 생성은 active session에 새 PTY-backed shell을 추가해야 한다.
 - **FR-MUX-5 [P0]** window 선택은 active window를 변경하고 해당 window의 screen을 렌더해야 한다.
-- **FR-MUX-6 [P0]** 마지막 window를 종료하면 session이 비어 panic하지 않도록 replacement shell window를 만들어야 한다.
-- **FR-MUX-7 [P1]** 모든 session/window metadata는 in-memory native state에서 파생되어야 한다.
+- **FR-MUX-6 [P0]** 마지막 window를 종료하면 replacement shell window를 만들어 빈 session panic을 방지해야 한다.
+- **FR-MUX-7 [P0]** UI detach 후 같은 `--session`으로 재attach하면 기존 shell state가 유지되어야 한다.
 
-### 3.3 PTY Terminal
+### 3.4 PTY Terminal
 
 - **FR-TERM-1 [P0]** 각 window는 real PTY를 소유해야 한다.
 - **FR-TERM-2 [P0]** PTY child는 사용자의 `$SHELL`을 현재 작업 디렉터리에서 실행해야 한다.
@@ -71,7 +83,7 @@ tmux의 C 코드는 세션/윈도우 개념, PTY ownership, 입력 라우팅, mo
 - **FR-TERM-8 [P0]** host resize 시 active PTY size와 parser screen size를 같이 갱신해야 한다.
 - **FR-TERM-9 [P0]** full-screen TUI 앱의 alternate screen, cursor visibility, mouse tracking escape sequence를 보존해야 한다.
 
-### 3.4 입력과 마우스
+### 3.5 입력과 마우스
 
 - **FR-IN-1 [P0]** terminal mode의 일반 키 입력은 active PTY로 전달해야 한다.
 - **FR-IN-2 [P0]** navigation mode에서는 `F12`, `q`, `Esc`, sidebar mouse action 등 tuimux chrome 조작을 처리해야 한다.
@@ -84,16 +96,16 @@ tmux의 C 코드는 세션/윈도우 개념, PTY ownership, 입력 라우팅, mo
 - **FR-IN-9 [P0]** child mouse protocol 활성 상태에서도 Shift-left-drag는 tuimux selection을 시작해야 한다.
 - **FR-IN-10 [P1]** paste event는 bracketed paste mode가 활성일 때 `ESC [ 200 ~` / `ESC [ 201 ~`로 감싸야 한다.
 
-### 3.5 Clipboard
+### 3.6 Clipboard
 
 - **FR-CLIP-1 [P0]** macOS에서는 `pbcopy`로 system clipboard에 복사해야 한다.
 - **FR-CLIP-2 [P1]** Linux에서는 `wl-copy`, `xclip`, `xsel` 순서로 가능한 clipboard command를 사용해야 한다.
 - **FR-CLIP-3 [P1]** Windows에서는 `clip`을 사용할 수 있어야 한다.
 - **FR-CLIP-4 [P0]** clipboard command 실패는 panic이 아니라 status message로 알려야 한다.
 
-### 3.6 설치와 릴리스
+### 3.7 설치와 릴리스
 
-- **FR-REL-1 [P0]** v0.2.0-alpha.5 프리릴리즈는 macOS Apple Silicon tarball만 게시한다.
+- **FR-REL-1 [P0]** v0.2.0-alpha.6 프리릴리즈는 macOS Apple Silicon tarball만 게시한다.
 - **FR-REL-2 [P0]** `scripts/install.sh`는 macOS Apple Silicon 외의 OS/architecture에서 명확히 실패해야 한다.
 - **FR-REL-3 [P0]** installer는 tmux 설치를 요구하거나 `.tmux.conf`를 수정하지 않아야 한다.
 - **FR-REL-4 [P0]** installer는 release asset checksum이 있으면 검증해야 한다.
@@ -110,21 +122,23 @@ tmux의 C 코드는 세션/윈도우 개념, PTY ownership, 입력 라우팅, mo
 
 ## 5. 수용 기준
 
-- **AC-1 [P0]** `cargo test`가 통과한다.
+- **AC-1 [P0]** `cargo fmt -- --check`와 `cargo test --quiet`가 통과한다.
 - **AC-2 [P0]** `TERM=xterm-256color tuimux --doctor`가 0으로 종료한다.
 - **AC-3 [P0]** `TERM=dumb tuimux --doctor`가 non-zero로 종료한다.
 - **AC-4 [P0]** `tuimux` 실행 시 tmux attach 화면이 아니라 tuimux native UI가 뜬다.
 - **AC-5 [P0]** terminal mode에서 `printf 'hello\n'` 입력이 active shell에서 실행된다.
-- **AC-6 [P0]** `btop`이 80x24 host에서 “terminal too small” 오류 없이 열린다.
-- **AC-7 [P0]** `htop`이 full-screen UI로 열린 뒤 `q`로 종료된다.
-- **AC-8 [P0]** `nano`가 열리고 입력, Ctrl-X, 저장 여부 prompt가 정상 처리된다.
-- **AC-9 [P0]** `llmfit --help` 출력이 native PTY surface 안에서 깨지지 않고 표시된다.
-- **AC-10 [P0]** mouse drag로 선택한 텍스트가 mouse-up 이후 남아 있다.
-- **AC-11 [P0]** 선택 영역이 있을 때 Ctrl-C 후 macOS `pbpaste`가 선택 텍스트를 반환한다.
-- **AC-12 [P0]** 선택 영역이 있을 때 Ctrl-C가 shell에 SIGINT를 보내지 않는다.
-- **AC-13 [P0]** `cargo build --release --locked --target aarch64-apple-darwin`가 성공한다.
-- **AC-14 [P0]** macOS ARM installer가 `tuimux --version`과 `tuimux --doctor` 검증 안내를 출력한다.
+- **AC-6 [P0]** UI를 종료한 뒤 같은 `--session`으로 재attach하면 shell 환경값이 유지된다.
+- **AC-7 [P0]** `btop`이 80x24 host에서 “terminal too small” 오류 없이 열린다.
+- **AC-8 [P0]** `htop`이 full-screen UI로 열린 뒤 `q`로 종료된다.
+- **AC-9 [P0]** `nano`가 열리고 입력, 저장, 종료가 정상 처리된다.
+- **AC-10 [P0]** `llmfit --help` 출력이 native PTY surface 안에서 깨지지 않고 표시된다.
+- **AC-11 [P0]** mouse drag로 선택한 텍스트가 mouse-up 이후 남아 있다.
+- **AC-12 [P0]** 선택 영역이 있을 때 Ctrl-C 후 macOS `pbpaste`가 선택 텍스트를 반환한다.
+- **AC-13 [P0]** 선택 영역이 있을 때 Ctrl-C가 shell에 SIGINT를 보내지 않는다.
+- **AC-14 [P0]** `cargo build --release --locked --target aarch64-apple-darwin`가 성공한다.
+- **AC-15 [P0]** macOS ARM installer가 `tuimux --version`과 `tuimux --doctor` 검증 안내를 출력한다.
 
 ## 6. 변경 이력
 
+- **1.1 / 2026-06-13**: 기본 backend를 Rust-native daemon-backed multiplexer로 갱신. Unix socket attach, daemon detach/reattach, 짧은 socket path, daemon stop flow, macOS ARM alpha.6 요구사항을 명시.
 - **1.0 / 2026-06-13**: 기본 backend를 tmux embedding에서 Rust-native in-process multiplexer로 전환. PTY shell window, fullscreen terminal mode, mouse selection 유지, Ctrl-C clipboard copy, macOS ARM prerelease 요구사항을 명시.

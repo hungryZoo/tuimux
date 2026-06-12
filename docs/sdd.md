@@ -1,17 +1,18 @@
 # tuimux SDD
 
-- **문서 버전**: 1.0
-- **대상 릴리스**: v0.2.0-alpha.5
+- **문서 버전**: 1.1
+- **대상 릴리스**: v0.2.0-alpha.6
 - **작성일**: 2026-06-13
-- **상태**: Rust-native in-process multiplexer 설계
+- **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.5는 default path에서 tmux를 제거하고, tuimux가 직접 PTY child process와 terminal screen model을 소유한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.6은 default path에서 tmux를 제거하고, 별도 daemon process가 직접 PTY child process와 terminal screen model을 소유한다.
 
 핵심 목표는 다음과 같다.
 
 - shell/editor/monitor가 실제 PTY 안에서 실행된다.
+- UI client가 닫혀도 daemon-owned PTY와 shell process는 살아남는다.
 - main terminal mode는 host terminal 전체 크기를 child PTY에 제공한다.
 - selection과 clipboard는 host terminal에 가까운 감각으로 동작한다.
 - tmux C 코드는 구조 참고로만 삼고 Rust 모듈로 직접 구현한다.
@@ -20,36 +21,34 @@
 ## 2. 전체 구조
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                         tuimux process                          │
-├─────────────────────────────────────────────────────────────────┤
-│ src/main.rs                                                     │
-│   ├─ CLI parse / doctor / layout-preview / tmux fallback         │
-│   └─ tui::run(initial_session, cwd)                              │
-├─────────────────────────────────────────────────────────────────┤
-│ src/tui.rs                                                      │
-│   ├─ ratatui frame rendering                                    │
-│   ├─ terminal mode vs navigation mode                            │
-│   ├─ mouse hit testing / selection state                         │
-│   ├─ Ctrl-C clipboard interception                               │
-│   └─ NativeMux command dispatch                                  │
-├─────────────────────────────────────────────────────────────────┤
-│ src/native_mux.rs                                               │
-│   ├─ sessions: Vec<NativeSession>                                │
-│   ├─ windows: Vec<NativeWindow>                                  │
-│   └─ each NativeWindow owns PtyTerminal                          │
-├─────────────────────────────────────────────────────────────────┤
-│ src/terminal.rs                                                 │
-│   ├─ portable-pty master/slave                                   │
-│   ├─ child shell process                                         │
-│   ├─ reader thread -> mpsc channel                               │
-│   ├─ vt100::Parser screen model                                  │
-│   └─ key/mouse/paste encoding                                    │
-├─────────────────────────────────────────────────────────────────┤
-│ src/clipboard.rs                                                │
-│   └─ pbcopy / wl-copy / xclip / xsel / clip adapters             │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────┐        JSON line over Unix socket
+│ tuimux UI client process      │◀─────────────────────────────────┐
+├───────────────────────────────┤                                  │
+│ src/main.rs                   │                                  │
+│   CLI / doctor / fallback     │                                  │
+│ src/tui.rs                    │                                  │
+│   ratatui render              │                                  │
+│   input routing               │                                  │
+│   selection state             │                                  │
+│ src/mux_backend.rs            │                                  │
+│   MuxBackend::Remote          │                                  │
+└───────────────────────────────┘                                  │
+                                                                   │
+┌───────────────────────────────┐                                  │
+│ tuimux daemon process         │──────────────────────────────────┘
+├───────────────────────────────┤
+│ src/mux_backend.rs            │
+│   UnixListener / Request      │
+│ src/native_mux.rs             │
+│   sessions / windows          │
+│ src/terminal.rs               │
+│   PTY / child shell / vt100    │
+│ src/clipboard.rs              │
+│   platform clipboard commands │
+└───────────────────────────────┘
 ```
+
+UI process는 terminal raw mode, alternate screen, ratatui frame, selection interaction을 담당한다. daemon process는 session/window state와 모든 PTY child를 소유한다.
 
 ## 3. 모듈 설계
 
@@ -58,15 +57,56 @@
 `main.rs`는 CLI boundary다.
 
 - `tuimux` 기본 실행은 `tui::run()`으로 들어간다.
+- `--daemon --socket <path>`는 내부 daemon entrypoint다.
+- `--stop-server --session <name>`은 해당 session daemon에 shutdown request를 보낸다.
 - `--doctor`는 native runtime 진단을 출력한다.
 - `--layout-preview`는 정적 preview를 출력한다.
 - `--native-client`가 있을 때만 `tmux::probe()`와 tmux fallback을 사용한다.
 
 tmux가 설치되어 있지 않아도 기본 `tuimux` 실행과 `--doctor`는 성공할 수 있어야 한다.
 
-### 3.2 `src/native_mux.rs`
+### 3.2 `src/mux_backend.rs`
 
-`NativeMux`는 현재 알파의 multiplexer core다.
+`mux_backend.rs`는 UI와 mux core 사이의 경계다.
+
+```rust
+pub enum MuxBackend {
+    Remote(RemoteMuxClient),
+    Local(NativeMux),
+}
+```
+
+Unix/macOS에서는 `RemoteMuxClient::connect_or_spawn()`을 사용한다. 기존 daemon socket에 연결할 수 있으면 재사용하고, 연결할 수 없으면 stale socket을 제거한 뒤 현재 `tuimux` binary를 `--daemon` mode로 spawn한다.
+
+daemon spawn 정책:
+
+- `stdin`, `stdout`, `stderr`는 null로 닫는다.
+- `setsid()`로 parent process group/session에서 분리한다.
+- socket path는 `/tmp/tuimux-$USER/<session>-<hash>.sock`처럼 짧게 만든다.
+- macOS `$TMPDIR`의 긴 경로는 Unix socket path length 제한에 걸릴 수 있으므로 사용하지 않는다.
+- Unix에서 daemon 연결 실패는 조용히 local fallback으로 숨기지 않는다.
+
+protocol은 newline-delimited JSON이다.
+
+```text
+Request::Snapshot { width, height, selection }
+Request::SendKey { key }
+Request::SendPaste { text }
+Request::SendMouse { mouse }
+Request::NewWindow { width, height }
+Request::KillWindowByRow { row, width, height }
+Request::CreateNextSession { width, height }
+Request::SwitchSessionByRow { row }
+Request::SelectWindowByRow { row }
+Request::SelectedText { selection }
+Request::Shutdown
+```
+
+응답은 `Ok`, `Snapshot`, `Name`, `Index`, `Text`, `Error` 중 하나다. 현재 daemon은 client connection을 순차 처리한다. 동시 다중 attach의 독립 viewport는 아직 범위 밖이다.
+
+### 3.3 `src/native_mux.rs`
+
+`NativeMux`는 daemon-side multiplexer core다.
 
 ```rust
 pub struct NativeMux {
@@ -88,11 +128,11 @@ pub struct NativeMux {
 - `select_window_by_row()`와 `switch_session_by_row()`는 외부 process 없이 active index만 바꾼다.
 - `kill_window_by_row()`는 마지막 window가 제거될 때 replacement shell을 만들어 빈 session을 방지한다.
 - `drain_all()`은 모든 window의 pending PTY output을 parser에 반영한다.
-- `resize_active()`는 active terminal만 host layout 크기에 맞춘다.
+- `resize_active()`는 active terminal을 host layout 크기에 맞춘다.
 
-현재 설계는 in-process다. 따라서 tuimux process가 끝나면 child PTY들도 종료된다.
+`NativeMux`가 daemon 안에 있기 때문에 UI client가 종료되어도 drop되지 않는다. daemon이 종료될 때만 `PtyTerminal::drop()`이 child를 정리한다.
 
-### 3.3 `src/terminal.rs`
+### 3.4 `src/terminal.rs`
 
 `PtyTerminal`은 terminal fidelity의 중심이다.
 
@@ -114,7 +154,7 @@ pub struct PtyTerminal {
 2. slave에서 `$SHELL`을 실행한다.
 3. child 환경에 `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=tuimux`를 설정한다.
 4. master reader는 background thread에서 읽고 `mpsc` channel로 bytes를 보낸다.
-5. UI loop는 `drain()`으로 bytes를 받아 `vt100::Parser::process()`에 넣는다.
+5. daemon은 `drain()`으로 bytes를 받아 `vt100::Parser::process()`에 넣는다.
 
 렌더링:
 
@@ -130,22 +170,19 @@ pub struct PtyTerminal {
 - `send_paste()`는 bracketed paste mode를 감지해 paste wrapper를 적용한다.
 - `send_mouse_event()`는 child가 mouse protocol을 활성화한 경우에만 SGR/normal mouse sequence를 전달한다.
 
-### 3.4 `src/tui.rs`
+### 3.5 `src/tui.rs`
 
-`tui.rs`는 UI state, rendering, input routing을 담당한다.
+`tui.rs`는 UI state, rendering, input routing을 담당한다. UI가 직접 `NativeMux`를 소유하지 않고 `MuxBackend`에 요청한다.
 
 ```rust
 struct UiState {
-    session_modal_open: bool,
-    hover: Option<Hotspot>,
-    regions: Regions,
-    mux: NativeMux,
+    mux: MuxBackend,
     sessions: Vec<Session>,
     windows: Vec<Window>,
     current_session: String,
-    status: Option<String>,
-    terminal_error: Option<String>,
-    terminal_mode: bool,
+    terminal_rows: Vec<Vec<TerminalSpan>>,
+    terminal_cursor: Option<(u16, u16)>,
+    terminal_mouse_protocol_active: bool,
     selection: Option<SelectionState>,
 }
 ```
@@ -157,9 +194,9 @@ struct UiState {
 
 Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x24 host에서 sidebar 때문에 52x22 같은 작은 PTY를 받지 않도록 하기 위해서다.
 
-### 3.5 Selection
+### 3.6 Selection과 Ctrl-C
 
-선택 state는 anchor/focus/dragging으로 구성된다.
+선택 state는 UI client가 갖고, 선택 텍스트 추출은 daemon snapshot screen에서 수행한다.
 
 ```rust
 struct SelectionState {
@@ -178,15 +215,13 @@ struct SelectionState {
 - selection이 zero-width이면 지운다.
 - 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C copy는 selection을 유지한다.
 
-### 3.6 Ctrl-C 처리
-
 terminal mode에서 Ctrl-C는 다음 순서로 처리된다.
 
-1. `selection_range()`가 있는지 확인한다.
-2. selection이 있으면 active terminal에서 `selected_text()`를 추출한다.
-3. `clipboard::copy_text()`로 system clipboard에 복사한다.
+1. UI가 `selection_range()`를 확인한다.
+2. selection이 있으면 `Request::SelectedText`로 daemon에서 텍스트를 추출한다.
+3. UI process가 `clipboard::copy_text()`로 system clipboard에 복사한다.
 4. 복사 성공 시 Ctrl-C byte를 PTY로 보내지 않는다.
-5. selection이 없으면 일반 Ctrl-C byte를 PTY로 보낸다.
+5. selection이 없으면 일반 Ctrl-C byte를 daemon의 active PTY로 보낸다.
 
 이 설계는 macOS 기본 Terminal처럼 “텍스트를 선택한 상태의 Ctrl-C는 복사”라는 동작을 우선한다.
 
@@ -202,73 +237,74 @@ command가 없거나 실패하면 UI status에 error를 표시하고 panic하지
 
 ## 4. 주요 흐름
 
-### 4.1 시작
+### 4.1 시작과 attach
 
 ```text
 main()
   -> parse CLI
   -> tui::run(session, cwd)
   -> UiState::bootstrap()
-  -> NativeMux::new()
-  -> PtyTerminal::new_shell()
+  -> MuxBackend::new()
+  -> RemoteMuxClient::connect_or_spawn()
+     -> connect existing socket, or spawn `tuimux --daemon --socket ...`
   -> ratatui raw mode + alternate screen
 ```
 
-### 4.2 렌더 루프
+### 4.2 Daemon 시작
+
+```text
+tuimux --daemon --socket <path> --session <name> --cwd <path>
+  -> UnixListener::bind(socket)
+  -> NativeMux::new(session, cwd, 80, 24)
+  -> accept client
+  -> read Request lines
+  -> mutate/drain/resize NativeMux
+  -> write Response lines
+```
+
+### 4.3 렌더 루프
 
 ```text
 loop
   -> state.sync_terminal(current terminal_body size)
-  -> mux.resize_active(width, height)
-  -> mux.drain_all()
+     -> Request::Snapshot { width, height, selection }
+     -> daemon resize_active + drain_all + local_snapshot
   -> terminal.draw(ui)
   -> crossterm event poll/read
 ```
 
 terminal mode에서 `terminal_body`는 root frame 전체다. navigation mode에서는 main pane과 sidebar layout으로 나뉜다.
 
-### 4.3 Key Input
+### 4.4 Key와 Mouse Input
 
 ```text
 crossterm KeyEvent
   -> F12이면 mode toggle
   -> terminal_mode이면 UiState::send_terminal_key()
      -> Ctrl-C + selection이면 clipboard copy
-     -> 아니면 PtyTerminal::send_key()
+     -> 아니면 Request::SendKey
   -> navigation mode이면 sidebar/session shortcut 처리
 ```
-
-### 4.4 Mouse Input
 
 ```text
 crossterm MouseEvent
   -> terminal cell 좌표로 변환
   -> child mouse protocol 상태 확인
   -> selection gesture이면 selection state 갱신
-  -> terminal mode이면 child PTY로 mouse event 전달
+  -> terminal mode이면 Request::SendMouse
   -> navigation mode이면 hit_test로 sidebar/modal action 처리
 ```
 
-### 4.5 Window 생성
+### 4.5 Detach와 Reattach
 
 ```text
-sidebar + new
-  -> NativeMux::new_window(width, height)
-  -> PtyTerminal::new_shell()
-  -> active_window = new window
-  -> metadata refresh
+F12, q, Esc, or Detach button
+  -> UI restores host terminal
+  -> UI process exits
+  -> daemon remains alive with PPID=1 on macOS test path
+  -> same `tuimux --session <name>` connects to existing socket
+  -> shell state and PTY screen continue from daemon state
 ```
-
-### 4.6 Session 전환
-
-```text
-session modal row click
-  -> NativeMux::switch_session_by_row(row)
-  -> active_session = row
-  -> active terminal render source changes
-```
-
-외부 tmux client나 host terminal은 전환하지 않는다.
 
 ## 5. 테스트 전략
 
@@ -279,26 +315,29 @@ session modal row click
 - native mux session/window metadata tests.
 - layout preview deterministic output tests.
 - terminal key/mouse encoder unit tests.
+- serde 기반 daemon protocol compile/check.
 
-### 5.2 수동 PTY smoke
+### 5.2 macOS Apple Silicon smoke
 
-macOS Apple Silicon에서 다음을 확인한다.
+검증한 항목:
 
-- `tuimux --session smoke`가 native shell을 연다.
-- `printf 'tuimux-native-smoke\n'`가 shell에서 실행된다.
-- mouse drag selection이 mouse-up 이후 유지된다.
-- selection 상태 Ctrl-C 후 `pbpaste`가 선택 텍스트를 반환한다.
-- `btop`이 80x24에서 terminal too small 없이 열린다.
-- `htop`이 full-screen UI로 열린다.
-- `nano`가 열리고 Ctrl-X prompt가 정상 처리된다.
-- `llmfit --help`가 PTY surface 안에서 표시된다.
+- `cargo fmt -- --check`
+- `cargo test --quiet` 29개 통과
+- `TERM=xterm-256color COLORTERM=truecolor cargo run --quiet -- --doctor`
+- `TERM=dumb cargo run --quiet -- --doctor` non-zero 확인
+- `cargo build --release --locked --target aarch64-apple-darwin`
+- `tuimux --session persist-smoke`에서 `export TUIMUX_PERSIST_MARK=alive`
+- UI 종료 후 daemon `PPID=1`과 `/tmp/tuimux-$USER/*.sock` 유지 확인
+- 같은 session 재attach 후 `echo $TUIMUX_PERSIST_MARK`가 `alive` 출력
+- `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
+- mouse drag selection, Ctrl-C, `pbpaste`가 `COPYME-remote` 반환 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.5는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.6는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.5-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.6-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -306,16 +345,17 @@ v0.2.0-alpha.5는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.5/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.5 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.6/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.6 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계
 
-- 현재 mux는 in-process라서 UI 종료 시 child PTY도 종료된다.
-- `Detach`는 tmux의 detach와 동등하지 않다.
 - split panes가 없다.
-- session/window 상태가 disk나 daemon에 저장되지 않는다.
-- true persistent multiplexer가 되려면 별도 server process, Unix socket protocol, attach client, PTY ownership transfer 정책이 필요하다.
+- daemon state는 memory-only라 daemon 종료, reboot 후 session이 복구되지 않는다.
+- 현재 Unix daemon은 sequential client handling이며, 동시 multi-attach UX는 정의하지 않았다.
+- Windows named-pipe daemon backend가 없다.
+- tmux command/plugin/config 호환성은 없다.
+- scrollback, reflow, alternate screen edge case는 실제 앱 확대 테스트가 더 필요하다.
 
-다음 큰 단계는 `tuimux-server`를 별도 daemon으로 분리하고, 현재 `NativeMux`를 server-side state machine으로 옮기는 것이다.
+다음 큰 단계는 split pane layout, daemon persistence metadata, Linux/Windows backend, multi-attach 정책, 더 긴 full-screen app compatibility suite다.

@@ -9,7 +9,7 @@
 
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -23,8 +23,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::clipboard;
-use crate::native_mux::{NativeMux, Session, Window};
-use crate::terminal::{PtyTerminal, SelectionRange, TerminalColor, TerminalSpan, TerminalStyle};
+use crate::mux_backend::{KeyInput, MouseInput, MuxBackend, MuxSnapshot};
+use crate::native_mux::{Session, Window};
+use crate::terminal::{SelectionRange, TerminalColor, TerminalSpan, TerminalStyle};
 
 /// Why the UI loop ended — affects the farewell message.
 enum Exit {
@@ -65,7 +66,7 @@ struct UiState {
     session_modal_open: bool,
     hover: Option<Hotspot>,
     regions: Regions,
-    mux: NativeMux,
+    mux: MuxBackend,
     /// Live native mux state, refreshed after every mutating command.
     sessions: Vec<Session>,
     windows: Vec<Window>,
@@ -76,6 +77,10 @@ struct UiState {
     terminal_error: Option<String>,
     terminal_mode: bool,
     selection: Option<SelectionState>,
+    terminal_rows: Vec<Vec<TerminalSpan>>,
+    terminal_cursor: Option<(u16, u16)>,
+    terminal_hide_cursor: bool,
+    terminal_mouse_protocol_active: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,7 +93,7 @@ struct SelectionState {
 impl UiState {
     /// Build initial state from the native multiplexer.
     fn bootstrap(initial_session: &str, cwd: PathBuf) -> anyhow::Result<Self> {
-        let mux = NativeMux::new(initial_session, cwd, 80, 24)?;
+        let mux = MuxBackend::new(initial_session, cwd, 80, 24)?;
         let mut state = UiState {
             // Native tuimux starts focused in the shell. The Session button or
             // Alt-S opens the session switcher when needed.
@@ -103,26 +108,37 @@ impl UiState {
             terminal_error: None,
             terminal_mode: true,
             selection: None,
+            terminal_rows: Vec::new(),
+            terminal_cursor: None,
+            terminal_hide_cursor: true,
+            terminal_mouse_protocol_active: false,
         };
-        state.refresh_metadata();
+        let snapshot = state.mux.snapshot(80, 24, None)?;
+        state.apply_snapshot(snapshot);
         Ok(state)
     }
 
     fn sync_terminal(&mut self, width: u16, height: u16) {
         let size = (width.max(1), height.max(1));
-        self.mux.resize_active(size.0, size.1);
-        self.mux.drain_all();
-        self.refresh_metadata();
+        match self.mux.snapshot(size.0, size.1, self.selection_range()) {
+            Ok(snapshot) => {
+                self.terminal_error = None;
+                self.apply_snapshot(snapshot);
+            }
+            Err(e) => {
+                self.terminal_error = Some(format!("native mux backend failed: {e}"));
+            }
+        }
     }
 
-    fn refresh_metadata(&mut self) {
-        self.sessions = self.mux.session_infos();
-        self.windows = self.mux.window_infos();
-        self.current_session = self.mux.current_session_name().to_string();
-    }
-
-    fn active_terminal(&self) -> Option<&PtyTerminal> {
-        self.mux.active_terminal()
+    fn apply_snapshot(&mut self, snapshot: MuxSnapshot) {
+        self.sessions = snapshot.sessions;
+        self.windows = snapshot.windows;
+        self.current_session = snapshot.current_session;
+        self.terminal_rows = snapshot.terminal.rows;
+        self.terminal_cursor = snapshot.terminal.cursor;
+        self.terminal_hide_cursor = snapshot.terminal.hide_cursor;
+        self.terminal_mouse_protocol_active = snapshot.terminal.mouse_protocol_active;
     }
 
     fn selection_range(&self) -> Option<SelectionRange> {
@@ -165,10 +181,10 @@ impl UiState {
         let Some(range) = self.selection_range() else {
             return false;
         };
-        let Some(terminal) = self.mux.active_terminal() else {
+        let Ok(text) = self.mux.selected_text(range) else {
+            self.status = Some("copy failed: terminal is not ready".to_string());
             return false;
         };
-        let text = terminal.selected_text(range);
         if text.is_empty() {
             return false;
         }
@@ -185,10 +201,7 @@ impl UiState {
     }
 
     fn terminal_mouse_protocol_active(&self) -> bool {
-        self.mux
-            .active_terminal()
-            .map(PtyTerminal::mouse_protocol_active)
-            .unwrap_or(false)
+        self.terminal_mouse_protocol_active
     }
 
     fn send_terminal_key(&mut self, key: KeyEvent) {
@@ -203,23 +216,17 @@ impl UiState {
             self.clear_selection();
         }
 
-        if let Some(terminal) = self.mux.active_terminal_mut() {
-            if let Err(e) = terminal.send_key(key) {
+        if let Some(key) = KeyInput::from_event(key) {
+            if let Err(e) = self.mux.send_key(key) {
                 self.status = Some(format!("terminal input failed: {e}"));
             }
-        } else {
-            self.status = Some("terminal is not ready".to_string());
         }
     }
 
     fn send_terminal_paste(&mut self, text: &str) {
         self.clear_selection();
-        if let Some(terminal) = self.mux.active_terminal_mut() {
-            if let Err(e) = terminal.send_paste(text) {
-                self.status = Some(format!("terminal paste failed: {e}"));
-            }
-        } else {
-            self.status = Some("terminal is not ready".to_string());
+        if let Err(e) = self.mux.send_paste(text) {
+            self.status = Some(format!("terminal paste failed: {e}"));
         }
     }
 
@@ -230,8 +237,8 @@ impl UiState {
         col: u16,
         modifiers: KeyModifiers,
     ) {
-        if let Some(terminal) = self.mux.active_terminal_mut() {
-            if let Err(e) = terminal.send_mouse_event(kind, row, col, modifiers) {
+        if let Some(mouse) = MouseInput::from_parts(kind, row, col, modifiers) {
+            if let Err(e) = self.mux.send_mouse(mouse) {
                 self.status = Some(format!("terminal mouse failed: {e}"));
             }
         }
@@ -289,15 +296,10 @@ fn restore(terminal: &mut Term) -> io::Result<()> {
 }
 
 fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
-    let mut last_metadata_refresh = Instant::now();
     loop {
         let body = state.regions.terminal_body;
         if body.width > 0 && body.height > 0 {
             state.sync_terminal(body.width, body.height);
-        }
-        if last_metadata_refresh.elapsed() >= Duration::from_millis(750) {
-            state.refresh_metadata();
-            last_metadata_refresh = Instant::now();
         }
 
         terminal.draw(|f| ui(f, state))?;
@@ -438,7 +440,8 @@ fn select_window(state: &mut UiState, idx: usize) {
     match state.mux.select_window_by_row(idx) {
         Ok(()) => {
             state.clear_selection();
-            state.refresh_metadata();
+            let (width, height) = active_terminal_size(state);
+            state.sync_terminal(width, height);
         }
         Err(e) => state.status = Some(format!("select-window failed: {e}")),
     }
@@ -450,7 +453,7 @@ fn kill_window(state: &mut UiState, idx: usize) {
         Ok(index) => {
             state.status = Some(format!("killed window {index}"));
             state.clear_selection();
-            state.refresh_metadata();
+            state.sync_terminal(width, height);
         }
         Err(e) => state.status = Some(format!("kill-window failed: {e}")),
     }
@@ -465,7 +468,7 @@ fn new_window(state: &mut UiState) {
                 state.current_session
             ));
             state.clear_selection();
-            state.refresh_metadata();
+            state.sync_terminal(width, height);
         }
         Err(e) => state.status = Some(format!("new-window failed: {e}")),
     }
@@ -477,7 +480,7 @@ fn new_session(state: &mut UiState) {
         Ok(name) => {
             state.status = Some(format!("created session '{name}'"));
             state.clear_selection();
-            state.refresh_metadata();
+            state.sync_terminal(width, height);
         }
         Err(e) => state.status = Some(format!("new-session failed: {e}")),
     }
@@ -488,7 +491,8 @@ fn switch_session(state: &mut UiState, idx: usize) {
         Ok(()) => {
             state.session_modal_open = false;
             state.clear_selection();
-            state.refresh_metadata();
+            let (width, height) = active_terminal_size(state);
+            state.sync_terminal(width, height);
             state.status = Some(format!("selected session '{}'", state.current_session));
         }
         Err(e) => state.status = Some(format!("select-session failed: {e}")),
@@ -497,16 +501,9 @@ fn switch_session(state: &mut UiState, idx: usize) {
 
 fn ui(f: &mut Frame, state: &mut UiState) {
     let root = f.size();
-    let selection = state.selection_range();
-    let terminal_rows = state
-        .active_terminal()
-        .map(|terminal| terminal.styled_rows_with_selection(selection))
-        .unwrap_or_default();
-    let terminal_cursor = state.active_terminal().map(PtyTerminal::cursor);
-    let terminal_hide_cursor = state
-        .active_terminal()
-        .map(PtyTerminal::hide_cursor)
-        .unwrap_or(true);
+    let terminal_rows = state.terminal_rows.clone();
+    let terminal_cursor = state.terminal_cursor;
+    let terminal_hide_cursor = state.terminal_hide_cursor;
 
     let session_label = if state.current_session.is_empty() {
         "(no session)"
