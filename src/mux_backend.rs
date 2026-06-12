@@ -95,6 +95,7 @@ impl MuxBackend {
             MuxBackend::Local(mux) => {
                 mux.resize_active(width, height);
                 mux.drain_all();
+                mux.reap_finished_windows(width, height)?;
                 Ok(local_snapshot(mux, width, height, selection))
             }
         }
@@ -839,7 +840,10 @@ mod unix_remote {
             } => {
                 mux.resize_active(width, height);
                 mux.drain_all();
-                Response::Snapshot(local_snapshot(mux, width, height, selection))
+                match mux.reap_finished_windows(width, height) {
+                    Ok(_) => Response::Snapshot(local_snapshot(mux, width, height, selection)),
+                    Err(err) => Response::Error(err.to_string()),
+                }
             }
             Request::CreateNextSession { width, height } => {
                 into_response(mux.create_next_session(width, height), Response::Name)
@@ -1216,6 +1220,129 @@ mod unix_remote {
                 .expect("daemon exits cleanly");
         }
 
+        #[test]
+        fn daemon_reaps_exited_shell_windows() {
+            let socket = std::env::temp_dir().join(format!(
+                "tuimux-child-exit-test-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            let daemon_socket = socket.clone();
+            let daemon = thread::spawn(move || {
+                run_daemon_inner(daemon_socket, "child-exit-test", PathBuf::from("."))
+            });
+            wait_for_socket(&socket);
+
+            let mut client = UnixStream::connect(&socket).expect("client connects");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            let enter = KeyInput::from_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("enter key input");
+
+            let before_last_exit = "TUIMUX_BEFORE_LAST_EXIT";
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::SendPaste {
+                        text: format!("printf '\\033[2J\\033[H{before_last_exit}\\n'; exit")
+                    },
+                ),
+                Response::Ok
+            ));
+            assert!(matches!(
+                request_response(&mut client, Request::SendKey { key: enter.clone() }),
+                Response::Ok
+            ));
+            wait_for_snapshot_text(&mut client, 80, 10, before_last_exit);
+
+            let replaced = wait_for_snapshot_matching(
+                &mut client,
+                80,
+                10,
+                "last exited shell replacement",
+                |snapshot| {
+                    snapshot.windows.len() == 1
+                        && snapshot.windows[0].index == 1
+                        && !snapshot_text(snapshot).contains(before_last_exit)
+                },
+            );
+            assert!(replaced.windows[0].active);
+
+            let after_replacement = "TUIMUX_AFTER_LAST_EXIT";
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::SendPaste {
+                        text: format!("printf '\\033[2J\\033[H{after_replacement}\\n'")
+                    },
+                ),
+                Response::Ok
+            ));
+            assert!(matches!(
+                request_response(&mut client, Request::SendKey { key: enter.clone() }),
+                Response::Ok
+            ));
+            wait_for_snapshot_text(&mut client, 80, 10, after_replacement);
+
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::NewWindow {
+                        width: 80,
+                        height: 10
+                    },
+                ),
+                Response::Index(2)
+            ));
+
+            let before_second_exit = "TUIMUX_BEFORE_SECOND_EXIT";
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::SendPaste {
+                        text: format!("printf '\\033[2J\\033[H{before_second_exit}\\n'; exit")
+                    },
+                ),
+                Response::Ok
+            ));
+            assert!(matches!(
+                request_response(&mut client, Request::SendKey { key: enter }),
+                Response::Ok
+            ));
+            wait_for_snapshot_text(&mut client, 80, 10, before_second_exit);
+
+            let pruned = wait_for_snapshot_matching(
+                &mut client,
+                80,
+                10,
+                "non-last exited shell pruning",
+                |snapshot| {
+                    snapshot.windows.len() == 1
+                        && snapshot.windows[0].index == 1
+                        && snapshot.windows[0].active
+                        && !snapshot_text(snapshot).contains(before_second_exit)
+                },
+            );
+            assert_eq!(pruned.windows[0].name, "shell");
+
+            let mut shutdown = UnixStream::connect(&socket).expect("shutdown client connects");
+            shutdown
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            assert!(matches!(
+                request_response(&mut shutdown, Request::Shutdown),
+                Response::Ok
+            ));
+            daemon
+                .join()
+                .expect("daemon thread joins")
+                .expect("daemon exits cleanly");
+        }
+
         fn wait_for_socket(socket: &Path) {
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut last_error = None;
@@ -1276,6 +1403,30 @@ mod unix_remote {
                 thread::sleep(Duration::from_millis(50));
             }
             panic!("snapshot did not contain {needle:?}; last text was {last_text:?}");
+        }
+
+        fn wait_for_snapshot_matching(
+            stream: &mut UnixStream,
+            width: u16,
+            height: u16,
+            label: &str,
+            predicate: impl Fn(&MuxSnapshot) -> bool,
+        ) -> MuxSnapshot {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut last_snapshot = None;
+            while Instant::now() < deadline {
+                let snapshot = snapshot(stream, width, height);
+                if predicate(&snapshot) {
+                    return snapshot;
+                }
+                last_snapshot = Some(snapshot);
+                thread::sleep(Duration::from_millis(50));
+            }
+            let last_text = last_snapshot
+                .as_ref()
+                .map(snapshot_text)
+                .unwrap_or_else(|| "<no snapshot>".to_string());
+            panic!("{label} did not happen; last text was {last_text:?}");
         }
 
         fn snapshot_text(snapshot: &MuxSnapshot) -> String {

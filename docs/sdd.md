@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 3.0
-- **대상 릴리스**: v0.2.0-alpha.25
+- **문서 버전**: 3.1
+- **대상 릴리스**: v0.2.0-alpha.26
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.25 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.26 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다. 또한 child shell이 `exit`로 종료된 뒤 화면만 남는 stale terminal 상태를 막기 위해 PTY child 종료를 daemon snapshot 주기에서 회수한다.
 
 핵심 목표는 다음과 같다.
 
@@ -137,6 +137,7 @@ pub struct NativeMux {
 - `kill_window_by_row()`는 마지막 window가 제거될 때 replacement shell을 만들어 빈 session을 방지한다.
 - `select_pane_by_row()`는 remote snapshot 호환을 위한 안전장치로 남아 있지만 기본 UI에서 pane 목록은 노출하지 않는다.
 - `drain_all()`은 모든 window/pane의 pending PTY output을 parser에 반영한다.
+- `reap_finished_windows()`는 종료된 PTY child를 가진 window를 제거하고, session의 마지막 window가 종료되었으면 replacement shell window를 생성한다.
 - `resize_active()`는 active window의 terminal rect에 맞춰 PTY와 parser screen size를 갱신한다.
 
 split 관련 `PaneNode::Split`, split/resize/kill pane 함수, pane separator 계산은 core에서 제거했다. `active_pane_refs()`는 항상 active window의 single PTY pane을 전체 terminal rect로 보고하고, `active_pane_separators()`는 빈 목록을 반환한다.
@@ -156,6 +157,7 @@ pub struct PtyTerminal {
     rx: Receiver<Vec<u8>>,
     rows: u16,
     cols: u16,
+    finished: bool,
 }
 ```
 
@@ -190,6 +192,14 @@ pub struct PtyTerminal {
 - `scrollback_up(rows)`와 `scrollback_down(rows)`는 vt100 screen의 scrollback offset을 조정한다.
 - `scrollback_bottom()`은 offset을 0으로 되돌린다.
 - snapshot은 active terminal의 `scrollback` 값을 포함한다.
+
+종료 감지:
+
+- reader thread가 PTY EOF/read error로 종료되어 channel이 disconnect되면 `PtyTerminal`은 `finished` 상태를 기록한다.
+- `drain()`은 pending bytes를 parser에 반영한 뒤 `Child::try_wait()`로 child process 종료를 nonblocking으로 확인한다.
+- `is_finished()`는 cached `finished` 상태를 반환하거나 `try_wait()` 결과를 반영한다.
+- `Drop`은 아직 finished가 아닌 child만 best-effort kill한다.
+- daemon snapshot 경로는 `resize_active()`, `drain_all()`, `reap_finished_windows()` 순서로 실행되어 stale screen 대신 최신 window state를 반환한다.
 
 ### 3.5 `src/tui.rs`
 
@@ -306,7 +316,7 @@ tuimux --daemon --socket <path> --session <name> --cwd <path>
 loop
   -> state.sync_terminal(current terminal_body size)
      -> Request::Snapshot { width, height, selection }
-     -> daemon resize_active + drain_all + local_snapshot
+     -> daemon resize_active + drain_all + reap_finished_windows + local_snapshot
   -> terminal.draw(ui)
   -> crossterm event poll/read
 ```
@@ -420,6 +430,7 @@ F12, q, Esc, or Detach button
 - UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
+- daemon child-exit regression test: 마지막 shell `exit` 후 replacement shell이 명령을 받을 수 있고, non-last shell `exit` 후 window list에서 제거되는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
@@ -429,6 +440,7 @@ F12, q, Esc, or Detach button
 - macOS truecolor smoke script: parent `NO_COLOR=1` 환경에서 child가 출력한 `38;2` foreground, `48;2` background, default color reset이 실제 TUI output에 남는지 확인.
 - macOS resize smoke script: 실제 TUI client의 host PTY를 resize한 뒤 active child process가 `SIGWINCH`와 새 `32x120` terminal size를 관측하는지 확인.
 - macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, split hotkey deprecated status, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
+- macOS child-exit smoke script: 실제 TUI client에서 마지막 shell `exit` 후 replacement shell 명령 실행, non-last shell `exit` 후 오른쪽 window list 제거를 확인.
 - macOS no-tmux smoke script: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `SHELL=/bin/sh` 환경에서 `--doctor`, default TUI PTY shell, `--native-client` failure boundary를 확인.
 
 ### 5.2 macOS Apple Silicon smoke
@@ -447,6 +459,7 @@ F12, q, Esc, or Detach button
 - `python3 scripts/smoke_macos_color.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_resize.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux`
+- `python3 scripts/smoke_macos_child_exit.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux`
 - `tuimux --session persist-smoke`에서 `export TUIMUX_PERSIST_MARK=alive`
 - UI 종료 후 daemon `PPID=1`과 `/tmp/tuimux-$USER/*.sock` 유지 확인
@@ -460,14 +473,15 @@ F12, q, Esc, or Detach button
 - mouse wheel/PageUp/PageDown/Home/End scrollback 확인
 - scrollback 중 host paste가 live bottom으로 돌아와 active shell에서 실행되는지 확인
 - navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
+- shell `exit`로 마지막 window replacement와 non-last window list 제거 확인
 - navigation mode에서 split hotkey가 새 pane을 만들지 않고 deprecated status를 표시하는지 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.25 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.26 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.25-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.26-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -475,8 +489,8 @@ v0.2.0-alpha.25 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.25/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.25 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.26/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.26 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

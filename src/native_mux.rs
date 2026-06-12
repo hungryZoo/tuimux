@@ -328,6 +328,52 @@ impl NativeMux {
         changed
     }
 
+    pub fn reap_finished_windows(&mut self, width: u16, height: u16) -> Result<bool> {
+        let mut changed = false;
+        let mut session_idx = 0;
+
+        while session_idx < self.sessions.len() {
+            let mut window_idx = 0;
+            while window_idx < self.sessions[session_idx].windows.len() {
+                let finished = {
+                    let window = &mut self.sessions[session_idx].windows[window_idx];
+                    window
+                        .panes
+                        .iter_mut()
+                        .all(|pane| pane.terminal.is_finished())
+                };
+                if !finished {
+                    window_idx += 1;
+                    continue;
+                }
+
+                let needs_replacement = self.sessions[session_idx].windows.len() == 1;
+                let replacement = if needs_replacement {
+                    Some(self.spawn_window(1, width, height)?)
+                } else {
+                    None
+                };
+
+                let session = &mut self.sessions[session_idx];
+                session.windows.remove(window_idx);
+                if let Some(window) = replacement {
+                    session.windows.push(window);
+                    session.active_window = 0;
+                    changed = true;
+                    break;
+                }
+
+                session.active_window = session
+                    .active_window
+                    .min(session.windows.len().saturating_sub(1));
+                changed = true;
+            }
+            session_idx += 1;
+        }
+
+        Ok(changed)
+    }
+
     pub fn resize_active(&mut self, width: u16, height: u16) {
         if let Some(window) = self.active_window_mut() {
             for pane in &mut window.panes {

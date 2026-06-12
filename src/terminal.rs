@@ -6,7 +6,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -149,6 +149,7 @@ pub struct PtyTerminal {
     rx: Receiver<Vec<u8>>,
     rows: u16,
     cols: u16,
+    finished: bool,
 }
 
 impl PtyTerminal {
@@ -203,16 +204,45 @@ impl PtyTerminal {
             rx,
             rows,
             cols,
+            finished: false,
         })
     }
 
     pub fn drain(&mut self) -> bool {
         let mut changed = false;
-        while let Ok(bytes) = self.rx.try_recv() {
-            self.parser.process(&bytes);
-            changed = true;
+        loop {
+            match self.rx.try_recv() {
+                Ok(bytes) => {
+                    self.parser.process(&bytes);
+                    changed = true;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.finished = true;
+                    break;
+                }
+            }
         }
+        self.poll_finished();
         changed
+    }
+
+    pub fn is_finished(&mut self) -> bool {
+        self.poll_finished()
+    }
+
+    fn poll_finished(&mut self) -> bool {
+        if self.finished {
+            return true;
+        }
+
+        match self.child.try_wait() {
+            Ok(Some(_)) | Err(_) => {
+                self.finished = true;
+                true
+            }
+            Ok(None) => false,
+        }
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -472,7 +502,9 @@ impl PtyTerminal {
 
 impl Drop for PtyTerminal {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if !self.finished {
+            let _ = self.child.kill();
+        }
     }
 }
 

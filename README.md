@@ -2,11 +2,12 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.25 keeps the default runtime on the Rust-native path and focuses
+v0.2.0-alpha.26 keeps the default runtime on the Rust-native path and focuses
 the product on a single full-size terminal surface selected from a window list,
 with child truecolor output preserved even when the parent environment sets
 `NO_COLOR`, plus host resize propagation to the active child PTY covered by
-smoke tests and end-to-end scrollback navigation/input-bottom coverage.
+smoke tests, end-to-end scrollback navigation/input-bottom coverage, and
+child shell exit cleanup so stale terminal windows do not linger.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
 which owns sessions, windows, and PTY-backed shell processes. `tmux` is
 no longer required for the default UI; the old plain tmux client remains
@@ -38,6 +39,7 @@ This is still a 0.x prerelease. Current behavior:
 - If the child program enables mouse tracking, normal mouse events go to the child; Shift-drag starts tuimux text selection, covered by the macOS mouse-protocol smoke.
 - Child truecolor foreground/background and default-color reset are preserved by the real TUI renderer, covered by the macOS color smoke.
 - Host resize reaches the active child PTY as a SIGWINCH with updated rows/columns, covered by the macOS resize smoke.
+- If a child shell exits, non-last windows are pruned from the window list and the last window is replaced with a fresh shell, covered by the macOS child-exit smoke.
 - `tuimux --native-client` is a fallback that opens a plain tmux client when tmux is installed.
 - `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
 
@@ -49,8 +51,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.25/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.25 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.26/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.26 bash
 ```
 
 Verify:
@@ -81,10 +83,11 @@ python3 scripts/smoke_macos_scrollback.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_color.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_resize.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux
+python3 scripts/smoke_macos_child_exit.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 ```
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.25` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.26` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.
