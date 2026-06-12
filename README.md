@@ -47,15 +47,15 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.2.0-alpha.3 \
-  curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.3 bash
 ```
 
 Custom install directory:
 
 ```sh
-TUIMUX_INSTALL_DIR="$HOME/bin" \
-  curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | \
+  TUIMUX_INSTALL_DIR="$HOME/bin" bash
 ```
 
 The shell installer also ensures these tmux defaults exist in `~/.tmux.conf` without overwriting existing settings:
