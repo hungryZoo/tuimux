@@ -3,7 +3,8 @@
 //! Renders the tuimux screen as a static text preview: a center terminal area,
 //! a compact right sidebar with a button-like session name, a red Detach button,
 //! vertical window tabs, and a centered session dialog scaffold. The early
-//! explorer, bottom menu bar, and PROCS panel were intentionally removed.
+//! split panes, explorer, bottom menu bar, and PROCS panel were intentionally
+//! removed.
 
 use std::path::Path;
 
@@ -12,7 +13,7 @@ use std::path::Path;
 pub struct PreviewData {
     pub sessions: Vec<(&'static str, u32, bool)>, // (name, windows, active)
     pub windows: Vec<(u32, &'static str, bool)>,  // (index, name, active)
-    pub panes: Vec<&'static str>,
+    pub terminal_lines: Vec<&'static str>,
 }
 
 impl Default for PreviewData {
@@ -20,15 +21,15 @@ impl Default for PreviewData {
         PreviewData {
             sessions: vec![("dev", 3, true), ("work", 2, false), ("scratch", 1, false)],
             windows: vec![(1, "build", true), (2, "logs", false), (3, "ssh", false)],
-            panes: vec![
-                "pane 0 (focus)            pane 1",
-                "$ cargo build             $ htop",
-                "  Compiling tuimux…         tasks: 142",
-                "  Compiling ratatui…        load:  0.4",
-                "────────────────(drag border ↔ to resize)────────",
-                "pane 2",
-                "$ tail -f app.log",
-                "  [14:03:11] GET /  200",
+            terminal_lines: vec![
+                "$ cargo test --quiet",
+                "running 43 tests",
+                "...........................................",
+                "test result: ok. 43 passed; 0 failed",
+                "",
+                "$ btop",
+                "  full-size PTY window selected from the right list",
+                "  F12 opens navigation; n creates a new window",
             ],
         }
     }
@@ -78,7 +79,7 @@ pub fn render(_base: &Path, data: &PreviewData, width: usize, height: usize) -> 
     // Body height = total - top border - separator - bottom border.
     let body_h = height.saturating_sub(3).max(8);
 
-    let main = main_column(&data.panes, main_w, body_h);
+    let main = main_column(&data.terminal_lines, main_w, body_h);
     let right = right_column(data, right_w, body_h);
 
     let mut out = String::new();
@@ -291,6 +292,11 @@ mod tests {
         assert!(!out.contains("EXPLORER"), "left file explorer was removed");
         assert!(!out.contains("PROCS"), "right PROCS panel was removed");
         assert!(!out.contains("Detach Alt-d"), "bottom menu bar was removed");
+        assert!(!out.contains("pane 0"), "split pane sample was removed");
+        assert!(
+            !out.contains("drag border"),
+            "preview should not advertise split resizing"
+        );
         assert!(
             !out.contains("session:"),
             "session label prefix was removed"

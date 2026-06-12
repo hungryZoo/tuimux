@@ -3,11 +3,13 @@
 
 The test starts the real tuimux TUI in a pseudo terminal, prints a stable target
 string in the child shell, selects it with SGR mouse escape sequences, presses
-Ctrl-C, and verifies that macOS `pbpaste` contains the selected text. A shell
-trap also confirms that Ctrl-C was not forwarded to the foreground child. It
-then sends a host bracketed-paste sequence and verifies that the pasted command
-executes in the child PTY. Finally, a raw child process enables bracketed paste
-mode and verifies that tuimux preserves the child-side paste wrapper.
+Ctrl-C, and verifies that macOS `pbpaste` contains the selected text. Before
+copying, it also checks that the mouse-up frame renders the selected text with
+reverse-video highlighting so the selection visibly persists. A shell trap also
+confirms that Ctrl-C was not forwarded to the foreground child. It then sends a
+host bracketed-paste sequence and verifies that the pasted command executes in
+the child PTY. Finally, a raw child process enables bracketed paste mode and
+verifies that tuimux preserves the child-side paste wrapper.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import argparse
 import fcntl
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
@@ -196,6 +199,14 @@ finally:
     return f"python3 -c {shlex.quote(probe)}"
 
 
+def has_reverse_video_highlight(output: bytes, text: str) -> bool:
+    text_bytes = re.escape(text.encode())
+    return (
+        re.search(rb"\x1b\[(?:[0-9;]*;)?7(?:;[0-9]*)?m" + text_bytes, output)
+        is not None
+    )
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -229,8 +240,14 @@ def main() -> int:
         x1 = 1
         x2 = len(MARKER)
         drag = f"\x1b[<0;{x1};{y}M\x1b[<32;{x2};{y}M\x1b[<0;{x2};{y}m"
+        before_drag = len(client.buffer)
         client.write(drag.encode())
         client.read_for(0.6)
+        highlighted_frame = bytes(client.buffer[before_drag:])
+        if not has_reverse_video_highlight(highlighted_frame, MARKER):
+            print("selection did not remain visibly highlighted after mouse-up", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
         client.write(b"\x03")
         time.sleep(0.5)
 
@@ -274,6 +291,7 @@ def main() -> int:
             return 1
 
         print("OK macOS UI selection smoke")
+        print("selection highlight: reverse video observed after mouse-up")
         print(f"copied: {copied}")
         print(f"pasted command output: {PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
