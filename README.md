@@ -2,8 +2,8 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.7 keeps the default runtime on the Rust-native path and adds
-daemon-owned split panes. Running `tuimux` now attaches a ratatui
+v0.2.0-alpha.8 keeps the default runtime on the Rust-native path and adds
+daemon-owned split panes plus host bracketed paste handling. Running `tuimux` now attaches a ratatui
 client to tuimux's own Unix-socket daemon, which owns sessions, windows, panes,
 and PTY-backed shell processes. `tmux` is no longer required for the default UI; the
 old plain tmux client remains available only through the hidden
@@ -28,6 +28,7 @@ This is still a 0.x prerelease. Current behavior:
 - Each window runs a real shell in a PTY, parsed with `vt100` and rendered with ratatui.
 - Mouse selection is preserved after mouse-up.
 - Ctrl-C copies the selected text to the system clipboard instead of sending SIGINT.
+- Host paste is captured as a paste event and forwarded to the active PTY with child bracketed paste respected.
 - If the child program enables mouse tracking, normal mouse events go to the child; Shift-drag starts tuimux text selection.
 - `tuimux --native-client` is a fallback that opens a plain tmux client when tmux is installed.
 - `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
@@ -40,8 +41,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.7/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.7 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.8/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.8 bash
 ```
 
 Verify:
@@ -69,5 +70,5 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.7` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.8` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.
