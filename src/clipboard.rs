@@ -43,6 +43,40 @@ pub fn copy_text(text: &str) -> Result<()> {
     }
 }
 
+pub fn read_text() -> Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        return read_from("pbpaste", &[]);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return read_from(
+            "powershell",
+            &["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if command_exists("wl-paste") {
+            return read_from("wl-paste", &["--no-newline"]);
+        }
+        if command_exists("xclip") {
+            return read_from("xclip", &["-selection", "clipboard", "-out"]);
+        }
+        if command_exists("xsel") {
+            return read_from("xsel", &["--clipboard", "--output"]);
+        }
+        bail!("no clipboard command found; install wl-paste, xclip, or xsel");
+    }
+
+    #[allow(unreachable_code)]
+    {
+        bail!("system clipboard is not supported on this platform")
+    }
+}
+
 fn pipe_to(program: &str, args: &[&str], text: &str) -> Result<()> {
     let mut child = Command::new(program)
         .args(args)
@@ -60,6 +94,21 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> Result<()> {
     } else {
         bail!("clipboard command `{program}` exited with {status}")
     }
+}
+
+fn read_from(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to start clipboard command `{program}`"))?;
+    if !output.status.success() {
+        bail!(
+            "clipboard command `{program}` exited with {}",
+            output.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]

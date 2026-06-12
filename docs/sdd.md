@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 3.3
-- **대상 릴리스**: v0.2.0-alpha.28
+- **문서 버전**: 3.4
+- **대상 릴리스**: v0.2.0-alpha.29
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.28 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다. 또한 child가 설정한 terminal title을 오른쪽 window list에 반영하고, OSC 52 clipboard copy를 system clipboard로 연결해 terminal fidelity를 한 단계 더 강화한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.29 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다. 또한 OSC 52 clipboard copy와 paste query를 system clipboard와 연결해 terminal fidelity를 한 단계 더 강화한다.
 
 핵심 목표는 다음과 같다.
 
@@ -20,7 +20,7 @@
 - host terminal의 bracketed paste mode를 UI 생명주기에 맞춰 켜고 끈다.
 - scrollback, selection, clipboard는 host terminal에 가까운 감각으로 동작한다.
 - renderer는 이전 frame의 긴 줄이 다음 frame의 짧은 줄 뒤에 남지 않도록 row를 viewport 폭까지 지운다.
-- child application의 OSC title과 OSC 52 clipboard request를 terminal callback으로 처리한다.
+- child application의 OSC title, OSC 52 clipboard copy, OSC 52 clipboard paste query를 terminal callback으로 처리한다.
 - tmux C 코드는 구조 참고로만 삼고 Rust 모듈로 직접 구현한다.
 - tmux fallback은 hidden `--native-client` 옵션에만 남긴다.
 
@@ -179,7 +179,8 @@ pub struct PtyTerminal {
 - OSC 1은 icon name을 갱신하고 window title이 없을 때 fallback title로 쓰인다.
 - OSC 2는 window title을 갱신한다.
 - title은 control character를 제거하고 120자까지만 유지한다.
-- OSC 52 `c` selector는 base64 decode 후 UTF-8 text로 system clipboard에 best-effort copy한다.
+- OSC 52 `c` selector와 base64 payload는 UTF-8 text로 decode해 system clipboard에 best-effort copy한다.
+- OSC 52 `c` selector와 `?` payload는 system clipboard text를 읽고 `ESC ] 52 ; c ; <base64> BEL` response를 PTY에 되돌려준다.
 
 렌더링:
 
@@ -295,7 +296,13 @@ terminal mode에서 Ctrl-C는 다음 순서로 처리된다.
 
 command가 없거나 실패하면 UI status에 error를 표시하고 panic하지 않는다.
 
-OSC 52 clipboard copy는 daemon-side terminal callback에서 처리한다. child가 `ESC ] 52 ; c ; <base64> BEL`을 출력하면 `PtyTerminal::drain()`이 pending clipboard text를 꺼내 `clipboard::copy_text()`로 전달한다. 이 경로는 terminal app compatibility를 위한 best-effort 동작이며, UI selection Ctrl-C 경로처럼 foreground child에 Ctrl-C를 보내지 않는 동작과 별개다.
+clipboard read도 같은 command bridge를 사용한다.
+
+- macOS: `pbpaste`
+- Windows: `powershell -NoProfile -Command Get-Clipboard -Raw`
+- Linux: `wl-paste --no-newline`, `xclip -selection clipboard -out`, `xsel --clipboard --output`
+
+OSC 52 clipboard copy는 daemon-side terminal callback에서 처리한다. child가 `ESC ] 52 ; c ; <base64> BEL`을 출력하면 `PtyTerminal::drain()`이 pending clipboard text를 꺼내 `clipboard::copy_text()`로 전달한다. child가 `ESC ] 52 ; c ; ? BEL`을 출력하면 `PtyTerminal::respond_pending_clipboard_paste()`가 `clipboard::read_text()` 결과를 base64로 인코딩해 PTY에 `ESC ] 52 ; c ; <base64> BEL`을 쓴다. 두 경로 모두 terminal app compatibility를 위한 best-effort 동작이며, UI selection Ctrl-C 경로처럼 foreground child에 Ctrl-C를 보내지 않는 동작과 별개다.
 
 ## 4. 주요 흐름
 
@@ -441,7 +448,7 @@ F12, q, Esc, or Detach button
 - layout preview deterministic output tests.
 - terminal key/mouse encoder unit tests.
 - terminal parser truecolor preservation tests.
-- terminal callback tests: OSC 0/1/2 title capture, OSC 52 clipboard decode.
+- terminal callback tests: OSC 0/1/2 title capture, OSC 52 clipboard decode, OSC 52 paste query, OSC 52 response encoding.
 - ratatui paragraph truecolor buffer preservation tests.
 - crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
 - terminal row padding regression test: 긴 row 이후 짧은 row를 그렸을 때 stale glyph가 남지 않는지 확인.
@@ -462,6 +469,7 @@ F12, q, Esc, or Detach button
 - macOS alternate-screen smoke script: 실제 TUI client에서 raw alternate-screen sequence가 active일 때 보이고 종료 후 primary screen으로 복귀하는지 확인.
 - macOS window-title smoke script: 실제 TUI client에서 child OSC title이 오른쪽 window list row에 표시되는지 확인.
 - macOS OSC 52 clipboard smoke script: 실제 TUI client에서 child OSC 52 copy 요청이 macOS `pbpaste`에 반영되는지 확인.
+- macOS OSC 52 paste smoke script: 실제 TUI client에서 child OSC 52 paste query가 macOS clipboard text를 PTY response로 돌려받는지 확인.
 - macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, split hotkey deprecated status, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
 - macOS child-exit smoke script: 실제 TUI client에서 마지막 shell `exit` 후 replacement shell 명령 실행, non-last shell `exit` 후 오른쪽 window list 제거를 확인.
 - macOS no-tmux smoke script: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `SHELL=/bin/sh` 환경에서 `--doctor`, default TUI PTY shell, `--native-client` failure boundary를 확인.
@@ -484,6 +492,7 @@ F12, q, Esc, or Detach button
 - `python3 scripts/smoke_macos_altscreen.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_window_title.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_osc52_clipboard.py --binary target/debug/tuimux`
+- `python3 scripts/smoke_macos_osc52_paste.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_child_exit.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux`
@@ -499,6 +508,7 @@ F12, q, Esc, or Detach button
 - alternate-screen active/exit 후 primary screen 복귀와 primary scrollback 격리 확인
 - child OSC title이 오른쪽 window list에 표시되는지 확인
 - child OSC 52 copy가 `pbpaste`에 반영되는지 확인
+- child OSC 52 paste query가 clipboard text를 PTY response로 돌려받는지 확인
 - mouse wheel/PageUp/PageDown/Home/End scrollback 확인
 - scrollback 중 host paste가 live bottom으로 돌아와 active shell에서 실행되는지 확인
 - navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
@@ -507,10 +517,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.28 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.29 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.28-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.29-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -518,8 +528,8 @@ v0.2.0-alpha.28 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.28/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.28 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.29/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.29 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

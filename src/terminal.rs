@@ -22,6 +22,7 @@ use vt100::{Color as VtColor, MouseProtocolEncoding, MouseProtocolMode};
 const SCROLLBACK: usize = 10_000;
 const MAX_WINDOW_TITLE_CHARS: usize = 120;
 const MAX_OSC52_BASE64_BYTES: usize = 1_048_576;
+const MAX_OSC52_RESPONSE_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalColor {
@@ -150,6 +151,7 @@ struct TerminalCallbacks {
     window_icon_name: Option<String>,
     window_title: Option<String>,
     pending_clipboard_copy: Option<String>,
+    pending_clipboard_paste: Option<Vec<u8>>,
 }
 
 impl TerminalCallbacks {
@@ -161,6 +163,10 @@ impl TerminalCallbacks {
 
     fn take_clipboard_copy(&mut self) -> Option<String> {
         self.pending_clipboard_copy.take()
+    }
+
+    fn take_clipboard_paste(&mut self) -> Option<Vec<u8>> {
+        self.pending_clipboard_paste.take()
     }
 }
 
@@ -184,6 +190,12 @@ impl vt100::Callbacks for TerminalCallbacks {
         let text = String::from_utf8_lossy(&decoded).to_string();
         if !text.is_empty() {
             self.pending_clipboard_copy = Some(text);
+        }
+    }
+
+    fn paste_from_clipboard(&mut self, _: &mut vt100::Screen, selector: &[u8]) {
+        if selector_targets_system_clipboard(selector) {
+            self.pending_clipboard_paste = Some(response_selector(selector));
         }
     }
 }
@@ -267,6 +279,7 @@ impl PtyTerminal {
                 Ok(bytes) => {
                     self.parser.process(&bytes);
                     self.copy_pending_clipboard();
+                    self.respond_pending_clipboard_paste();
                     changed = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -562,6 +575,18 @@ impl PtyTerminal {
         };
         let _ = crate::clipboard::copy_text(&text);
     }
+
+    fn respond_pending_clipboard_paste(&mut self) {
+        let Some(selector) = self.parser.callbacks_mut().take_clipboard_paste() else {
+            return;
+        };
+        let Ok(text) = crate::clipboard::read_text() else {
+            return;
+        };
+        let response = osc52_clipboard_response(&selector, &text);
+        let _ = self.writer.write_all(&response);
+        let _ = self.writer.flush();
+    }
 }
 
 impl Drop for PtyTerminal {
@@ -600,6 +625,33 @@ fn sanitize_window_title(raw: &[u8]) -> Option<String> {
 
 fn selector_targets_system_clipboard(selector: &[u8]) -> bool {
     selector.is_empty() || selector.contains(&b'c')
+}
+
+fn response_selector(selector: &[u8]) -> Vec<u8> {
+    if selector.is_empty() {
+        b"c".to_vec()
+    } else {
+        selector.to_vec()
+    }
+}
+
+fn osc52_clipboard_response(selector: &[u8], text: &str) -> Vec<u8> {
+    let bytes = truncate_utf8_bytes(text, MAX_OSC52_RESPONSE_BYTES).as_bytes();
+    let encoded = BASE64_STANDARD.encode(bytes);
+    let selector = String::from_utf8_lossy(selector);
+    format!("\x1b]52;{selector};{encoded}\x07").into_bytes()
+}
+
+fn truncate_utf8_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &text[..end]
 }
 
 fn key_to_bytes(key: KeyEvent, application_cursor: bool) -> Option<Vec<u8>> {
@@ -1016,6 +1068,25 @@ mod tests {
         assert_eq!(
             parser.callbacks_mut().take_clipboard_copy(),
             Some("COPY TARGET".to_string())
+        );
+    }
+
+    #[test]
+    fn terminal_callbacks_accept_osc52_clipboard_paste_query() {
+        let mut parser = vt100::Parser::new_with_callbacks(4, 40, 0, TerminalCallbacks::default());
+        parser.process(b"\x1b]52;c;?\x07");
+
+        assert_eq!(
+            parser.callbacks_mut().take_clipboard_paste(),
+            Some(b"c".to_vec())
+        );
+    }
+
+    #[test]
+    fn osc52_clipboard_response_encodes_clipboard_text() {
+        assert_eq!(
+            osc52_clipboard_response(b"c", "PASTE TARGET"),
+            b"\x1b]52;c;UEFTVEUgVEFSR0VU\x07".to_vec()
         );
     }
 }
