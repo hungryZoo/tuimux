@@ -6,7 +6,8 @@ string in the child shell, selects it with SGR mouse escape sequences, presses
 Ctrl-C, and verifies that macOS `pbpaste` contains the selected text. A shell
 trap also confirms that Ctrl-C was not forwarded to the foreground child. It
 then sends a host bracketed-paste sequence and verifies that the pasted command
-executes in the child PTY.
+executes in the child PTY. Finally, a raw child process enables bracketed paste
+mode and verifies that tuimux preserves the child-side paste wrapper.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import fcntl
 import os
 import pty
 import select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -28,6 +30,9 @@ from pathlib import Path
 MARKER = "TUIMUX_UI_COPY_TARGET"
 PASTE_MARKER = "TUIMUX_UI_PASTE_TARGET"
 PASTE_OUTPUT = f"PASTE_RAN:{PASTE_MARKER}"
+CHILD_PASTE_MARKER = "TUIMUX_CHILD_BRACKETED_TARGET"
+CHILD_PASTE_READY = "CHILD_BRACKETED_READY"
+CHILD_PASTE_OK = "CHILD_BRACKETED_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -52,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=5.0,
+        default=8.0,
         help="seconds to wait for the marker to appear",
     )
     parser.add_argument(
@@ -156,6 +161,41 @@ def stop_daemon(binary: Path, session: str) -> None:
     )
 
 
+def child_bracketed_paste_probe_command(payload: str) -> str:
+    probe = f"""
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+expected = b"\\x1b[200~" + {payload.encode()!r} + b"\\x1b[201~"
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+try:
+    tty.setraw(fd)
+    os.write(sys.stdout.fileno(), b"\\x1b[?2004h{CHILD_PASTE_READY}\\r\\n")
+    data = b""
+    deadline = time.time() + 5.0
+    while time.time() < deadline and b"\\x1b[201~" not in data:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            data += chunk
+    os.write(sys.stdout.fileno(), b"\\x1b[?2004l")
+    if data == expected:
+        os.write(sys.stdout.fileno(), b"{CHILD_PASTE_OK}\\r\\n")
+    else:
+        os.write(sys.stdout.fileno(), b"CHILD_BRACKETED_BAD:" + data.hex().encode() + b"\\r\\n")
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+"""
+    return f"python3 -c {shlex.quote(probe)}"
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -175,13 +215,14 @@ def main() -> int:
             f"rm -f {trap_file}; "
             "printf '\\033[2J\\033[H'; "
             f"sh -c \"trap 'printf INT > {trap_file}' INT; "
-            f"printf '{MARKER}'; sleep 2\"\r"
+            f"printf '{MARKER}'; sleep 4\"\r"
         )
         client.write(command.encode())
         if not client.wait_contains(MARKER, args.timeout):
             print("marker did not appear in tuimux output", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
+        client.read_for(0.6)
 
         # crossterm enables SGR mouse mode. Coordinates are 1-based.
         y = 1
@@ -189,7 +230,7 @@ def main() -> int:
         x2 = len(MARKER)
         drag = f"\x1b[<0;{x1};{y}M\x1b[<32;{x2};{y}M\x1b[<0;{x2};{y}m"
         client.write(drag.encode())
-        client.read_for(0.3)
+        client.read_for(0.6)
         client.write(b"\x03")
         time.sleep(0.5)
 
@@ -204,7 +245,7 @@ def main() -> int:
             )
             return 1
 
-        time.sleep(2.0)
+        time.sleep(3.0)
         paste_payload = (
             "printf '\\033[2J\\033[H'; "
             f"printf 'PASTE_RAN:%s\\n' {PASTE_MARKER}"
@@ -218,9 +259,24 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
+        child_probe_command = child_bracketed_paste_probe_command(CHILD_PASTE_MARKER)
+        client.write((child_probe_command + "\r").encode())
+        if not client.wait_contains(CHILD_PASTE_READY, args.timeout):
+            print("child bracketed paste probe did not become ready", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
+        child_bracketed_paste = f"\x1b[200~{CHILD_PASTE_MARKER}\x1b[201~"
+        client.write(child_bracketed_paste.encode())
+        if not client.wait_contains(CHILD_PASTE_OK, args.timeout):
+            print("child did not receive bracketed paste wrapper from tuimux", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
         print("OK macOS UI selection smoke")
         print(f"copied: {copied}")
         print(f"pasted command output: {PASTE_OUTPUT}")
+        print("child bracketed paste wrapper: observed")
         print("foreground child SIGINT: not observed")
         return 0
     finally:
