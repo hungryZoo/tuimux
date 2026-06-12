@@ -45,10 +45,47 @@ impl Default for PaneAxis {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl PaneRect {
+    pub fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn right(self) -> u16 {
+        self.x.saturating_add(self.width)
+    }
+
+    fn bottom(self) -> u16 {
+        self.y.saturating_add(self.height)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSeparator {
+    pub axis: PaneAxis,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
 pub struct PaneRef<'a> {
     pub index: u32,
     pub title: &'a str,
     pub active: bool,
+    pub rect: PaneRect,
     pub terminal: &'a PtyTerminal,
 }
 
@@ -71,13 +108,24 @@ struct NativeWindow {
     name: String,
     panes: Vec<NativePane>,
     active_pane: usize,
-    pane_axis: PaneAxis,
+    layout: PaneNode,
 }
 
 struct NativePane {
     index: u32,
     title: String,
     terminal: PtyTerminal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaneNode {
+    Leaf(u32),
+    Split {
+        axis: PaneAxis,
+        first_ratio: u16,
+        first: Box<PaneNode>,
+        second: Box<PaneNode>,
+    },
 }
 
 impl NativeMux {
@@ -127,31 +175,41 @@ impl NativeMux {
         self.active_window()
             .map(|window| {
                 window
-                    .panes
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, pane)| Pane {
-                        index: pane.index,
-                        title: pane.title.clone(),
-                        active: idx == window.active_pane,
+                    .pane_order()
+                    .into_iter()
+                    .filter_map(|pane_index| {
+                        let pane = window.pane_by_index(pane_index)?;
+                        Some(Pane {
+                            index: pane.index,
+                            title: pane.title.clone(),
+                            active: pane.index == window.active_pane_index(),
+                        })
                     })
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    pub fn active_pane_refs(&self) -> Vec<PaneRef<'_>> {
+    pub fn active_pane_refs(&self, width: u16, height: u16) -> Vec<PaneRef<'_>> {
         self.active_window()
             .map(|window| {
+                let rects = window.pane_rects(width, height);
                 window
-                    .panes
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, pane)| PaneRef {
-                        index: pane.index,
-                        title: &pane.title,
-                        active: idx == window.active_pane,
-                        terminal: &pane.terminal,
+                    .pane_order()
+                    .into_iter()
+                    .filter_map(|pane_index| {
+                        let pane = window.pane_by_index(pane_index)?;
+                        Some(PaneRef {
+                            index: pane.index,
+                            title: &pane.title,
+                            active: pane.index == window.active_pane_index(),
+                            rect: rects
+                                .iter()
+                                .find(|(index, _)| *index == pane.index)
+                                .map(|(_, rect)| *rect)
+                                .unwrap_or_else(|| PaneRect::new(0, 0, width, height)),
+                            terminal: &pane.terminal,
+                        })
                     })
                     .collect()
             })
@@ -160,7 +218,13 @@ impl NativeMux {
 
     pub fn active_pane_axis(&self) -> PaneAxis {
         self.active_window()
-            .map(|window| window.pane_axis)
+            .and_then(|window| window.layout.primary_axis())
+            .unwrap_or_default()
+    }
+
+    pub fn active_pane_separators(&self, width: u16, height: u16) -> Vec<PaneSeparator> {
+        self.active_window()
+            .map(|window| window.pane_separators(width, height))
             .unwrap_or_default()
     }
 
@@ -218,10 +282,11 @@ impl NativeMux {
         let Some(window) = self.active_window_mut() else {
             bail!("no active window");
         };
-        if row >= window.panes.len() {
+        let order = window.pane_order();
+        if row >= order.len() {
             bail!("pane row {row} does not exist");
         }
-        window.active_pane = row;
+        window.select_pane_index(order[row])?;
         Ok(())
     }
 
@@ -232,8 +297,12 @@ impl NativeMux {
         if window.panes.is_empty() {
             bail!("no panes in active window");
         }
-        window.active_pane = (window.active_pane + 1) % window.panes.len();
-        Ok(window.panes[window.active_pane].index)
+        let order = window.pane_order();
+        let active = window.active_pane_index();
+        let current = order.iter().position(|index| *index == active).unwrap_or(0);
+        let next = order[(current + 1) % order.len()];
+        window.select_pane_index(next)?;
+        Ok(next)
     }
 
     pub fn new_window(&mut self, width: u16, height: u16) -> Result<u32> {
@@ -317,12 +386,38 @@ impl NativeMux {
         if let Some(pane) = replacement {
             window.panes.push(pane);
             window.active_pane = 0;
-            window.pane_axis = PaneAxis::Columns;
+            window.layout = PaneNode::Leaf(1);
         } else {
+            window.layout = remove_leaf_from_layout(&window.layout, removed)
+                .unwrap_or_else(|| PaneNode::Leaf(window.panes[0].index));
+            let replacement_active = window
+                .pane_order()
+                .into_iter()
+                .next()
+                .unwrap_or(window.panes[0].index);
+            window.select_pane_index(replacement_active)?;
             window.active_pane = window.active_pane.min(window.panes.len().saturating_sub(1));
         }
         self.resize_active(width, height);
         Ok(removed)
+    }
+
+    pub fn resize_active_pane(
+        &mut self,
+        axis: PaneAxis,
+        grow: bool,
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
+        let Some(window) = self.active_window_mut() else {
+            bail!("no active window");
+        };
+        let active = window.active_pane_index();
+        if !window.layout.resize_leaf(active, axis, grow, 50) {
+            bail!("active pane has no {:?} split to resize", axis);
+        }
+        self.resize_active(width, height);
+        Ok(())
     }
 
     pub fn active_terminal(&self) -> Option<&PtyTerminal> {
@@ -351,9 +446,11 @@ impl NativeMux {
 
     pub fn resize_active(&mut self, width: u16, height: u16) {
         if let Some(window) = self.active_window_mut() {
-            let sizes = pane_sizes(width, height, window.panes.len(), window.pane_axis);
-            for (pane, (pane_width, pane_height)) in window.panes.iter_mut().zip(sizes) {
-                pane.terminal.resize(pane_width, pane_height);
+            let rects = window.pane_rects(width, height);
+            for pane in &mut window.panes {
+                if let Some((_, rect)) = rects.iter().find(|(index, _)| *index == pane.index) {
+                    pane.terminal.resize(rect.width, rect.height);
+                }
             }
         }
     }
@@ -370,7 +467,7 @@ impl NativeMux {
             name,
             panes: vec![pane],
             active_pane: 0,
-            pane_axis: PaneAxis::Columns,
+            layout: PaneNode::Leaf(1),
         })
     }
 
@@ -417,9 +514,10 @@ impl NativeMux {
         let Some(window) = self.active_window_mut() else {
             bail!("no active window");
         };
+        let active_index = window.active_pane_index();
+        window.layout = split_leaf_in_layout(&window.layout, active_index, pane_index, axis);
         window.panes.push(pane);
         window.active_pane = window.panes.len().saturating_sub(1);
-        window.pane_axis = axis;
         self.resize_active(width, height);
         Ok(pane_index)
     }
@@ -443,36 +541,247 @@ impl NativeMux {
     }
 }
 
-pub fn pane_sizes(width: u16, height: u16, count: usize, axis: PaneAxis) -> Vec<(u16, u16)> {
-    if count == 0 {
-        return Vec::new();
-    }
-    if count == 1 {
-        return vec![(width.max(2), height.max(1))];
+impl NativeWindow {
+    fn active_pane_index(&self) -> u32 {
+        self.panes
+            .get(self.active_pane)
+            .map(|pane| pane.index)
+            .unwrap_or(0)
     }
 
-    match axis {
-        PaneAxis::Columns => split_lengths(width.saturating_sub((count - 1) as u16), count)
-            .into_iter()
-            .map(|pane_width| (pane_width.max(2), height.max(1)))
-            .collect(),
-        PaneAxis::Rows => split_lengths(height.saturating_sub((count - 1) as u16), count)
-            .into_iter()
-            .map(|pane_height| (width.max(2), pane_height.max(1)))
-            .collect(),
+    fn pane_by_index(&self, pane_index: u32) -> Option<&NativePane> {
+        self.panes.iter().find(|pane| pane.index == pane_index)
+    }
+
+    fn select_pane_index(&mut self, pane_index: u32) -> Result<()> {
+        let Some(row) = self.panes.iter().position(|pane| pane.index == pane_index) else {
+            bail!("pane {pane_index} does not exist");
+        };
+        self.active_pane = row;
+        Ok(())
+    }
+
+    fn pane_order(&self) -> Vec<u32> {
+        let mut order = Vec::new();
+        self.layout.collect_leaves(&mut order);
+        order.retain(|index| self.pane_by_index(*index).is_some());
+        order
+    }
+
+    fn pane_rects(&self, width: u16, height: u16) -> Vec<(u32, PaneRect)> {
+        let mut rects = Vec::new();
+        self.layout
+            .collect_rects(PaneRect::new(0, 0, width, height), &mut rects);
+        rects.retain(|(index, _)| self.pane_by_index(*index).is_some());
+        rects
+    }
+
+    fn pane_separators(&self, width: u16, height: u16) -> Vec<PaneSeparator> {
+        let mut separators = Vec::new();
+        self.layout
+            .collect_separators(PaneRect::new(0, 0, width, height), &mut separators);
+        separators
     }
 }
 
-fn split_lengths(total: u16, count: usize) -> Vec<u16> {
-    let base = total / count as u16;
-    let mut remainder = total % count as u16;
-    (0..count)
-        .map(|_| {
-            let extra = u16::from(remainder > 0);
-            remainder = remainder.saturating_sub(1);
-            base.saturating_add(extra)
-        })
-        .collect()
+impl PaneNode {
+    fn primary_axis(&self) -> Option<PaneAxis> {
+        match self {
+            PaneNode::Leaf(_) => None,
+            PaneNode::Split { axis, .. } => Some(*axis),
+        }
+    }
+
+    fn collect_leaves(&self, leaves: &mut Vec<u32>) {
+        match self {
+            PaneNode::Leaf(index) => leaves.push(*index),
+            PaneNode::Split { first, second, .. } => {
+                first.collect_leaves(leaves);
+                second.collect_leaves(leaves);
+            }
+        }
+    }
+
+    fn collect_rects(&self, rect: PaneRect, out: &mut Vec<(u32, PaneRect)>) {
+        match self {
+            PaneNode::Leaf(index) => out.push((*index, rect)),
+            PaneNode::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            } => {
+                let (first_rect, _, second_rect) = split_rect(rect, *axis, *first_ratio);
+                first.collect_rects(first_rect, out);
+                second.collect_rects(second_rect, out);
+            }
+        }
+    }
+
+    fn collect_separators(&self, rect: PaneRect, out: &mut Vec<PaneSeparator>) {
+        match self {
+            PaneNode::Leaf(_) => {}
+            PaneNode::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            } => {
+                let (first_rect, separator, second_rect) = split_rect(rect, *axis, *first_ratio);
+                out.push(separator);
+                first.collect_separators(first_rect, out);
+                second.collect_separators(second_rect, out);
+            }
+        }
+    }
+
+    fn contains_leaf(&self, target: u32) -> bool {
+        match self {
+            PaneNode::Leaf(index) => *index == target,
+            PaneNode::Split { first, second, .. } => {
+                first.contains_leaf(target) || second.contains_leaf(target)
+            }
+        }
+    }
+
+    fn resize_leaf(&mut self, target: u32, axis: PaneAxis, grow: bool, step: u16) -> bool {
+        match self {
+            PaneNode::Leaf(_) => false,
+            PaneNode::Split {
+                axis: split_axis,
+                first_ratio,
+                first,
+                second,
+            } => {
+                if first.resize_leaf(target, axis, grow, step)
+                    || second.resize_leaf(target, axis, grow, step)
+                {
+                    return true;
+                }
+
+                let in_first = first.contains_leaf(target);
+                let in_second = second.contains_leaf(target);
+                if *split_axis != axis || (!in_first && !in_second) {
+                    return false;
+                }
+
+                let grow_first = (in_first && grow) || (in_second && !grow);
+                *first_ratio = if grow_first {
+                    first_ratio.saturating_add(step)
+                } else {
+                    first_ratio.saturating_sub(step)
+                }
+                .clamp(100, 900);
+                true
+            }
+        }
+    }
+}
+
+fn split_leaf_in_layout(node: &PaneNode, target: u32, new_pane: u32, axis: PaneAxis) -> PaneNode {
+    match node {
+        PaneNode::Leaf(index) if *index == target => PaneNode::Split {
+            axis,
+            first_ratio: 500,
+            first: Box::new(PaneNode::Leaf(*index)),
+            second: Box::new(PaneNode::Leaf(new_pane)),
+        },
+        PaneNode::Leaf(index) => PaneNode::Leaf(*index),
+        PaneNode::Split {
+            axis: existing_axis,
+            first_ratio,
+            first,
+            second,
+        } => PaneNode::Split {
+            axis: *existing_axis,
+            first_ratio: *first_ratio,
+            first: Box::new(split_leaf_in_layout(first, target, new_pane, axis)),
+            second: Box::new(split_leaf_in_layout(second, target, new_pane, axis)),
+        },
+    }
+}
+
+fn remove_leaf_from_layout(node: &PaneNode, target: u32) -> Option<PaneNode> {
+    match node {
+        PaneNode::Leaf(index) if *index == target => None,
+        PaneNode::Leaf(index) => Some(PaneNode::Leaf(*index)),
+        PaneNode::Split {
+            axis,
+            first_ratio,
+            first,
+            second,
+        } => match (
+            remove_leaf_from_layout(first, target),
+            remove_leaf_from_layout(second, target),
+        ) {
+            (Some(first), Some(second)) => Some(PaneNode::Split {
+                axis: *axis,
+                first_ratio: *first_ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+            (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+            (None, None) => None,
+        },
+    }
+}
+
+fn split_rect(
+    rect: PaneRect,
+    axis: PaneAxis,
+    first_ratio: u16,
+) -> (PaneRect, PaneSeparator, PaneRect) {
+    match axis {
+        PaneAxis::Columns => {
+            let content = rect.width.saturating_sub(1);
+            let first_width = split_first_length(content, first_ratio);
+            let second_width = content.saturating_sub(first_width);
+            let first = PaneRect::new(rect.x, rect.y, first_width, rect.height);
+            let separator = PaneSeparator {
+                axis,
+                x: first.right(),
+                y: rect.y,
+                width: u16::from(rect.width > 0),
+                height: rect.height,
+            };
+            let second = PaneRect::new(
+                separator.x.saturating_add(separator.width),
+                rect.y,
+                second_width,
+                rect.height,
+            );
+            (first, separator, second)
+        }
+        PaneAxis::Rows => {
+            let content = rect.height.saturating_sub(1);
+            let first_height = split_first_length(content, first_ratio);
+            let second_height = content.saturating_sub(first_height);
+            let first = PaneRect::new(rect.x, rect.y, rect.width, first_height);
+            let separator = PaneSeparator {
+                axis,
+                x: rect.x,
+                y: first.bottom(),
+                width: rect.width,
+                height: u16::from(rect.height > 0),
+            };
+            let second = PaneRect::new(
+                rect.x,
+                separator.y.saturating_add(separator.height),
+                rect.width,
+                second_height,
+            );
+            (first, separator, second)
+        }
+    }
+}
+
+fn split_first_length(content: u16, first_ratio: u16) -> u16 {
+    if content <= 1 {
+        return content;
+    }
+    let ratio = first_ratio.clamp(100, 900) as u32;
+    let first = ((content as u32 * ratio) + 500) / 1000;
+    first.clamp(1, content.saturating_sub(1) as u32) as u16
 }
 
 fn cwd_or_current(cwd: &Path) -> &Path {
@@ -538,14 +847,61 @@ mod tests {
     }
 
     #[test]
-    fn pane_sizes_reserve_separator_space() {
+    fn nested_layout_preserves_existing_split_when_splitting_active_leaf() {
+        let mut mux = NativeMux::new("tuimux", PathBuf::from("."), 80, 24).unwrap();
+
+        mux.split_active_pane_right(80, 24).unwrap();
+        mux.select_pane_by_row(0).unwrap();
+        mux.split_active_pane_down(80, 24).unwrap();
+
+        let panes = mux.pane_infos();
+        let order = panes.iter().map(|pane| pane.index).collect::<Vec<_>>();
+        assert_eq!(order, vec![1, 3, 2]);
+        assert!(panes[1].active);
+
+        let refs = mux.active_pane_refs(80, 24);
+        let rects = refs
+            .iter()
+            .map(|pane| (pane.index, pane.rect))
+            .collect::<Vec<_>>();
+        assert_eq!(rects[0], (1, PaneRect::new(0, 0, 40, 12)));
+        assert_eq!(rects[1], (3, PaneRect::new(0, 13, 40, 11)));
+        assert_eq!(rects[2], (2, PaneRect::new(41, 0, 39, 24)));
+
+        let separators = mux.active_pane_separators(80, 24);
+        assert_eq!(separators.len(), 2);
         assert_eq!(
-            pane_sizes(11, 5, 2, PaneAxis::Columns),
-            vec![(5, 5), (5, 5)]
+            separators[0],
+            PaneSeparator {
+                axis: PaneAxis::Columns,
+                x: 40,
+                y: 0,
+                width: 1,
+                height: 24,
+            }
         );
         assert_eq!(
-            pane_sizes(10, 7, 3, PaneAxis::Rows),
-            vec![(10, 2), (10, 2), (10, 1)]
+            separators[1],
+            PaneSeparator {
+                axis: PaneAxis::Rows,
+                x: 0,
+                y: 12,
+                width: 40,
+                height: 1,
+            }
         );
+
+        mux.resize_active_pane(PaneAxis::Rows, true, 80, 24)
+            .unwrap();
+        let refs = mux.active_pane_refs(80, 24);
+        assert_eq!(refs[0].rect, PaneRect::new(0, 0, 40, 10));
+        assert_eq!(refs[1].rect, PaneRect::new(0, 11, 40, 13));
+
+        mux.resize_active_pane(PaneAxis::Columns, true, 80, 24)
+            .unwrap();
+        let refs = mux.active_pane_refs(80, 24);
+        assert_eq!(refs[0].rect, PaneRect::new(0, 0, 43, 10));
+        assert_eq!(refs[1].rect, PaneRect::new(0, 11, 43, 13));
+        assert_eq!(refs[2].rect, PaneRect::new(44, 0, 36, 24));
     }
 }

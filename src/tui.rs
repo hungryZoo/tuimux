@@ -24,7 +24,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::clipboard;
 use crate::mux_backend::{KeyInput, MouseInput, MuxBackend, MuxSnapshot, PaneSnapshot};
-use crate::native_mux::{Pane, PaneAxis, Session, Window};
+use crate::native_mux::{Pane, PaneAxis, PaneRect, PaneSeparator, Session, Window};
 use crate::terminal::{SelectionRange, TerminalColor, TerminalSpan, TerminalStyle};
 
 /// Why the UI loop ended — affects the farewell message.
@@ -92,6 +92,7 @@ struct UiState {
     terminal_mode: bool,
     selection: Option<SelectionState>,
     terminal_axis: PaneAxis,
+    terminal_separators: Vec<PaneSeparator>,
     terminal_panes: Vec<PaneSnapshot>,
     terminal_rows: Vec<Vec<TerminalSpan>>,
     terminal_cursor: Option<(u16, u16)>,
@@ -127,6 +128,7 @@ impl UiState {
             terminal_mode: true,
             selection: None,
             terminal_axis: PaneAxis::default(),
+            terminal_separators: Vec::new(),
             terminal_panes: Vec::new(),
             terminal_rows: Vec::new(),
             terminal_cursor: None,
@@ -157,6 +159,7 @@ impl UiState {
         self.panes = snapshot.panes;
         self.current_session = snapshot.current_session;
         self.terminal_axis = snapshot.terminal.axis;
+        self.terminal_separators = snapshot.terminal.separators;
         self.terminal_panes = snapshot.terminal.panes;
         self.terminal_rows = snapshot.terminal.rows;
         self.terminal_cursor = snapshot.terminal.cursor;
@@ -384,6 +387,18 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     }
                     (KeyCode::Tab, _) => {
                         select_next_pane(state);
+                    }
+                    (KeyCode::Left, _) => {
+                        resize_pane(state, PaneAxis::Columns, false);
+                    }
+                    (KeyCode::Right, _) => {
+                        resize_pane(state, PaneAxis::Columns, true);
+                    }
+                    (KeyCode::Up, _) => {
+                        resize_pane(state, PaneAxis::Rows, false);
+                    }
+                    (KeyCode::Down, _) => {
+                        resize_pane(state, PaneAxis::Rows, true);
                     }
                     (KeyCode::Char('x'), _) => {
                         kill_active_pane(state);
@@ -614,6 +629,24 @@ fn kill_active_pane(state: &mut UiState) {
     }
 }
 
+fn resize_pane(state: &mut UiState, axis: PaneAxis, grow: bool) {
+    let (width, height) = active_terminal_size(state);
+    match state.mux.resize_active_pane(axis, grow, width, height) {
+        Ok(()) => {
+            let direction = match (axis, grow) {
+                (PaneAxis::Columns, true) => "wider",
+                (PaneAxis::Columns, false) => "narrower",
+                (PaneAxis::Rows, true) => "taller",
+                (PaneAxis::Rows, false) => "shorter",
+            };
+            state.status = Some(format!("resized active pane {direction}"));
+            state.clear_selection();
+            state.sync_terminal(width, height);
+        }
+        Err(e) => state.status = Some(format!("resize-pane failed: {e}")),
+    }
+}
+
 fn new_window(state: &mut UiState) {
     let (width, height) = active_terminal_size(state);
     match state.mux.new_window(width, height) {
@@ -657,6 +690,7 @@ fn switch_session(state: &mut UiState, idx: usize) {
 fn ui(f: &mut Frame, state: &mut UiState) {
     let root = f.size();
     let terminal_axis = state.terminal_axis;
+    let terminal_separators = state.terminal_separators.clone();
     let terminal_panes = state.terminal_panes.clone();
     let terminal_rows = state.terminal_rows.clone();
     let terminal_cursor = state.terminal_cursor;
@@ -673,6 +707,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
             f,
             root,
             terminal_axis,
+            terminal_separators,
             terminal_panes,
             terminal_rows,
             state.terminal_mode,
@@ -694,6 +729,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         f,
         body[0],
         terminal_axis,
+        terminal_separators,
         terminal_panes,
         terminal_rows,
         state.terminal_mode,
@@ -745,6 +781,7 @@ fn render_main(
     f: &mut Frame,
     area: Rect,
     terminal_axis: PaneAxis,
+    terminal_separators: Vec<PaneSeparator>,
     terminal_panes: Vec<PaneSnapshot>,
     terminal_rows: Vec<Vec<TerminalSpan>>,
     terminal_mode: bool,
@@ -779,6 +816,7 @@ fn render_main(
             f,
             inner,
             terminal_axis,
+            terminal_separators,
             terminal_panes,
             show_cursor,
             regions,
@@ -826,11 +864,15 @@ fn render_terminal_panes(
     f: &mut Frame,
     area: Rect,
     axis: PaneAxis,
+    separators: Vec<PaneSeparator>,
     panes: Vec<PaneSnapshot>,
     show_cursor: bool,
     regions: &mut Regions,
 ) {
-    let pane_rects = pane_rects(area, axis, panes.len());
+    let pane_rects = panes
+        .iter()
+        .map(|pane| offset_rect(area, pane.rect))
+        .collect::<Vec<_>>();
     regions.terminal_pane_count = pane_rects.len().min(regions.terminal_panes.len());
 
     for (idx, (pane, rect)) in panes
@@ -871,10 +913,52 @@ fn render_terminal_panes(
         }
     }
 
-    render_pane_separators(f, area, axis, &pane_rects);
+    render_pane_separators(f, area, axis, &separators);
 }
 
-fn render_pane_separators(f: &mut Frame, area: Rect, axis: PaneAxis, pane_rects: &[Rect]) {
+fn render_pane_separators(
+    f: &mut Frame,
+    area: Rect,
+    _fallback_axis: PaneAxis,
+    separators: &[PaneSeparator],
+) {
+    let style = Style::default().fg(Color::DarkGray);
+    for separator in separators {
+        let rect = offset_rect(
+            area,
+            PaneRect::new(separator.x, separator.y, separator.width, separator.height),
+        );
+        if rect.width == 0 || rect.height == 0 {
+            continue;
+        }
+        let symbol = match separator.axis {
+            PaneAxis::Columns => "│",
+            PaneAxis::Rows => "─",
+        };
+        let lines = match separator.axis {
+            PaneAxis::Columns => (0..rect.height)
+                .map(|_| Line::from(Span::styled(symbol, style)))
+                .collect::<Vec<_>>(),
+            PaneAxis::Rows => vec![Line::from(Span::styled(
+                symbol.repeat(rect.width as usize),
+                style,
+            ))],
+        };
+        f.render_widget(Paragraph::new(lines), rect);
+    }
+}
+
+fn offset_rect(area: Rect, rect: PaneRect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(rect.x),
+        area.y.saturating_add(rect.y),
+        rect.width.min(area.width.saturating_sub(rect.x)),
+        rect.height.min(area.height.saturating_sub(rect.y)),
+    )
+}
+
+#[allow(dead_code)]
+fn render_linear_pane_separators(f: &mut Frame, area: Rect, axis: PaneAxis, pane_rects: &[Rect]) {
     let style = Style::default().fg(Color::DarkGray);
     for pair in pane_rects.windows(2) {
         let separator = match axis {
@@ -1450,6 +1534,7 @@ fn terminal_cell_for_pane(x: u16, y: u16, regions: &Regions, pane: usize) -> Opt
     ))
 }
 
+#[cfg(test)]
 fn pane_rects(area: Rect, axis: PaneAxis, count: usize) -> Vec<Rect> {
     if count == 0 || area.width == 0 || area.height == 0 {
         return Vec::new();
@@ -1488,6 +1573,7 @@ fn pane_rects(area: Rect, axis: PaneAxis, count: usize) -> Vec<Rect> {
     }
 }
 
+#[cfg(test)]
 fn split_lengths(total: u16, count: usize) -> Vec<u16> {
     if count == 0 {
         return Vec::new();

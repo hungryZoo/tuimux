@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 1.3
-- **대상 릴리스**: v0.2.0-alpha.8
+- **문서 버전**: 1.4
+- **대상 릴리스**: v0.2.0-alpha.9
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.8의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/pane/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.9의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/nested pane tree/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -25,6 +25,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - daemon이 session/window/pane/PTY를 소유하고 UI client는 Unix socket으로 attach한다.
 - UI detach/종료 후 같은 session으로 재attach하면 shell state가 유지된다.
 - navigation mode에서 active pane을 right/down split하고, pane cycle/select/kill을 할 수 있다.
+- navigation mode에서 arrow key로 active pane을 resize할 수 있다.
 - terminal mode는 full-screen으로 동작해 `btop`, `htop`, `nano` 같은 앱에 충분한 PTY 크기를 준다.
 - mouse selection은 mouse-up 이후 유지된다.
 - selection이 있을 때 Ctrl-C는 system clipboard copy로 동작한다.
@@ -35,7 +36,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 ## 4. 비목표
 
 - daemon 재시작/host reboot 후 session 복구.
-- pane resize/nested layout, tmux command 호환성, plugin 호환성.
+- tmux layout string, tmux command 호환성, plugin 호환성.
 - 동시 multi-attach의 독립 cursor/viewport 정책.
 - Windows/Linux asset은 이번 프리릴리즈에 포함하지 않는다.
 
@@ -45,7 +46,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - macOS ARM release build 성공.
 - `tuimux --doctor`가 tmux 부재를 실패로 보지 않는다.
 - detach 후 reattach smoke에서 shell 환경값이 유지된다.
-- split pane unit/smoke에서 pane별 PTY, cursor, mouse local 좌표가 유지된다.
+- nested split pane unit/smoke에서 pane별 PTY, cursor, mouse local 좌표가 유지된다.
+- pane resize unit/smoke에서 active pane rect와 PTY size가 변경된다.
 - host bracketed paste setup/restore가 적용되어 paste event가 active pane으로 전달된다.
 - `btop`, `htop`, `nano`, `llmfit --help`가 native terminal surface에서 실행된다.
 - drag selection + Ctrl-C + `pbpaste` smoke test가 통과한다.
@@ -53,4 +55,4 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 
 ## 6. 다음 단계
 
-다음 큰 제품 단계는 pane resize/nested layout, daemon restart persistence, Linux/Windows backend, multi-attach 정책, 더 넓은 terminal app compatibility suite다.
+다음 큰 제품 단계는 tmux layout string 호환성, daemon restart persistence, Linux/Windows backend, multi-attach 정책, 더 넓은 terminal app compatibility suite다.

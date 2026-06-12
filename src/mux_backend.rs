@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use serde::{Deserialize, Serialize};
 
-use crate::native_mux::{NativeMux, Pane, PaneAxis, Session, Window};
+use crate::native_mux::{NativeMux, Pane, PaneAxis, PaneRect, PaneSeparator, Session, Window};
 use crate::terminal::{SelectionRange, TerminalSpan};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +18,7 @@ pub struct PaneSnapshot {
     pub index: u32,
     pub title: String,
     pub active: bool,
+    pub rect: PaneRect,
     pub rows: Vec<Vec<TerminalSpan>>,
     pub cursor: Option<(u16, u16)>,
     pub hide_cursor: bool,
@@ -27,6 +28,7 @@ pub struct PaneSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
     pub axis: PaneAxis,
+    pub separators: Vec<PaneSeparator>,
     pub panes: Vec<PaneSnapshot>,
     pub rows: Vec<Vec<TerminalSpan>>,
     pub cursor: Option<(u16, u16)>,
@@ -38,6 +40,7 @@ impl Default for TerminalSnapshot {
     fn default() -> Self {
         Self {
             axis: PaneAxis::default(),
+            separators: Vec::new(),
             panes: Vec::new(),
             rows: Vec::new(),
             cursor: None,
@@ -89,7 +92,7 @@ impl MuxBackend {
             MuxBackend::Local(mux) => {
                 mux.resize_active(width, height);
                 mux.drain_all();
-                Ok(local_snapshot(mux, selection))
+                Ok(local_snapshot(mux, width, height, selection))
             }
         }
     }
@@ -174,6 +177,20 @@ impl MuxBackend {
         }
     }
 
+    pub fn resize_active_pane(
+        &mut self,
+        axis: PaneAxis,
+        grow: bool,
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
+        match self {
+            #[cfg(unix)]
+            MuxBackend::Remote(client) => client.resize_active_pane(axis, grow, width, height),
+            MuxBackend::Local(mux) => mux.resize_active_pane(axis, grow, width, height),
+        }
+    }
+
     pub fn selected_text(&mut self, selection: SelectionRange) -> Result<String> {
         match self {
             #[cfg(unix)]
@@ -233,8 +250,13 @@ impl MuxBackend {
     }
 }
 
-fn local_snapshot(mux: &NativeMux, selection: Option<SelectionRange>) -> MuxSnapshot {
-    let terminal = terminal_snapshot(mux, selection);
+fn local_snapshot(
+    mux: &NativeMux,
+    width: u16,
+    height: u16,
+    selection: Option<SelectionRange>,
+) -> MuxSnapshot {
+    let terminal = terminal_snapshot(mux, width, height, selection);
 
     MuxSnapshot {
         sessions: mux.session_infos(),
@@ -245,8 +267,13 @@ fn local_snapshot(mux: &NativeMux, selection: Option<SelectionRange>) -> MuxSnap
     }
 }
 
-fn terminal_snapshot(mux: &NativeMux, selection: Option<SelectionRange>) -> TerminalSnapshot {
-    let pane_refs = mux.active_pane_refs();
+fn terminal_snapshot(
+    mux: &NativeMux,
+    width: u16,
+    height: u16,
+    selection: Option<SelectionRange>,
+) -> TerminalSnapshot {
+    let pane_refs = mux.active_pane_refs(width, height);
     if pane_refs.is_empty() {
         return TerminalSnapshot::default();
     }
@@ -259,6 +286,7 @@ fn terminal_snapshot(mux: &NativeMux, selection: Option<SelectionRange>) -> Term
                 index: pane.index,
                 title: pane.title.to_string(),
                 active: pane.active,
+                rect: pane.rect,
                 rows: pane.terminal.styled_rows_with_selection(pane_selection),
                 cursor: Some(pane.terminal.cursor()),
                 hide_cursor: pane.terminal.hide_cursor(),
@@ -270,6 +298,7 @@ fn terminal_snapshot(mux: &NativeMux, selection: Option<SelectionRange>) -> Term
     let active = panes.iter().find(|pane| pane.active).unwrap_or(&panes[0]);
     TerminalSnapshot {
         axis: mux.active_pane_axis(),
+        separators: mux.active_pane_separators(width, height),
         rows: active.rows.clone(),
         cursor: active.cursor,
         hide_cursor: active.hide_cursor,
@@ -529,6 +558,12 @@ enum Request {
         width: u16,
         height: u16,
     },
+    ResizePane {
+        axis: PaneAxis,
+        grow: bool,
+        width: u16,
+        height: u16,
+    },
     SelectedText {
         selection: SelectionRange,
     },
@@ -730,6 +765,21 @@ mod unix_remote {
             }
         }
 
+        pub fn resize_active_pane(
+            &mut self,
+            axis: PaneAxis,
+            grow: bool,
+            width: u16,
+            height: u16,
+        ) -> Result<()> {
+            expect_ok(self.request(Request::ResizePane {
+                axis,
+                grow,
+                width,
+                height,
+            })?)
+        }
+
         pub fn selected_text(&mut self, selection: SelectionRange) -> Result<String> {
             match self.request(Request::SelectedText { selection })? {
                 Response::Text(text) => Ok(text),
@@ -828,7 +878,7 @@ mod unix_remote {
             } => {
                 mux.resize_active(width, height);
                 mux.drain_all();
-                Response::Snapshot(local_snapshot(mux, selection))
+                Response::Snapshot(local_snapshot(mux, width, height, selection))
             }
             Request::CreateNextSession { width, height } => {
                 into_response(mux.create_next_session(width, height), Response::Name)
@@ -858,6 +908,14 @@ mod unix_remote {
             Request::KillActivePane { width, height } => {
                 into_response(mux.kill_active_pane(width, height), Response::Index)
             }
+            Request::ResizePane {
+                axis,
+                grow,
+                width,
+                height,
+            } => into_response(mux.resize_active_pane(axis, grow, width, height), |_| {
+                Response::Ok
+            }),
             Request::SelectedText { selection } => {
                 let result = mux
                     .active_terminal()

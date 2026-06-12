@@ -1,20 +1,21 @@
 # tuimux SDD
 
-- **문서 버전**: 1.3
-- **대상 릴리스**: v0.2.0-alpha.8
+- **문서 버전**: 1.4
+- **대상 릴리스**: v0.2.0-alpha.9
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.8은 default path에서 tmux를 제거한 daemon-backed 구조를 유지하면서, window 안의 split pane까지 Rust-native state와 별도 PTY로 직접 소유하고 host paste를 paste event로 받는다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.9는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하면서, window 안의 nested split pane tree와 resize ratio까지 Rust-native state로 직접 소유하고 host paste를 paste event로 받는다.
 
 핵심 목표는 다음과 같다.
 
 - shell/editor/monitor가 실제 PTY 안에서 실행된다.
 - UI client가 닫혀도 daemon-owned PTY와 shell process는 살아남는다.
 - main terminal mode는 host terminal 전체 크기를 child PTY에 제공한다.
-- active window 안에서 right/down split pane을 만들고 pane별 PTY size와 mouse 좌표를 분리한다.
+- active window 안에서 right/down split pane을 nested tree로 만들고 pane별 PTY size와 mouse 좌표를 분리한다.
+- navigation mode arrow key로 active pane의 가장 가까운 같은 방향 split ratio를 조정한다.
 - host terminal의 bracketed paste mode를 UI 생명주기에 맞춰 켜고 끈다.
 - selection과 clipboard는 host terminal에 가까운 감각으로 동작한다.
 - tmux C 코드는 구조 참고로만 삼고 Rust 모듈로 직접 구현한다.
@@ -133,7 +134,7 @@ struct NativeWindow {
     name: String,
     panes: Vec<NativePane>,
     active_pane: usize,
-    pane_axis: PaneAxis,
+    layout: PaneNode,
 }
 ```
 
@@ -148,15 +149,16 @@ struct NativeWindow {
 - `select_next_pane()`과 `select_pane_by_row()`는 active pane index만 바꾼다.
 - `kill_active_pane()`은 마지막 pane이 제거될 때 replacement shell pane을 만들어 빈 window를 방지한다.
 - `drain_all()`은 모든 window/pane의 pending PTY output을 parser에 반영한다.
-- `resize_active()`는 active window의 pane rect 계산 결과에 맞춰 각 pane terminal을 resize한다.
+- `resize_active()`는 active window의 nested pane rect 계산 결과에 맞춰 각 pane terminal을 resize한다.
+- `resize_active_pane()`은 active leaf를 포함하는 가장 가까운 같은 방향 split의 ratio를 조정한다.
 
-v0.2.0-alpha.8의 pane layout은 단일 axis 선형 분할이다. 마지막 split 방향이 active window의 axis가 되며, nested tree layout과 pane resize command는 다음 단계로 남긴다.
+v0.2.0-alpha.9의 pane layout은 `PaneNode::Leaf`와 `PaneNode::Split { axis, first_ratio, first, second }`로 표현한다. split은 active leaf만 교체하므로 기존 구조를 보존한다. leaf rect와 separator geometry는 daemon snapshot에 포함되어 UI가 같은 geometry를 그대로 렌더링한다.
 
 `NativeMux`가 daemon 안에 있기 때문에 UI client가 종료되어도 drop되지 않는다. daemon이 종료될 때만 `PtyTerminal::drop()`이 child를 정리한다.
 
 ### 3.4 `src/terminal.rs`
 
-`PtyTerminal`은 terminal fidelity의 중심이다. v0.2.0-alpha.8부터 window가 아니라 pane마다 하나씩 존재한다.
+`PtyTerminal`은 terminal fidelity의 중심이다. v0.2.0-alpha.9부터 window가 아니라 pane마다 하나씩 존재한다.
 
 ```rust
 pub struct PtyTerminal {
@@ -324,7 +326,7 @@ navigation key `-` / `h`
   -> resize_active() distributes PTY heights and separator cells
 ```
 
-`Tab`은 `SelectNextPane`, pane row click은 `SelectPaneByRow`, `x`는 `KillActivePane`을 호출한다. 마지막 pane을 죽이면 replacement shell pane이 즉시 생성된다.
+`Tab`은 `SelectNextPane`, pane row click은 `SelectPaneByRow`, `x`는 `KillActivePane`을 호출한다. 마지막 pane을 죽이면 replacement shell pane이 즉시 생성된다. Navigation mode의 arrow key는 `ResizePane { axis, grow }` 요청으로 active pane을 키우거나 줄인다.
 
 ### 4.5 Key와 Mouse Input
 
@@ -394,10 +396,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.8는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.9는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.8-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.9-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -405,17 +407,17 @@ v0.2.0-alpha.8는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.8/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.8 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.9/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.9 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계
 
-- pane layout은 단일 axis 선형 split만 지원한다. nested pane tree와 pane resize는 아직 없다.
+- tmux layout string import/export와 command language 호환성은 아직 없다.
 - daemon state는 memory-only라 daemon 종료, reboot 후 session이 복구되지 않는다.
 - 현재 Unix daemon은 sequential client handling이며, 동시 multi-attach UX는 정의하지 않았다.
 - Windows named-pipe daemon backend가 없다.
 - tmux command/plugin/config 호환성은 없다.
 - scrollback, reflow, alternate screen edge case는 실제 앱 확대 테스트가 더 필요하다.
 
-다음 큰 단계는 pane resize/nested layout, daemon persistence metadata, Linux/Windows backend, multi-attach 정책, 더 긴 full-screen app compatibility suite다.
+다음 큰 단계는 tmux layout string 호환성, daemon persistence metadata, Linux/Windows backend, multi-attach 정책, 더 긴 full-screen app compatibility suite다.
