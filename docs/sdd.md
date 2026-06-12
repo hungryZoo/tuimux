@@ -1,19 +1,20 @@
 # tuimux SDD
 
-- **문서 버전**: 1.1
-- **대상 릴리스**: v0.2.0-alpha.6
+- **문서 버전**: 1.2
+- **대상 릴리스**: v0.2.0-alpha.7
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.6은 default path에서 tmux를 제거하고, 별도 daemon process가 직접 PTY child process와 terminal screen model을 소유한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.7은 default path에서 tmux를 제거한 daemon-backed 구조를 유지하면서, window 안의 split pane까지 Rust-native state와 별도 PTY로 직접 소유한다.
 
 핵심 목표는 다음과 같다.
 
 - shell/editor/monitor가 실제 PTY 안에서 실행된다.
 - UI client가 닫혀도 daemon-owned PTY와 shell process는 살아남는다.
 - main terminal mode는 host terminal 전체 크기를 child PTY에 제공한다.
+- active window 안에서 right/down split pane을 만들고 pane별 PTY size와 mouse 좌표를 분리한다.
 - selection과 clipboard는 host terminal에 가까운 감각으로 동작한다.
 - tmux C 코드는 구조 참고로만 삼고 Rust 모듈로 직접 구현한다.
 - tmux fallback은 hidden `--native-client` 옵션에만 남긴다.
@@ -40,7 +41,7 @@
 │ src/mux_backend.rs            │
 │   UnixListener / Request      │
 │ src/native_mux.rs             │
-│   sessions / windows          │
+│   sessions / windows / panes  │
 │ src/terminal.rs               │
 │   PTY / child shell / vt100    │
 │ src/clipboard.rs              │
@@ -48,7 +49,7 @@
 └───────────────────────────────┘
 ```
 
-UI process는 terminal raw mode, alternate screen, ratatui frame, selection interaction을 담당한다. daemon process는 session/window state와 모든 PTY child를 소유한다.
+UI process는 terminal raw mode, alternate screen, ratatui frame, selection interaction을 담당한다. daemon process는 session/window/pane state와 모든 PTY child를 소유한다.
 
 ## 3. 모듈 설계
 
@@ -95,6 +96,11 @@ Request::SendPaste { text }
 Request::SendMouse { mouse }
 Request::NewWindow { width, height }
 Request::KillWindowByRow { row, width, height }
+Request::SplitPaneRight { width, height }
+Request::SplitPaneDown { width, height }
+Request::SelectNextPane
+Request::SelectPaneByRow { row }
+Request::KillActivePane { width, height }
 Request::CreateNextSession { width, height }
 Request::SwitchSessionByRow { row }
 Request::SelectWindowByRow { row }
@@ -118,7 +124,17 @@ pub struct NativeMux {
 }
 ```
 
-각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name과 `PtyTerminal`을 가진다.
+각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name, pane list, active pane index, 현재 split axis를 가진다. 각 `NativePane`은 pane index/title과 `PtyTerminal`을 가진다.
+
+```rust
+struct NativeWindow {
+    index: u32,
+    name: String,
+    panes: Vec<NativePane>,
+    active_pane: usize,
+    pane_axis: PaneAxis,
+}
+```
 
 주요 동작:
 
@@ -127,14 +143,19 @@ pub struct NativeMux {
 - `new_window()`는 active session에 새 shell PTY를 추가한다.
 - `select_window_by_row()`와 `switch_session_by_row()`는 외부 process 없이 active index만 바꾼다.
 - `kill_window_by_row()`는 마지막 window가 제거될 때 replacement shell을 만들어 빈 session을 방지한다.
-- `drain_all()`은 모든 window의 pending PTY output을 parser에 반영한다.
-- `resize_active()`는 active terminal을 host layout 크기에 맞춘다.
+- `split_active_pane_right()`와 `split_active_pane_down()`은 active window에 새 PTY pane을 추가하고 새 pane을 active로 둔다.
+- `select_next_pane()`과 `select_pane_by_row()`는 active pane index만 바꾼다.
+- `kill_active_pane()`은 마지막 pane이 제거될 때 replacement shell pane을 만들어 빈 window를 방지한다.
+- `drain_all()`은 모든 window/pane의 pending PTY output을 parser에 반영한다.
+- `resize_active()`는 active window의 pane rect 계산 결과에 맞춰 각 pane terminal을 resize한다.
+
+v0.2.0-alpha.7의 pane layout은 단일 axis 선형 분할이다. 마지막 split 방향이 active window의 axis가 되며, nested tree layout과 pane resize command는 다음 단계로 남긴다.
 
 `NativeMux`가 daemon 안에 있기 때문에 UI client가 종료되어도 drop되지 않는다. daemon이 종료될 때만 `PtyTerminal::drop()`이 child를 정리한다.
 
 ### 3.4 `src/terminal.rs`
 
-`PtyTerminal`은 terminal fidelity의 중심이다.
+`PtyTerminal`은 terminal fidelity의 중심이다. v0.2.0-alpha.7부터 window가 아니라 pane마다 하나씩 존재한다.
 
 ```rust
 pub struct PtyTerminal {
@@ -179,7 +200,10 @@ struct UiState {
     mux: MuxBackend,
     sessions: Vec<Session>,
     windows: Vec<Window>,
+    panes: Vec<Pane>,
     current_session: String,
+    terminal_axis: PaneAxis,
+    terminal_panes: Vec<PaneSnapshot>,
     terminal_rows: Vec<Vec<TerminalSpan>>,
     terminal_cursor: Option<(u16, u16)>,
     terminal_mouse_protocol_active: bool,
@@ -190,9 +214,9 @@ struct UiState {
 두 가지 mode가 있다.
 
 - **Terminal mode**: 첫 화면이자 기본 mode. terminal body가 전체 frame을 차지한다. 키 입력은 기본적으로 active PTY로 간다.
-- **Navigation mode**: `F12`로 진입한다. main pane border와 right sidebar가 보이고 session/window 조작을 할 수 있다.
+- **Navigation mode**: `F12`로 진입한다. main pane border와 right sidebar가 보이고 session/window/pane 조작을 할 수 있다.
 
-Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x24 host에서 sidebar 때문에 52x22 같은 작은 PTY를 받지 않도록 하기 위해서다.
+Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x24 host에서 sidebar 때문에 52x22 같은 작은 PTY를 받지 않도록 하기 위해서다. split pane 상태에서는 terminal body 안에서 separator 1 cell을 제외하고 pane별 rect를 계산하며, mouse event는 pane-local row/col로 변환한다.
 
 ### 3.6 Selection과 Ctrl-C
 
@@ -200,6 +224,7 @@ Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x2
 
 ```rust
 struct SelectionState {
+    pane: usize,
     anchor: (u16, u16),
     focus: (u16, u16),
     dragging: bool,
@@ -212,6 +237,7 @@ struct SelectionState {
 - child mouse protocol이 켜져 있으면 normal mouse는 child로 전달한다.
 - child mouse protocol이 켜져 있어도 Shift-left-drag는 tuimux selection을 만든다.
 - mouse-up은 selection을 종료하지만 selection 자체를 지우지 않는다.
+- split pane 상태에서 selection은 시작 pane을 기억한다. drag가 separator나 다른 pane 위를 지나가도 원래 pane의 가장자리 좌표로 clamp해 focus가 튀지 않게 한다.
 - selection이 zero-width이면 지운다.
 - 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C copy는 selection을 유지한다.
 
@@ -275,7 +301,29 @@ loop
 
 terminal mode에서 `terminal_body`는 root frame 전체다. navigation mode에서는 main pane과 sidebar layout으로 나뉜다.
 
-### 4.4 Key와 Mouse Input
+### 4.4 Pane Split
+
+```text
+navigation key `|` / `v`
+  -> Request::SplitPaneRight { width, height }
+  -> daemon spawn_pane()
+  -> active window pane_axis = Columns
+  -> resize_active() distributes PTY widths and separator cells
+  -> snapshot returns PaneSnapshot list
+  -> UI renders pane rects and sidebar pane rows
+```
+
+```text
+navigation key `-` / `h`
+  -> Request::SplitPaneDown { width, height }
+  -> daemon spawn_pane()
+  -> active window pane_axis = Rows
+  -> resize_active() distributes PTY heights and separator cells
+```
+
+`Tab`은 `SelectNextPane`, pane row click은 `SelectPaneByRow`, `x`는 `KillActivePane`을 호출한다. 마지막 pane을 죽이면 replacement shell pane이 즉시 생성된다.
+
+### 4.5 Key와 Mouse Input
 
 ```text
 crossterm KeyEvent
@@ -288,14 +336,14 @@ crossterm KeyEvent
 
 ```text
 crossterm MouseEvent
-  -> terminal cell 좌표로 변환
-  -> child mouse protocol 상태 확인
+  -> terminal cell 좌표를 pane-local 좌표로 변환
+  -> 해당 pane의 child mouse protocol 상태 확인
   -> selection gesture이면 selection state 갱신
   -> terminal mode이면 Request::SendMouse
   -> navigation mode이면 hit_test로 sidebar/modal action 처리
 ```
 
-### 4.5 Detach와 Reattach
+### 4.6 Detach와 Reattach
 
 ```text
 F12, q, Esc, or Detach button
@@ -312,7 +360,7 @@ F12, q, Esc, or Detach button
 
 - version parser와 legacy tmux fallback argument tests.
 - doctor의 `TERM` handling tests.
-- native mux session/window metadata tests.
+- native mux session/window/pane metadata tests.
 - layout preview deterministic output tests.
 - terminal key/mouse encoder unit tests.
 - serde 기반 daemon protocol compile/check.
@@ -322,7 +370,7 @@ F12, q, Esc, or Detach button
 검증한 항목:
 
 - `cargo fmt -- --check`
-- `cargo test --quiet` 29개 통과
+- `cargo test --quiet` 35개 통과
 - `TERM=xterm-256color COLORTERM=truecolor cargo run --quiet -- --doctor`
 - `TERM=dumb cargo run --quiet -- --doctor` non-zero 확인
 - `cargo build --release --locked --target aarch64-apple-darwin`
@@ -331,13 +379,14 @@ F12, q, Esc, or Detach button
 - 같은 session 재attach 후 `echo $TUIMUX_PERSIST_MARK`가 `alive` 출력
 - `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
 - mouse drag selection, Ctrl-C, `pbpaste`가 `COPYME-remote` 반환 확인
+- right/down pane split, pane cycle/select/kill unit test와 pane-local mouse 좌표 unit test 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.6는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.7는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.6-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.7-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -345,17 +394,17 @@ v0.2.0-alpha.6는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.6/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.6 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.7/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.7 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계
 
-- split panes가 없다.
+- pane layout은 단일 axis 선형 split만 지원한다. nested pane tree와 pane resize는 아직 없다.
 - daemon state는 memory-only라 daemon 종료, reboot 후 session이 복구되지 않는다.
 - 현재 Unix daemon은 sequential client handling이며, 동시 multi-attach UX는 정의하지 않았다.
 - Windows named-pipe daemon backend가 없다.
 - tmux command/plugin/config 호환성은 없다.
 - scrollback, reflow, alternate screen edge case는 실제 앱 확대 테스트가 더 필요하다.
 
-다음 큰 단계는 split pane layout, daemon persistence metadata, Linux/Windows backend, multi-attach 정책, 더 긴 full-screen app compatibility suite다.
+다음 큰 단계는 pane resize/nested layout, daemon persistence metadata, Linux/Windows backend, multi-attach 정책, 더 긴 full-screen app compatibility suite다.

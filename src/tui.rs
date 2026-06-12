@@ -1,8 +1,8 @@
 //! Default tuimux ratatui interface.
 //!
-//! The main pane is backed by tuimux's own Rust-native in-process multiplexer:
-//! sessions and windows are owned by tuimux, and each window runs a real shell
-//! in a PTY rendered through a vt100 screen model.
+//! The main pane is backed by tuimux's Rust-native daemon multiplexer:
+//! sessions, windows, and panes are owned by the daemon, and each pane runs a
+//! real shell in a PTY rendered through a vt100 screen model.
 //!
 //! If stdout is not a TTY we refuse to enter raw mode and instead print guidance,
 //! so piping or running under CI stays safe (PRD "keep safe").
@@ -23,8 +23,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
 use crate::clipboard;
-use crate::mux_backend::{KeyInput, MouseInput, MuxBackend, MuxSnapshot};
-use crate::native_mux::{Session, Window};
+use crate::mux_backend::{KeyInput, MouseInput, MuxBackend, MuxSnapshot, PaneSnapshot};
+use crate::native_mux::{Pane, PaneAxis, Session, Window};
 use crate::terminal::{SelectionRange, TerminalColor, TerminalSpan, TerminalStyle};
 
 /// Why the UI loop ended — affects the farewell message.
@@ -41,6 +41,11 @@ enum Hotspot {
     Window(usize),
     WindowClose(usize),
     NewWindow,
+    Pane(usize),
+    SplitPaneRight,
+    SplitPaneDown,
+    NextPane,
+    KillPane,
     ModalSession(usize),
     ModalNewSession,
     ModalDetach,
@@ -56,6 +61,14 @@ struct Regions {
     windows: [Rect; 8],
     window_close: [Rect; 8],
     window_count: usize,
+    pane_rows: [Rect; 8],
+    pane_count: usize,
+    split_pane_right: Rect,
+    split_pane_down: Rect,
+    next_pane: Rect,
+    kill_pane: Rect,
+    terminal_panes: [Rect; 8],
+    terminal_pane_count: usize,
     modal_new_session: Rect,
     modal_detach: Rect,
     modal_sessions: [Rect; 8],
@@ -70,6 +83,7 @@ struct UiState {
     /// Live native mux state, refreshed after every mutating command.
     sessions: Vec<Session>,
     windows: Vec<Window>,
+    panes: Vec<Pane>,
     current_session: String,
     /// Non-fatal, transient message shown in the status bar (e.g. that a
     /// window was created, selected, or closed).
@@ -77,6 +91,8 @@ struct UiState {
     terminal_error: Option<String>,
     terminal_mode: bool,
     selection: Option<SelectionState>,
+    terminal_axis: PaneAxis,
+    terminal_panes: Vec<PaneSnapshot>,
     terminal_rows: Vec<Vec<TerminalSpan>>,
     terminal_cursor: Option<(u16, u16)>,
     terminal_hide_cursor: bool,
@@ -85,6 +101,7 @@ struct UiState {
 
 #[derive(Debug, Clone, Copy)]
 struct SelectionState {
+    pane: usize,
     anchor: (u16, u16),
     focus: (u16, u16),
     dragging: bool,
@@ -103,11 +120,14 @@ impl UiState {
             mux,
             sessions: Vec::new(),
             windows: Vec::new(),
+            panes: Vec::new(),
             current_session: String::new(),
             status: None,
             terminal_error: None,
             terminal_mode: true,
             selection: None,
+            terminal_axis: PaneAxis::default(),
+            terminal_panes: Vec::new(),
             terminal_rows: Vec::new(),
             terminal_cursor: None,
             terminal_hide_cursor: true,
@@ -134,7 +154,10 @@ impl UiState {
     fn apply_snapshot(&mut self, snapshot: MuxSnapshot) {
         self.sessions = snapshot.sessions;
         self.windows = snapshot.windows;
+        self.panes = snapshot.panes;
         self.current_session = snapshot.current_session;
+        self.terminal_axis = snapshot.terminal.axis;
+        self.terminal_panes = snapshot.terminal.panes;
         self.terminal_rows = snapshot.terminal.rows;
         self.terminal_cursor = snapshot.terminal.cursor;
         self.terminal_hide_cursor = snapshot.terminal.hide_cursor;
@@ -151,8 +174,9 @@ impl UiState {
         ))
     }
 
-    fn begin_selection(&mut self, row: u16, col: u16) {
+    fn begin_selection(&mut self, pane: usize, row: u16, col: u16) {
         self.selection = Some(SelectionState {
+            pane,
             anchor: (row, col),
             focus: (row, col),
             dragging: false,
@@ -202,6 +226,13 @@ impl UiState {
 
     fn terminal_mouse_protocol_active(&self) -> bool {
         self.terminal_mouse_protocol_active
+    }
+
+    fn pane_mouse_protocol_active(&self, row: usize) -> bool {
+        self.terminal_panes
+            .get(row)
+            .map(|pane| pane.mouse_protocol_active)
+            .unwrap_or_else(|| self.terminal_mouse_protocol_active())
     }
 
     fn send_terminal_key(&mut self, key: KeyEvent) {
@@ -339,6 +370,18 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     (KeyCode::Char('s'), KeyModifiers::ALT) => {
                         state.session_modal_open = !state.session_modal_open;
                     }
+                    (KeyCode::Char('|'), _) | (KeyCode::Char('v'), _) => {
+                        split_pane_right(state);
+                    }
+                    (KeyCode::Char('-'), _) | (KeyCode::Char('h'), _) => {
+                        split_pane_down(state);
+                    }
+                    (KeyCode::Tab, _) => {
+                        select_next_pane(state);
+                    }
+                    (KeyCode::Char('x'), _) => {
+                        kill_active_pane(state);
+                    }
                     (KeyCode::Char('d'), _) => {
                         return Ok(Exit::Detach);
                     }
@@ -346,25 +389,57 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 }
             }
             Event::Mouse(mouse) => {
-                if let Some((row, col)) =
-                    terminal_cell_at(mouse.column, mouse.row, state.regions.terminal_body)
+                if let Some(selection) = state.selection {
+                    match mouse.kind {
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let Some((row, col)) = terminal_cell_for_pane(
+                                mouse.column,
+                                mouse.row,
+                                &state.regions,
+                                selection.pane,
+                            ) {
+                                state.update_selection(row, col);
+                                continue;
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            if let Some((row, col)) = terminal_cell_for_pane(
+                                mouse.column,
+                                mouse.row,
+                                &state.regions,
+                                selection.pane,
+                            ) {
+                                state.finish_selection(row, col);
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let Some((pane_row, row, col)) =
+                    terminal_cell_at_pane(mouse.column, mouse.row, &state.regions)
                 {
-                    let child_wants_mouse = state.terminal_mouse_protocol_active();
+                    let clicked_left =
+                        matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+                    if clicked_left
+                        && !state
+                            .panes
+                            .get(pane_row)
+                            .map(|pane| pane.active)
+                            .unwrap_or(false)
+                    {
+                        select_pane(state, pane_row);
+                    }
+
+                    let child_wants_mouse = state.pane_mouse_protocol_active(pane_row);
                     let selection_gesture =
                         mouse.modifiers.contains(KeyModifiers::SHIFT) || !child_wants_mouse;
 
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) if selection_gesture => {
                             state.terminal_mode = true;
-                            state.begin_selection(row, col);
-                            continue;
-                        }
-                        MouseEventKind::Drag(MouseButton::Left) if state.selection.is_some() => {
-                            state.update_selection(row, col);
-                            continue;
-                        }
-                        MouseEventKind::Up(MouseButton::Left) if state.selection.is_some() => {
-                            state.finish_selection(row, col);
+                            state.begin_selection(pane_row, row, col);
                             continue;
                         }
                         _ if state.terminal_mode => {
@@ -376,8 +451,8 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 }
 
                 if state.terminal_mode {
-                    if let Some((row, col)) =
-                        terminal_cell_at(mouse.column, mouse.row, state.regions.terminal_body)
+                    if let Some((_pane_row, row, col)) =
+                        terminal_cell_at_pane(mouse.column, mouse.row, &state.regions)
                     {
                         state.send_terminal_mouse(mouse.kind, row, col, mouse.modifiers);
                         continue;
@@ -411,6 +486,21 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                         }
                         Some(Hotspot::NewWindow) => {
                             new_window(state);
+                        }
+                        Some(Hotspot::Pane(idx)) => {
+                            select_pane(state, idx);
+                        }
+                        Some(Hotspot::SplitPaneRight) => {
+                            split_pane_right(state);
+                        }
+                        Some(Hotspot::SplitPaneDown) => {
+                            split_pane_down(state);
+                        }
+                        Some(Hotspot::NextPane) => {
+                            select_next_pane(state);
+                        }
+                        Some(Hotspot::KillPane) => {
+                            kill_active_pane(state);
                         }
                         Some(Hotspot::ModalNewSession) => {
                             new_session(state);
@@ -459,6 +549,65 @@ fn kill_window(state: &mut UiState, idx: usize) {
     }
 }
 
+fn select_pane(state: &mut UiState, idx: usize) {
+    match state.mux.select_pane_by_row(idx) {
+        Ok(()) => {
+            state.clear_selection();
+            let (width, height) = active_terminal_size(state);
+            state.sync_terminal(width, height);
+        }
+        Err(e) => state.status = Some(format!("select-pane failed: {e}")),
+    }
+}
+
+fn split_pane_right(state: &mut UiState) {
+    let (width, height) = active_terminal_size(state);
+    match state.mux.split_pane_right(width, height) {
+        Ok(index) => {
+            state.status = Some(format!("split pane {index} right"));
+            state.clear_selection();
+            state.sync_terminal(width, height);
+        }
+        Err(e) => state.status = Some(format!("split-pane failed: {e}")),
+    }
+}
+
+fn split_pane_down(state: &mut UiState) {
+    let (width, height) = active_terminal_size(state);
+    match state.mux.split_pane_down(width, height) {
+        Ok(index) => {
+            state.status = Some(format!("split pane {index} down"));
+            state.clear_selection();
+            state.sync_terminal(width, height);
+        }
+        Err(e) => state.status = Some(format!("split-pane failed: {e}")),
+    }
+}
+
+fn select_next_pane(state: &mut UiState) {
+    match state.mux.select_next_pane() {
+        Ok(index) => {
+            state.status = Some(format!("selected pane {index}"));
+            state.clear_selection();
+            let (width, height) = active_terminal_size(state);
+            state.sync_terminal(width, height);
+        }
+        Err(e) => state.status = Some(format!("next-pane failed: {e}")),
+    }
+}
+
+fn kill_active_pane(state: &mut UiState) {
+    let (width, height) = active_terminal_size(state);
+    match state.mux.kill_active_pane(width, height) {
+        Ok(index) => {
+            state.status = Some(format!("killed pane {index}"));
+            state.clear_selection();
+            state.sync_terminal(width, height);
+        }
+        Err(e) => state.status = Some(format!("kill-pane failed: {e}")),
+    }
+}
+
 fn new_window(state: &mut UiState) {
     let (width, height) = active_terminal_size(state);
     match state.mux.new_window(width, height) {
@@ -501,6 +650,8 @@ fn switch_session(state: &mut UiState, idx: usize) {
 
 fn ui(f: &mut Frame, state: &mut UiState) {
     let root = f.size();
+    let terminal_axis = state.terminal_axis;
+    let terminal_panes = state.terminal_panes.clone();
     let terminal_rows = state.terminal_rows.clone();
     let terminal_cursor = state.terminal_cursor;
     let terminal_hide_cursor = state.terminal_hide_cursor;
@@ -515,6 +666,8 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         render_main(
             f,
             root,
+            terminal_axis,
+            terminal_panes,
             terminal_rows,
             state.terminal_mode,
             !terminal_hide_cursor,
@@ -534,6 +687,8 @@ fn ui(f: &mut Frame, state: &mut UiState) {
     render_main(
         f,
         body[0],
+        terminal_axis,
+        terminal_panes,
         terminal_rows,
         state.terminal_mode,
         !state.session_modal_open && !terminal_hide_cursor,
@@ -547,6 +702,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         body[1],
         session_label,
         &state.windows,
+        &state.panes,
         state.hover,
         &mut state.regions,
     );
@@ -582,6 +738,8 @@ fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a
 fn render_main(
     f: &mut Frame,
     area: Rect,
+    terminal_axis: PaneAxis,
+    terminal_panes: Vec<PaneSnapshot>,
     terminal_rows: Vec<Vec<TerminalSpan>>,
     terminal_mode: bool,
     show_cursor: bool,
@@ -608,6 +766,19 @@ fn render_main(
         area
     };
     regions.terminal_body = inner;
+    regions.terminal_pane_count = 0;
+
+    if terminal_panes.len() > 1 {
+        render_terminal_panes(
+            f,
+            inner,
+            terminal_axis,
+            terminal_panes,
+            show_cursor,
+            regions,
+        );
+        return;
+    }
 
     let lines: Vec<Line> = if let Some(error) = terminal_error {
         vec![Line::from(Span::styled(
@@ -642,6 +813,81 @@ fn render_main(
                 f.set_cursor(x, y);
             }
         }
+    }
+}
+
+fn render_terminal_panes(
+    f: &mut Frame,
+    area: Rect,
+    axis: PaneAxis,
+    panes: Vec<PaneSnapshot>,
+    show_cursor: bool,
+    regions: &mut Regions,
+) {
+    let pane_rects = pane_rects(area, axis, panes.len());
+    regions.terminal_pane_count = pane_rects.len().min(regions.terminal_panes.len());
+
+    for (idx, (pane, rect)) in panes
+        .into_iter()
+        .zip(pane_rects.iter().copied())
+        .enumerate()
+    {
+        if idx < regions.terminal_panes.len() {
+            regions.terminal_panes[idx] = rect;
+        }
+        let lines = if pane.rows.is_empty() {
+            vec![Line::from(Span::styled(
+                "starting native terminal...",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            pane.rows
+                .into_iter()
+                .map(|row| Line::from(terminal_row_spans(row)))
+                .collect()
+        };
+        f.render_widget(Paragraph::new(lines).style(Style::default()), rect);
+
+        if show_cursor && pane.active && !pane.hide_cursor {
+            if let Some((row, col)) = pane.cursor {
+                if rect.width > 0 && rect.height > 0 {
+                    let x = rect
+                        .x
+                        .saturating_add(col)
+                        .min(rect.right().saturating_sub(1));
+                    let y = rect
+                        .y
+                        .saturating_add(row)
+                        .min(rect.bottom().saturating_sub(1));
+                    f.set_cursor(x, y);
+                }
+            }
+        }
+    }
+
+    render_pane_separators(f, area, axis, &pane_rects);
+}
+
+fn render_pane_separators(f: &mut Frame, area: Rect, axis: PaneAxis, pane_rects: &[Rect]) {
+    let style = Style::default().fg(Color::DarkGray);
+    for pair in pane_rects.windows(2) {
+        let separator = match axis {
+            PaneAxis::Columns => Rect::new(pair[0].right(), area.y, 1, area.height),
+            PaneAxis::Rows => Rect::new(area.x, pair[0].bottom(), area.width, 1),
+        };
+        if separator.width == 0 || separator.height == 0 {
+            continue;
+        }
+        let lines = match axis {
+            PaneAxis::Columns => (0..separator.height)
+                .map(|_| Line::from(Span::styled("│", style)))
+                .collect::<Vec<_>>(),
+            PaneAxis::Rows => vec![Line::from(Span::styled(
+                "─".repeat(separator.width as usize),
+                style,
+            ))],
+        };
+        f.render_widget(Paragraph::new(lines), separator);
     }
 }
 
@@ -709,15 +955,17 @@ fn render_sidebar(
     area: Rect,
     session_label: &str,
     windows: &[Window],
+    panes: &[Pane],
     hover: Option<Hotspot>,
     regions: &mut Regions,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // session button
-            Constraint::Length(3), // detach button
-            Constraint::Min(5),    // windows
+            Constraint::Length(3),  // session button
+            Constraint::Length(3),  // detach button
+            Constraint::Min(5),     // windows
+            Constraint::Length(10), // panes
         ])
         .split(area);
 
@@ -743,6 +991,7 @@ fn render_sidebar(
     f.render_widget(detach, chunks[1]);
 
     render_windows(f, chunks[2], windows, hover, regions);
+    render_panes(f, chunks[3], panes, hover, regions);
 }
 
 fn render_windows(
@@ -806,6 +1055,118 @@ fn render_windows(
             .title(" WINDOWS "),
     );
     f.render_widget(windows, area);
+}
+
+fn render_panes(
+    f: &mut Frame,
+    area: Rect,
+    panes: &[Pane],
+    hover: Option<Hotspot>,
+    regions: &mut Regions,
+) {
+    let mut items = Vec::new();
+    regions.pane_count = 0;
+
+    let inner_top = area.y.saturating_add(1);
+    for (row, pane) in panes.iter().enumerate() {
+        if row >= regions.pane_rows.len() || row >= 4 {
+            break;
+        }
+        let row_rect = Rect::new(
+            area.x + 1,
+            inner_top.saturating_add(row as u16),
+            area.width.saturating_sub(2),
+            1,
+        );
+        regions.pane_rows[row] = row_rect;
+        regions.pane_count += 1;
+
+        let marker = if pane.active { "▸" } else { " " };
+        let hot = hover == Some(Hotspot::Pane(row));
+        let style = if hot {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if pane.active {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        items.push(ListItem::new(Line::from(Span::styled(
+            fit_text(
+                &format!("{marker} pane {} {}", pane.index, pane.title),
+                area.width.saturating_sub(2) as usize,
+            ),
+            style,
+        ))));
+    }
+
+    let base = inner_top.saturating_add(items.len() as u16);
+    regions.split_pane_right = Rect::new(area.x + 1, base, area.width.saturating_sub(2), 1);
+    regions.split_pane_down = Rect::new(
+        area.x + 1,
+        base.saturating_add(1),
+        area.width.saturating_sub(2),
+        1,
+    );
+    regions.next_pane = Rect::new(
+        area.x + 1,
+        base.saturating_add(2),
+        area.width.saturating_sub(2),
+        1,
+    );
+    regions.kill_pane = Rect::new(
+        area.x + 1,
+        base.saturating_add(3),
+        area.width.saturating_sub(2),
+        1,
+    );
+
+    items.push(control_row(
+        "+ split |",
+        area.width.saturating_sub(2),
+        hover == Some(Hotspot::SplitPaneRight),
+        Color::Green,
+    ));
+    items.push(control_row(
+        "+ split -",
+        area.width.saturating_sub(2),
+        hover == Some(Hotspot::SplitPaneDown),
+        Color::Green,
+    ));
+    items.push(control_row(
+        "next pane",
+        area.width.saturating_sub(2),
+        hover == Some(Hotspot::NextPane),
+        Color::Cyan,
+    ));
+    items.push(control_row(
+        "kill pane",
+        area.width.saturating_sub(2),
+        hover == Some(Hotspot::KillPane),
+        Color::Red,
+    ));
+
+    let panes = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" PANES "),
+    );
+    f.render_widget(panes, area);
+}
+
+fn control_row(label: &str, width: u16, hot: bool, color: Color) -> ListItem<'static> {
+    let style = if hot {
+        Style::default().fg(Color::Black).bg(color)
+    } else {
+        Style::default().fg(color)
+    };
+    ListItem::new(Line::from(Span::styled(
+        fit_text(label, width as usize),
+        style,
+    )))
 }
 
 fn render_session_modal(
@@ -932,6 +1293,15 @@ fn window_row_line(
     ])
 }
 
+fn fit_text(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len >= width {
+        text.chars().take(width).collect()
+    } else {
+        format!("{}{}", text, " ".repeat(width - len))
+    }
+}
+
 fn close_style(hot: bool) -> Style {
     if hot {
         Style::default()
@@ -999,6 +1369,23 @@ fn hit_test(x: u16, y: u16, regions: &Regions, modal_open: bool) -> Option<Hotsp
     if contains(regions.new_window, x, y) {
         return Some(Hotspot::NewWindow);
     }
+    for idx in 0..regions.pane_count {
+        if contains(regions.pane_rows[idx], x, y) {
+            return Some(Hotspot::Pane(idx));
+        }
+    }
+    if contains(regions.split_pane_right, x, y) {
+        return Some(Hotspot::SplitPaneRight);
+    }
+    if contains(regions.split_pane_down, x, y) {
+        return Some(Hotspot::SplitPaneDown);
+    }
+    if contains(regions.next_pane, x, y) {
+        return Some(Hotspot::NextPane);
+    }
+    if contains(regions.kill_pane, x, y) {
+        return Some(Hotspot::KillPane);
+    }
     None
 }
 
@@ -1014,6 +1401,100 @@ fn terminal_cell_at(x: u16, y: u16, body: Rect) -> Option<(u16, u16)> {
         return None;
     }
     Some((y.saturating_sub(body.y), x.saturating_sub(body.x)))
+}
+
+fn terminal_cell_at_pane(x: u16, y: u16, regions: &Regions) -> Option<(usize, u16, u16)> {
+    if regions.terminal_pane_count == 0 {
+        return terminal_cell_at(x, y, regions.terminal_body).map(|(row, col)| (0, row, col));
+    }
+
+    for idx in 0..regions.terminal_pane_count {
+        let rect = regions.terminal_panes[idx];
+        if let Some((row, col)) = terminal_cell_at(x, y, rect) {
+            return Some((idx, row, col));
+        }
+    }
+    None
+}
+
+fn terminal_cell_for_pane(x: u16, y: u16, regions: &Regions, pane: usize) -> Option<(u16, u16)> {
+    let rect = if regions.terminal_pane_count == 0 {
+        if pane != 0 {
+            return None;
+        }
+        regions.terminal_body
+    } else {
+        if pane >= regions.terminal_pane_count {
+            return None;
+        }
+        regions.terminal_panes[pane]
+    };
+
+    if rect.width == 0 || rect.height == 0 {
+        return None;
+    }
+
+    let max_x = rect.right().saturating_sub(1);
+    let max_y = rect.bottom().saturating_sub(1);
+    let clamped_x = x.clamp(rect.x, max_x);
+    let clamped_y = y.clamp(rect.y, max_y);
+    Some((
+        clamped_y.saturating_sub(rect.y),
+        clamped_x.saturating_sub(rect.x),
+    ))
+}
+
+fn pane_rects(area: Rect, axis: PaneAxis, count: usize) -> Vec<Rect> {
+    if count == 0 || area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![area];
+    }
+
+    match axis {
+        PaneAxis::Columns => {
+            let available = area.width.saturating_sub((count - 1) as u16);
+            let widths = split_lengths(available, count);
+            let mut x = area.x;
+            widths
+                .into_iter()
+                .map(|width| {
+                    let rect = Rect::new(x, area.y, width, area.height);
+                    x = x.saturating_add(width).saturating_add(1);
+                    rect
+                })
+                .collect()
+        }
+        PaneAxis::Rows => {
+            let available = area.height.saturating_sub((count - 1) as u16);
+            let heights = split_lengths(available, count);
+            let mut y = area.y;
+            heights
+                .into_iter()
+                .map(|height| {
+                    let rect = Rect::new(area.x, y, area.width, height);
+                    y = y.saturating_add(height).saturating_add(1);
+                    rect
+                })
+                .collect()
+        }
+    }
+}
+
+fn split_lengths(total: u16, count: usize) -> Vec<u16> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let base = total / count as u16;
+    let mut remainder = total % count as u16;
+    (0..count)
+        .map(|_| {
+            let extra = u16::from(remainder > 0);
+            remainder = remainder.saturating_sub(1);
+            base.saturating_add(extra)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1040,6 +1521,7 @@ mod tests {
             index: 1,
             name: "build".to_string(),
             active: true,
+            panes: 1,
         };
         let row = window_row_line("▸", &active, 20, Some(Hotspot::WindowClose(0)), 0);
         let last = row.spans.last().expect("close span");
@@ -1075,5 +1557,62 @@ mod tests {
             ..TerminalStyle::default()
         });
         assert!(style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn pane_rects_reserve_separator_cells_between_columns() {
+        let rects = pane_rects(Rect::new(0, 0, 11, 5), PaneAxis::Columns, 2);
+
+        assert_eq!(rects, vec![Rect::new(0, 0, 5, 5), Rect::new(6, 0, 5, 5)]);
+    }
+
+    #[test]
+    fn terminal_cell_at_pane_maps_to_local_pane_coordinates() {
+        let mut regions = Regions {
+            terminal_pane_count: 2,
+            ..Regions::default()
+        };
+        regions.terminal_panes[0] = Rect::new(0, 0, 5, 5);
+        regions.terminal_panes[1] = Rect::new(6, 0, 5, 5);
+
+        assert_eq!(terminal_cell_at_pane(7, 3, &regions), Some((1, 3, 1)));
+        assert_eq!(terminal_cell_at_pane(5, 3, &regions), None);
+    }
+
+    #[test]
+    fn terminal_cell_for_pane_clamps_drag_to_original_pane() {
+        let mut regions = Regions {
+            terminal_pane_count: 2,
+            ..Regions::default()
+        };
+        regions.terminal_panes[0] = Rect::new(0, 0, 5, 5);
+        regions.terminal_panes[1] = Rect::new(6, 0, 5, 5);
+
+        assert_eq!(terminal_cell_for_pane(9, 6, &regions, 0), Some((4, 4)));
+    }
+
+    #[test]
+    fn hit_test_sees_pane_rows_and_controls() {
+        let mut regions = Regions {
+            pane_count: 1,
+            split_pane_right: Rect::new(20, 8, 8, 1),
+            split_pane_down: Rect::new(20, 9, 8, 1),
+            next_pane: Rect::new(20, 10, 8, 1),
+            kill_pane: Rect::new(20, 11, 8, 1),
+            ..Regions::default()
+        };
+        regions.pane_rows[0] = Rect::new(20, 7, 8, 1);
+
+        assert_eq!(hit_test(21, 7, &regions, false), Some(Hotspot::Pane(0)));
+        assert_eq!(
+            hit_test(21, 8, &regions, false),
+            Some(Hotspot::SplitPaneRight)
+        );
+        assert_eq!(
+            hit_test(21, 9, &regions, false),
+            Some(Hotspot::SplitPaneDown)
+        );
+        assert_eq!(hit_test(21, 10, &regions, false), Some(Hotspot::NextPane));
+        assert_eq!(hit_test(21, 11, &regions, false), Some(Hotspot::KillPane));
     }
 }

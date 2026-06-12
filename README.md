@@ -2,10 +2,10 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.6 changes the default runtime from “tmux-backed UI” to a
-Rust-native daemon-backed multiplexer. Running `tuimux` now attaches a ratatui
-client to tuimux's own Unix-socket daemon, which owns sessions, windows, and
-PTY-backed shell processes. `tmux` is no longer required for the default UI; the
+v0.2.0-alpha.7 keeps the default runtime on the Rust-native path and adds
+daemon-owned split panes. Running `tuimux` now attaches a ratatui
+client to tuimux's own Unix-socket daemon, which owns sessions, windows, panes,
+and PTY-backed shell processes. `tmux` is no longer required for the default UI; the
 old plain tmux client remains available only through the hidden
 `--native-client` fallback.
 
@@ -22,7 +22,8 @@ This is still a 0.x prerelease. Current behavior:
 - `tuimux` opens the Rust-native tuimux TUI by default.
 - Terminal mode is full-screen so full-screen tools receive the real host size.
 - Press `F12` to switch between terminal mode and navigation/sidebar mode.
-- Sessions and windows are managed by the tuimux daemon, not by tmux.
+- Sessions, windows, and panes are managed by the tuimux daemon, not by tmux.
+- Navigation mode can split the active pane right (`|` or `v`) or down (`-` or `h`), cycle panes with `Tab`, and kill the active pane with `x`.
 - Closing/detaching the UI keeps the daemon-owned PTYs alive for later reattach.
 - Each window runs a real shell in a PTY, parsed with `vt100` and rendered with ratatui.
 - Mouse selection is preserved after mouse-up.
@@ -39,8 +40,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.6/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.6 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.7/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.7 bash
 ```
 
 Verify:
@@ -68,5 +69,5 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.6` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.7` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

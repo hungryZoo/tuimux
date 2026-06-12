@@ -1,6 +1,6 @@
 name: release
 
-# Build the current prerelease asset. v0.2.0-alpha.6 publishes macOS Apple
+# Build the current prerelease asset. v0.2.0-alpha.7 publishes macOS Apple
 # Silicon first while the Rust-native daemon-backed multiplexer is still being validated.
 
 on:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.2.0-alpha.6). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.7). Used for manual runs."
         required: true
 
 permissions:

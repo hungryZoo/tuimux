@@ -10,11 +10,24 @@ use anyhow::{anyhow, bail, Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use serde::{Deserialize, Serialize};
 
-use crate::native_mux::{NativeMux, Session, Window};
+use crate::native_mux::{NativeMux, Pane, PaneAxis, Session, Window};
 use crate::terminal::{SelectionRange, TerminalSpan};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneSnapshot {
+    pub index: u32,
+    pub title: String,
+    pub active: bool,
+    pub rows: Vec<Vec<TerminalSpan>>,
+    pub cursor: Option<(u16, u16)>,
+    pub hide_cursor: bool,
+    pub mouse_protocol_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
+    pub axis: PaneAxis,
+    pub panes: Vec<PaneSnapshot>,
     pub rows: Vec<Vec<TerminalSpan>>,
     pub cursor: Option<(u16, u16)>,
     pub hide_cursor: bool,
@@ -24,6 +37,8 @@ pub struct TerminalSnapshot {
 impl Default for TerminalSnapshot {
     fn default() -> Self {
         Self {
+            axis: PaneAxis::default(),
+            panes: Vec::new(),
             rows: Vec::new(),
             cursor: None,
             hide_cursor: true,
@@ -36,6 +51,7 @@ impl Default for TerminalSnapshot {
 pub struct MuxSnapshot {
     pub sessions: Vec<Session>,
     pub windows: Vec<Window>,
+    pub panes: Vec<Pane>,
     pub current_session: String,
     pub terminal: TerminalSnapshot,
 }
@@ -118,6 +134,46 @@ impl MuxBackend {
         }
     }
 
+    pub fn split_pane_right(&mut self, width: u16, height: u16) -> Result<u32> {
+        match self {
+            #[cfg(unix)]
+            MuxBackend::Remote(client) => client.split_pane_right(width, height),
+            MuxBackend::Local(mux) => mux.split_active_pane_right(width, height),
+        }
+    }
+
+    pub fn split_pane_down(&mut self, width: u16, height: u16) -> Result<u32> {
+        match self {
+            #[cfg(unix)]
+            MuxBackend::Remote(client) => client.split_pane_down(width, height),
+            MuxBackend::Local(mux) => mux.split_active_pane_down(width, height),
+        }
+    }
+
+    pub fn select_next_pane(&mut self) -> Result<u32> {
+        match self {
+            #[cfg(unix)]
+            MuxBackend::Remote(client) => client.select_next_pane(),
+            MuxBackend::Local(mux) => mux.select_next_pane(),
+        }
+    }
+
+    pub fn select_pane_by_row(&mut self, row: usize) -> Result<()> {
+        match self {
+            #[cfg(unix)]
+            MuxBackend::Remote(client) => client.select_pane_by_row(row),
+            MuxBackend::Local(mux) => mux.select_pane_by_row(row),
+        }
+    }
+
+    pub fn kill_active_pane(&mut self, width: u16, height: u16) -> Result<u32> {
+        match self {
+            #[cfg(unix)]
+            MuxBackend::Remote(client) => client.kill_active_pane(width, height),
+            MuxBackend::Local(mux) => mux.kill_active_pane(width, height),
+        }
+    }
+
     pub fn selected_text(&mut self, selection: SelectionRange) -> Result<String> {
         match self {
             #[cfg(unix)]
@@ -178,21 +234,47 @@ impl MuxBackend {
 }
 
 fn local_snapshot(mux: &NativeMux, selection: Option<SelectionRange>) -> MuxSnapshot {
-    let terminal = mux
-        .active_terminal()
-        .map(|terminal| TerminalSnapshot {
-            rows: terminal.styled_rows_with_selection(selection),
-            cursor: Some(terminal.cursor()),
-            hide_cursor: terminal.hide_cursor(),
-            mouse_protocol_active: terminal.mouse_protocol_active(),
-        })
-        .unwrap_or_default();
+    let terminal = terminal_snapshot(mux, selection);
 
     MuxSnapshot {
         sessions: mux.session_infos(),
         windows: mux.window_infos(),
+        panes: mux.pane_infos(),
         current_session: mux.current_session_name().to_string(),
         terminal,
+    }
+}
+
+fn terminal_snapshot(mux: &NativeMux, selection: Option<SelectionRange>) -> TerminalSnapshot {
+    let pane_refs = mux.active_pane_refs();
+    if pane_refs.is_empty() {
+        return TerminalSnapshot::default();
+    }
+
+    let panes = pane_refs
+        .into_iter()
+        .map(|pane| {
+            let pane_selection = pane.active.then_some(selection).flatten();
+            PaneSnapshot {
+                index: pane.index,
+                title: pane.title.to_string(),
+                active: pane.active,
+                rows: pane.terminal.styled_rows_with_selection(pane_selection),
+                cursor: Some(pane.terminal.cursor()),
+                hide_cursor: pane.terminal.hide_cursor(),
+                mouse_protocol_active: pane.terminal.mouse_protocol_active(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let active = panes.iter().find(|pane| pane.active).unwrap_or(&panes[0]);
+    TerminalSnapshot {
+        axis: mux.active_pane_axis(),
+        rows: active.rows.clone(),
+        cursor: active.cursor,
+        hide_cursor: active.hide_cursor,
+        mouse_protocol_active: active.mouse_protocol_active,
+        panes,
     }
 }
 
@@ -431,6 +513,22 @@ enum Request {
         width: u16,
         height: u16,
     },
+    SplitPaneRight {
+        width: u16,
+        height: u16,
+    },
+    SplitPaneDown {
+        width: u16,
+        height: u16,
+    },
+    SelectNextPane,
+    SelectPaneByRow {
+        row: usize,
+    },
+    KillActivePane {
+        width: u16,
+        height: u16,
+    },
     SelectedText {
         selection: SelectionRange,
     },
@@ -600,6 +698,38 @@ mod unix_remote {
             }
         }
 
+        pub fn split_pane_right(&mut self, width: u16, height: u16) -> Result<u32> {
+            match self.request(Request::SplitPaneRight { width, height })? {
+                Response::Index(index) => Ok(index),
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
+        }
+
+        pub fn split_pane_down(&mut self, width: u16, height: u16) -> Result<u32> {
+            match self.request(Request::SplitPaneDown { width, height })? {
+                Response::Index(index) => Ok(index),
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
+        }
+
+        pub fn select_next_pane(&mut self) -> Result<u32> {
+            match self.request(Request::SelectNextPane)? {
+                Response::Index(index) => Ok(index),
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
+        }
+
+        pub fn select_pane_by_row(&mut self, row: usize) -> Result<()> {
+            expect_ok(self.request(Request::SelectPaneByRow { row })?)
+        }
+
+        pub fn kill_active_pane(&mut self, width: u16, height: u16) -> Result<u32> {
+            match self.request(Request::KillActivePane { width, height })? {
+                Response::Index(index) => Ok(index),
+                other => bail!("unexpected daemon response: {other:?}"),
+            }
+        }
+
         pub fn selected_text(&mut self, selection: SelectionRange) -> Result<String> {
             match self.request(Request::SelectedText { selection })? {
                 Response::Text(text) => Ok(text),
@@ -714,6 +844,19 @@ mod unix_remote {
             }
             Request::KillWindowByRow { row, width, height } => {
                 into_response(mux.kill_window_by_row(row, width, height), Response::Index)
+            }
+            Request::SplitPaneRight { width, height } => {
+                into_response(mux.split_active_pane_right(width, height), Response::Index)
+            }
+            Request::SplitPaneDown { width, height } => {
+                into_response(mux.split_active_pane_down(width, height), Response::Index)
+            }
+            Request::SelectNextPane => into_response(mux.select_next_pane(), Response::Index),
+            Request::SelectPaneByRow { row } => {
+                into_response(mux.select_pane_by_row(row), |_| Response::Ok)
+            }
+            Request::KillActivePane { width, height } => {
+                into_response(mux.kill_active_pane(width, height), Response::Index)
             }
             Request::SelectedText { selection } => {
                 let result = mux
