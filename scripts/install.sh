@@ -6,7 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 #
 # Environment variables:
-#   TUIMUX_VERSION       Tag to install (e.g. v0.2.0-alpha.2). Default: latest prerelease/release.
+#   TUIMUX_VERSION       Tag to install (e.g. v0.2.0-alpha.3). Default: latest prerelease/release.
 #   TUIMUX_INSTALL_DIR   Where to put the binary. Default: ~/.local/bin, falling
 #                        back to /usr/local/bin if the former isn't writable.
 #   TUIMUX_TMUX_CONF     tmux config file to update. Default: ~/.tmux.conf.

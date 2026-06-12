@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.2.0-alpha.2). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.3). Used for manual runs."
         required: true
 
 permissions:
@@ -244,7 +244,11 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
           PKG_VERSION="${VERSION#v}"
-          DEB_VERSION="${PKG_VERSION/-/~}"
+          if [[ "$PKG_VERSION" == *-* ]]; then
+            DEB_VERSION="${PKG_VERSION%%-*}~${PKG_VERSION#*-}"
+          else
+            DEB_VERSION="$PKG_VERSION"
+          fi
           RPM_VERSION="${PKG_VERSION%%-*}"
           RPM_RELEASE="${PKG_VERSION#*-}"
           if [ "$RPM_RELEASE" = "$PKG_VERSION" ]; then RPM_RELEASE="1"; fi
@@ -300,6 +304,7 @@ jobs:
           Summary: Prefix-free, mouse-first TUI front-end for tmux
           License: MIT
           URL: https://github.com/${{ github.repository }}
+          Source0: ${BINARY}
           Requires: tmux
 
           %description
