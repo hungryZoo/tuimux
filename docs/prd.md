@@ -1,16 +1,16 @@
 # tuimux PRD
 
-- **문서 버전**: 1.6
-- **대상 릴리스**: v0.2.0-alpha.12
+- **문서 버전**: 1.7
+- **대상 릴리스**: v0.2.0-alpha.13
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.12의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.13의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
-제품 UX는 split pane이 아니라 오른쪽 window 목록에서 full-size terminal window를 골라 쓰는 방식이다. split pane은 default UI와 daemon protocol에서 deprecated다.
+제품 UX는 split pane이 아니라 오른쪽 window 목록에서 full-size terminal window를 골라 쓰는 방식이다. split pane은 default UI와 daemon protocol에서 deprecated이며 native mux core에서도 layout state를 갖지 않는다.
 
 ## 2. 사용자 문제
 
@@ -28,7 +28,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - UI detach/종료 후 같은 session으로 재attach하면 shell state가 유지된다.
 - 같은 daemon에 여러 client가 동시에 연결될 수 있다.
 - navigation mode에서 오른쪽 window 목록을 보고 `Tab`/arrow key로 window를 전환하고, `n`/`x`로 window를 만들고 닫을 수 있다.
-- split pane hotkey는 새 pane을 만들지 않고 deprecated status를 보여준다.
+- split pane hotkey는 새 pane을 만들지 않고 deprecated status를 보여주며 core state를 바꾸지 않는다.
 - terminal mode는 full-screen으로 동작해 `btop`, `htop`, `nano` 같은 앱에 충분한 PTY 크기를 준다.
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지된다.
@@ -52,6 +52,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - `tuimux --doctor`가 tmux 부재를 실패로 보지 않는다.
 - detach 후 reattach smoke에서 shell 환경값이 유지된다.
 - navigation mode window 전환/생성/종료가 split-pane 조작 대신 동작한다.
+- native mux core에 split layout tree가 남지 않고 window마다 single full-size PTY pane만 유지된다.
 - scrollback daemon regression test가 통과한다.
 - host bracketed paste setup/restore가 적용되어 paste event가 active pane으로 전달된다.
 - 열린 client가 있는 상태에서 두 번째 client가 snapshot/window/scrollback command를 수행하고 세 번째 client가 shutdown할 수 있다.

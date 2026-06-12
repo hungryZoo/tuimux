@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 1.7
-- **대상 릴리스**: v0.2.0-alpha.12
+- **문서 버전**: 1.8
+- **대상 릴리스**: v0.2.0-alpha.13
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.12는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.13은 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
 
 핵심 목표는 다음과 같다.
 
@@ -15,7 +15,7 @@
 - UI client가 닫혀도 daemon-owned PTY와 shell process는 살아남는다.
 - main terminal mode는 host terminal 전체 크기를 child PTY에 제공한다.
 - 사용자는 오른쪽 window 목록에서 terminal window를 고른다.
-- split-pane 생성/resize/cycle/kill은 기본 UI와 daemon protocol에서 deprecated로 격리한다.
+- split-pane 생성/resize/cycle/kill은 기본 UI, daemon protocol, native mux core에서 제거한다.
 - 기존 client가 연결된 상태에서도 새 attach, snapshot, command, shutdown request를 처리한다.
 - host terminal의 bracketed paste mode를 UI 생명주기에 맞춰 켜고 끈다.
 - scrollback, selection, clipboard는 host terminal에 가까운 감각으로 동작한다.
@@ -110,7 +110,7 @@ Request::Shutdown
 
 응답은 `Ok`, `Snapshot`, `Name`, `Index`, `Scrollback`, `Text`, `Error` 중 하나다. daemon은 listener를 nonblocking mode로 두고 accepted client stream은 blocking mode로 되돌린 뒤 thread별로 처리한다. `NativeMux`는 `Arc<Mutex<NativeMux>>`로 공유한다. 여러 client가 동시에 attach할 수 있지만 독립 viewport/cursor 정책은 아직 범위 밖이며 active session/window state는 공유한다.
 
-`SplitPaneRight`, `SplitPaneDown`, `SelectNextPane`, `KillActivePane`, `ResizePane` request는 default product protocol에서 제거했다. legacy split core는 `native_mux.rs` 안에 격리되어 있지만 UI/daemon path가 호출하지 않는다.
+`SplitPaneRight`, `SplitPaneDown`, `SelectNextPane`, `KillActivePane`, `ResizePane` request는 default product protocol에서 제거했다. `native_mux.rs`의 split layout tree와 split/resize/kill pane core도 제거되어, split hotkey는 UI status만 표시하고 daemon state를 변경하지 않는다.
 
 ### 3.3 `src/native_mux.rs`
 
@@ -126,7 +126,7 @@ pub struct NativeMux {
 }
 ```
 
-각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name, pane list, active pane index, legacy layout node를 가진다. 기본 제품 path에서는 window마다 하나의 active terminal pane을 full-size로 사용한다.
+각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name, single PTY pane list, active pane index만 가진다. 기본 제품 path에서는 window마다 하나의 active terminal pane을 full-size로 사용한다.
 
 주요 동작:
 
@@ -135,11 +135,11 @@ pub struct NativeMux {
 - `new_window()`는 active session에 새 shell PTY를 추가한다.
 - `select_window_by_row()`와 `switch_session_by_row()`는 외부 process 없이 active index만 바꾼다.
 - `kill_window_by_row()`는 마지막 window가 제거될 때 replacement shell을 만들어 빈 session을 방지한다.
-- `select_pane_by_row()`는 legacy pane state를 위한 안전장치로 남아 있지만 기본 UI에서 pane 목록은 노출하지 않는다.
+- `select_pane_by_row()`는 remote snapshot 호환을 위한 안전장치로 남아 있지만 기본 UI에서 pane 목록은 노출하지 않는다.
 - `drain_all()`은 모든 window/pane의 pending PTY output을 parser에 반영한다.
 - `resize_active()`는 active window의 terminal rect에 맞춰 PTY와 parser screen size를 갱신한다.
 
-split 관련 `PaneNode::Split`, split/resize/kill pane 함수는 deprecated product surface로 주석 처리되어 있으며 default daemon protocol 밖에 있다. 이 코드는 향후 완전 삭제하거나 별도 실험 기능으로 분리할 수 있다.
+split 관련 `PaneNode::Split`, split/resize/kill pane 함수, pane separator 계산은 core에서 제거했다. `active_pane_refs()`는 항상 active window의 single PTY pane을 전체 terminal rect로 보고하고, `active_pane_separators()`는 빈 목록을 반환한다.
 
 `NativeMux`가 daemon 안에 있기 때문에 UI client가 종료되어도 drop되지 않는다. daemon이 종료될 때만 `PtyTerminal::drop()`이 child를 정리한다.
 
@@ -410,7 +410,7 @@ F12, q, Esc, or Detach button
 - version parser와 legacy tmux fallback argument tests.
 - doctor의 `TERM` handling tests.
 - native mux session/window metadata tests.
-- legacy split core 격리 regression tests.
+- native mux single full-size pane regression test.
 - layout preview deterministic output tests.
 - terminal key/mouse encoder unit tests.
 - daemon multi-client regression test.
@@ -422,7 +422,7 @@ F12, q, Esc, or Detach button
 검증할 항목:
 
 - `cargo fmt -- --check`
-- `cargo test --quiet` 38개 통과
+- `cargo test --quiet` 39개 통과
 - `TERM=xterm-256color COLORTERM=truecolor cargo run --quiet -- --doctor`
 - `TERM=dumb cargo run --quiet -- --doctor` non-zero 확인
 - `cargo build --release --locked --target aarch64-apple-darwin`
@@ -437,10 +437,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.12는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.13은 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.12-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.13-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -448,15 +448,15 @@ v0.2.0-alpha.12는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.12/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.12 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.13/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.13 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계
 
 - daemon state는 memory-only라 daemon 종료, reboot 후 session이 복구되지 않는다.
 - 여러 client는 같은 active session/window state를 공유한다. client별 독립 viewport/cursor는 아직 없다.
-- split-pane UI는 deprecated다. window-list workflow를 우선한다.
+- split-pane UX는 deprecated이며 native mux core에는 split layout state가 없다. window-list workflow를 우선한다.
 - Windows named-pipe daemon backend가 없다.
 - tmux command/plugin/config 호환성은 없다.
 - scrollback reflow와 alternate screen edge case는 실제 앱 확대 테스트가 더 필요하다.
