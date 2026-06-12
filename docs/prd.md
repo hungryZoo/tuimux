@@ -1,5 +1,7 @@
 # tuimux PRD (Product Requirements Document)
 
+> 참고: 2026-06-12 현재 구현 기준은 [SRS v0.9](./srs.md)와 [SDD v0.9](./sdd.md)입니다. 이 PRD는 v0.1.9 기본 TUI 복구 당시의 제품 방향 기록을 보존합니다.
+
 - **문서 버전**: 0.8 (Draft)
 - **작성일**: 2026-06-08
 - **상태**: v0.1.9 TUI 기본값 복구 기준

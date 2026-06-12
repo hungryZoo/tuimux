@@ -1,8 +1,7 @@
 name: release
 
-# Build macOS arm64 + x86_64 assets and publish a GitHub *prerelease* whenever a
-# v* tag is pushed. The repo can stay private; downloads then require a token
-# (see scripts/install.sh, which supports GITHUB_TOKEN).
+# Build a macOS Apple Silicon asset and publish a GitHub *prerelease* whenever a
+# v* tag is pushed.
 
 on:
   push:
@@ -22,16 +21,11 @@ env:
 
 jobs:
   build:
-    name: build ${{ matrix.target }}
+    name: build macOS arm64
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            arch: arm64
-          - target: x86_64-apple-darwin
-            arch: x86_64
+    env:
+      TARGET: aarch64-apple-darwin
+      ARCH: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +41,7 @@ jobs:
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
+          rustup target add "$TARGET"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -56,26 +50,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: ${{ runner.os }}-aarch64-apple-darwin-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target "$TARGET"
 
       - name: Package tarball
         id: pkg
         run: |
           set -euo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
-          STAGE="${BINARY}-${VERSION}-${{ matrix.target }}"
+          STAGE="${BINARY}-${VERSION}-${TARGET}"
           mkdir -p "dist/${STAGE}"
 
-          cp "target/${{ matrix.target }}/release/${BINARY}" "dist/${STAGE}/"
+          cp "target/${TARGET}/release/${BINARY}" "dist/${STAGE}/"
           cp README.md "dist/${STAGE}/" 2>/dev/null || true
           [ -f LICENSE ] && cp LICENSE "dist/${STAGE}/" || true
 
           # Short install notes bundled with the binary.
           cat > "dist/${STAGE}/INSTALL.txt" <<EOF
-          tuimux ${VERSION} — macOS (${{ matrix.arch }} / ${{ matrix.target }})
+          tuimux ${VERSION} — macOS (${ARCH} / ${TARGET})
 
           1. Ensure tmux is installed:   brew install tmux
           2. Move the binary onto your PATH, e.g.:
@@ -99,7 +93,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: aarch64-apple-darwin
           path: |
             ${{ steps.pkg.outputs.archive }}
             ${{ steps.pkg.outputs.archive }}.sha256
@@ -146,9 +140,9 @@ jobs:
           body: |
             ## tuimux ${{ steps.ver.outputs.version }} (prerelease)
 
-            Early MVP scaffold. macOS arm64 and x86_64 binaries are attached.
+            macOS Apple Silicon (arm64) binary is attached.
 
-            This prerelease improves the TUI main pane: tmux capture now preserves SGR color/style escapes, tuimux parses common ANSI colors/styles into ratatui spans instead of showing raw escape glyphs, blank screen rows are preserved to reduce stale text after `clear`, and the tmux window is resized to match the main-area viewport when its size changes. The default command remains the tuimux ratatui UI; plain tmux remains hidden behind `--native-client`.
+            This prerelease replaces the old `capture-pane`/`send-keys` main pane with a real tmux client running inside a PTY. tuimux parses the PTY byte stream with `vt100`, renders terminal cells through ratatui, forwards terminal input as bytes, and resizes the PTY to match the main pane. The default command remains the tuimux ratatui UI; plain tmux remains hidden behind `--native-client`.
 
             ### Install (one-liner)
             ```sh

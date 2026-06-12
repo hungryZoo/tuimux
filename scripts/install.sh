@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# tuimux installer — macOS.
+# tuimux installer — macOS Apple Silicon.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 #
 # Environment variables:
-#   TUIMUX_VERSION       Tag to install (e.g. v0.1.1). Default: latest prerelease/release.
+#   TUIMUX_VERSION       Tag to install (e.g. v0.2.0-alpha.1). Default: latest prerelease/release.
 #   TUIMUX_INSTALL_DIR   Where to put the binary. Default: ~/.local/bin, falling
 #                        back to /usr/local/bin if the former isn't writable.
 #
@@ -41,7 +41,7 @@ need_cmd dirname
 
 OS="$(uname -s)"
 if [ "$OS" != "Darwin" ]; then
-  die "this installer currently supports macOS (Darwin) only; detected: $OS.
+  die "this installer currently supports macOS Apple Silicon only; detected OS: $OS.
      For Linux, build from source with: cargo install --path ."
 fi
 
@@ -49,11 +49,11 @@ fi
 RAW_ARCH="$(uname -m)"
 case "$RAW_ARCH" in
   arm64|aarch64) ARCH="aarch64" ;;
-  x86_64|amd64)  ARCH="x86_64"  ;;
-  *) die "unsupported macOS architecture: $RAW_ARCH" ;;
+  x86_64|amd64) die "this prerelease ships macOS Apple Silicon (arm64) builds only; detected: $RAW_ARCH" ;;
+  *) die "unsupported macOS architecture for this prerelease: $RAW_ARCH" ;;
 esac
 TARGET="${ARCH}-apple-darwin"
-info "Detected macOS / ${RAW_ARCH} (target: ${TARGET})"
+info "Detected macOS Apple Silicon / ${RAW_ARCH} (target: ${TARGET})"
 
 # tmux is a hard runtime dependency (tuimux is a tmux front-end).
 if ! command -v tmux >/dev/null 2>&1; then

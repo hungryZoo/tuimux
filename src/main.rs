@@ -6,6 +6,7 @@
 
 mod doctor;
 mod preview;
+mod terminal;
 mod tmux;
 mod tui;
 
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use crossterm::terminal;
+use crossterm::terminal as crossterm_terminal;
 
 use preview::PreviewData;
 
@@ -68,7 +69,7 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| PathBuf::from("."));
 
     if cli.layout_preview {
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        let (cols, rows) = crossterm_terminal::size().unwrap_or((80, 24));
         let data = PreviewData::default();
         println!(
             "{}",

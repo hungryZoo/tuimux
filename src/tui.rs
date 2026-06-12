@@ -1,9 +1,9 @@
 //! Default tuimux ratatui interface.
 //!
 //! v0.1.9 keeps this UI as the default after v0.1.7 accidentally launched a
-//! plain tmux client with no tuimux chrome. It remains an early live tmux-state
-//! dashboard: session/window controls are real, while pane rendering still uses
-//! `capture-pane` until a proper control-mode renderer lands.
+//! plain tmux client with no tuimux chrome. The main pane is now backed by a
+//! real tmux client running inside a PTY and rendered through a vt100 screen
+//! model, so it behaves like a terminal surface instead of a text snapshot.
 //!
 //! If there is no tmux server yet, tuimux creates a detached session named
 //! `tuimux` so the UI always has something real to show.
@@ -12,7 +12,7 @@
 //! so piping or running under CI stays safe (PRD "keep safe").
 
 use std::io::{self, IsTerminal, Stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -23,8 +23,9 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
+use crate::terminal::{TerminalColor, TerminalSpan, TerminalStyle, TmuxTerminal};
 use crate::tmux::{RealTmux, Session, Tmux, TmuxProbe, Window};
 
 /// Why the UI loop ended — affects the farewell message.
@@ -49,6 +50,7 @@ enum Hotspot {
 #[derive(Default, Clone, Copy)]
 struct Regions {
     main_pane: Rect,
+    terminal_body: Rect,
     session_button: Rect,
     detach_button: Rect,
     new_window: Rect,
@@ -72,8 +74,9 @@ struct UiState {
     /// Non-fatal, transient message shown in the status bar (e.g. why a switch
     /// was refused outside tmux, or that a window was created).
     status: Option<String>,
-    pane_lines: Vec<String>,
-    last_pane_size: Option<(u16, u16)>,
+    tmux_binary: String,
+    terminal: Option<TmuxTerminal>,
+    terminal_error: Option<String>,
     terminal_mode: bool,
     /// Monotonic counter behind the `tuimux-<n>` names created by the `n` key.
     new_session_counter: u32,
@@ -82,7 +85,7 @@ struct UiState {
 impl UiState {
     /// Build initial state from the live server, creating a detached `tuimux`
     /// session if no server is running yet.
-    fn bootstrap(tmux: &Tmux<RealTmux>) -> Self {
+    fn bootstrap(tmux: &Tmux<RealTmux>, tmux_binary: String) -> Self {
         let mut state = UiState {
             // Open by default so users immediately see the session dialog; click
             // the session button or Esc to toggle it.
@@ -93,8 +96,9 @@ impl UiState {
             windows: Vec::new(),
             current_session: String::new(),
             status: None,
-            pane_lines: Vec::new(),
-            last_pane_size: None,
+            tmux_binary,
+            terminal: None,
+            terminal_error: None,
             terminal_mode: false,
             new_session_counter: 0,
         };
@@ -109,7 +113,7 @@ impl UiState {
         state.sessions = sessions;
         state.current_session = state.pick_current();
         state.reload_windows(tmux);
-        state.refresh_pane(tmux, 80, 24);
+        state.sync_terminal(80, 24);
         state
     }
 
@@ -131,34 +135,52 @@ impl UiState {
         };
     }
 
-    fn refresh_pane(&mut self, tmux: &Tmux<RealTmux>, width: u16, height: u16) {
+    fn sync_terminal(&mut self, width: u16, height: u16) {
         if self.current_session.is_empty() {
-            self.pane_lines.clear();
-            self.last_pane_size = None;
+            self.terminal = None;
             return;
         }
         let size = (width.max(1), height.max(1));
-        if self.last_pane_size != Some(size) {
-            if let Err(e) = tmux.resize_window(&self.current_session, size.0, size.1) {
-                self.status = Some(format!("resize-window failed: {e}"));
-            } else {
-                self.last_pane_size = Some(size);
+        let needs_spawn = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.session() != self.current_session)
+            .unwrap_or(true);
+
+        if needs_spawn {
+            self.terminal = None;
+            match TmuxTerminal::new(&self.tmux_binary, &self.current_session, size.0, size.1) {
+                Ok(mut terminal) => {
+                    terminal.drain();
+                    self.terminal = Some(terminal);
+                    self.terminal_error = None;
+                }
+                Err(e) => {
+                    self.terminal_error = Some(format!("tmux PTY terminal failed to start: {e}"));
+                    self.status = self.terminal_error.clone();
+                    return;
+                }
             }
         }
-        match tmux.capture_pane(&self.current_session, size.0, size.1) {
-            Ok(lines) => self.pane_lines = lines,
-            Err(e) => self.status = Some(format!("capture-pane failed: {e}")),
+
+        if let Some(terminal) = &mut self.terminal {
+            terminal.resize(size.0, size.1);
+            terminal.drain();
         }
     }
 
     /// Re-read sessions and windows after a mutating command.
     fn refresh(&mut self, tmux: &Tmux<RealTmux>) {
+        let previous_session = self.current_session.clone();
         self.sessions = tmux.list_sessions().unwrap_or_default();
         if !self.sessions.iter().any(|s| s.name == self.current_session) {
             self.current_session = self.pick_current();
         }
         self.reload_windows(tmux);
-        self.last_pane_size = None;
+        if self.current_session != previous_session {
+            self.terminal = None;
+            self.terminal_error = None;
+        }
     }
 
     /// Next free `tuimux-<n>` session name, skipping any that already exist.
@@ -170,6 +192,57 @@ impl UiState {
                 return (name, n);
             }
             n += 1;
+        }
+    }
+
+    fn refresh_tmux_metadata(&mut self, tmux: &Tmux<RealTmux>) {
+        match tmux.list_sessions() {
+            Ok(sessions) => self.sessions = sessions,
+            Err(e) => {
+                self.status = Some(format!("list-sessions failed: {e}"));
+                return;
+            }
+        }
+
+        if !self.sessions.iter().any(|s| s.name == self.current_session) {
+            self.current_session = self.pick_current();
+            self.terminal = None;
+            self.terminal_error = None;
+        }
+        self.reload_windows(tmux);
+    }
+
+    fn send_terminal_key(&mut self, key: KeyEvent) {
+        if let Some(terminal) = &mut self.terminal {
+            if let Err(e) = terminal.send_key(key) {
+                self.status = Some(format!("terminal input failed: {e}"));
+            }
+        } else {
+            self.status = Some("terminal is not ready".to_string());
+        }
+    }
+
+    fn send_terminal_paste(&mut self, text: &str) {
+        if let Some(terminal) = &mut self.terminal {
+            if let Err(e) = terminal.send_paste(text) {
+                self.status = Some(format!("terminal paste failed: {e}"));
+            }
+        } else {
+            self.status = Some("terminal is not ready".to_string());
+        }
+    }
+
+    fn send_terminal_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        row: u16,
+        col: u16,
+        modifiers: KeyModifiers,
+    ) {
+        if let Some(terminal) = &mut self.terminal {
+            if let Err(e) = terminal.send_mouse_event(kind, row, col, modifiers) {
+                self.status = Some(format!("terminal mouse failed: {e}"));
+            }
         }
     }
 }
@@ -186,7 +259,7 @@ pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
     }
 
     let tmux = Tmux::new(RealTmux::new(probe.binary.clone()));
-    let mut state = UiState::bootstrap(&tmux);
+    let mut state = UiState::bootstrap(&tmux, probe.binary.clone());
 
     let mut terminal = setup()?;
     let result = run_loop(&mut terminal, &tmux, &mut state);
@@ -198,11 +271,7 @@ pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
             Ok(0)
         }
         Ok(Exit::Detach) => {
-            if tmux.inside_tmux() {
-                println!("tuimux: detached the tmux client.");
-            } else {
-                println!("tuimux: exited (not running inside tmux — nothing to detach).");
-            }
+            println!("tuimux: detached embedded tmux client.");
             Ok(0)
         }
         Err(e) => Err(e),
@@ -229,16 +298,20 @@ fn restore(terminal: &mut Term) -> io::Result<()> {
 }
 
 fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> io::Result<Exit> {
+    let mut last_metadata_refresh = Instant::now();
     loop {
+        let body = state.regions.terminal_body;
+        if body.width > 0 && body.height > 0 {
+            state.sync_terminal(body.width, body.height);
+        }
+        if last_metadata_refresh.elapsed() >= Duration::from_millis(750) {
+            state.refresh_tmux_metadata(tmux);
+            last_metadata_refresh = Instant::now();
+        }
+
         terminal.draw(|f| ui(f, state))?;
 
-        if !event::poll(Duration::from_millis(120))? {
-            let area = state.regions.main_pane;
-            state.refresh_pane(
-                tmux,
-                area.width.saturating_sub(2),
-                area.height.saturating_sub(2),
-            );
+        if !event::poll(Duration::from_millis(33))? {
             continue;
         }
 
@@ -250,17 +323,7 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                         state.status = Some("navigation mode".to_string());
                     }
                     _ if state.terminal_mode => {
-                        if let Some(keys) = key_event_to_send_keys(key) {
-                            if let Err(e) = tmux.send_keys(&state.current_session, &keys) {
-                                state.status = Some(format!("send-keys failed: {e}"));
-                            }
-                            let area = state.regions.main_pane;
-                            state.refresh_pane(
-                                tmux,
-                                area.width.saturating_sub(2),
-                                area.height.saturating_sub(2),
-                            );
-                        }
+                        state.send_terminal_key(key);
                     }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Exit::Quit),
                     (KeyCode::Char('q'), _) => return Ok(Exit::Quit),
@@ -277,13 +340,21 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                         state.session_modal_open = !state.session_modal_open;
                     }
                     (KeyCode::Char('d'), _) => {
-                        let _ = tmux.detach();
                         return Ok(Exit::Detach);
                     }
                     _ => {}
                 }
             }
             Event::Mouse(mouse) => {
+                if state.terminal_mode {
+                    if let Some((row, col)) =
+                        terminal_cell_at(mouse.column, mouse.row, state.regions.terminal_body)
+                    {
+                        state.send_terminal_mouse(mouse.kind, row, col, mouse.modifiers);
+                        continue;
+                    }
+                }
+
                 state.hover = hit_test(
                     mouse.column,
                     mouse.row,
@@ -296,7 +367,6 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                             state.session_modal_open = !state.session_modal_open;
                         }
                         Some(Hotspot::DetachButton) | Some(Hotspot::ModalDetach) => {
-                            let _ = tmux.detach();
                             return Ok(Exit::Detach);
                         }
                         Some(Hotspot::MainPane) => {
@@ -322,6 +392,9 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                         _ => {}
                     }
                 }
+            }
+            Event::Paste(text) if state.terminal_mode => {
+                state.send_terminal_paste(&text);
             }
             Event::Resize(_, _) => {}
             _ => {}
@@ -378,29 +451,27 @@ fn switch_session(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
     let Some(name) = state.sessions.get(idx).map(|s| s.name.clone()) else {
         return;
     };
-    if tmux.inside_tmux() {
-        match tmux.switch_session(&name) {
-            Ok(()) => {
-                state.current_session = name;
-                state.session_modal_open = false;
-                state.refresh(tmux);
-            }
-            Err(e) => state.status = Some(format!("switch-client failed: {e}")),
-        }
-    } else {
-        // Outside tmux, do not run `attach-session` from inside the TUI. Instead,
-        // select the session as the sidebar target so window inspection/creation
-        // still works until the control-mode attach renderer lands.
-        state.current_session = name.clone();
-        state.session_modal_open = false;
-        state.status = Some(format!("selected session '{name}'"));
-        state.reload_windows(tmux);
-        state.last_pane_size = None;
-    }
+    state.current_session = name.clone();
+    state.session_modal_open = false;
+    state.status = Some(format!("selected session '{name}'"));
+    state.terminal = None;
+    state.terminal_error = None;
+    state.reload_windows(tmux);
 }
 
 fn ui(f: &mut Frame, state: &mut UiState) {
     let root = f.size();
+    let terminal_rows = state
+        .terminal
+        .as_ref()
+        .map(TmuxTerminal::styled_rows)
+        .unwrap_or_default();
+    let terminal_cursor = state.terminal.as_ref().map(TmuxTerminal::cursor);
+    let terminal_hide_cursor = state
+        .terminal
+        .as_ref()
+        .map(TmuxTerminal::hide_cursor)
+        .unwrap_or(true);
 
     let session_label = if state.current_session.is_empty() {
         "(no session)"
@@ -415,8 +486,11 @@ fn ui(f: &mut Frame, state: &mut UiState) {
     render_main(
         f,
         body[0],
-        &state.pane_lines,
+        terminal_rows,
         state.terminal_mode,
+        !state.session_modal_open && !terminal_hide_cursor,
+        terminal_cursor,
+        state.terminal_error.as_deref(),
         &mut state.regions,
     );
     render_sidebar(
@@ -459,208 +533,118 @@ fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a
 fn render_main(
     f: &mut Frame,
     area: Rect,
-    pane_lines: &[String],
+    terminal_rows: Vec<Vec<TerminalSpan>>,
     terminal_mode: bool,
+    show_cursor: bool,
+    terminal_cursor: Option<(u16, u16)>,
+    terminal_error: Option<&str>,
     regions: &mut Regions,
 ) {
     regions.main_pane = area;
-    let mut lines: Vec<Line> = if pane_lines.is_empty() {
-        vec![Line::from(
-            "tmux pane is empty; click here and type, F12 returns to navigation",
-        )]
-    } else {
-        pane_lines.iter().map(|p| pane_line_from_ansi(p)).collect()
-    };
-    if let Some(last) = lines.last_mut() {
-        last.spans.push(Span::raw(" "));
-    }
     let border = if terminal_mode {
         Color::Green
     } else {
         Color::DarkGray
     };
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border)),
-    );
-    f.render_widget(para, area);
-}
 
-fn pane_line_from_ansi(raw: &str) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut style = Style::default();
-    let mut text = String::new();
-    let bytes = raw.as_bytes();
-    let mut i = 0;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border));
+    let inner = block.inner(area);
+    regions.terminal_body = inner;
+    f.render_widget(block, area);
 
-    while i < bytes.len() {
-        if bytes[i] == 0x1b {
-            flush_span(&mut spans, &mut text, style);
-            if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-                if let Some((seq, next)) = read_csi(raw, i + 2) {
-                    if seq.ends_with('m') {
-                        apply_sgr(&seq[..seq.len().saturating_sub(1)], &mut style);
-                    }
-                    i = next;
-                    continue;
-                }
-            } else if i + 1 < bytes.len() && bytes[i + 1] == b']' {
-                i = skip_osc(bytes, i + 2);
-                continue;
-            } else {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-        }
-
-        if let Some(ch) = raw[i..].chars().next() {
-            if ch == '\u{8}' || ch == '\r' {
-                i += ch.len_utf8();
-                continue;
-            }
-            text.push(ch);
-            i += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    flush_span(&mut spans, &mut text, style);
-    if spans.is_empty() {
-        spans.push(Span::raw(String::new()));
-    }
-    Line::from(spans)
-}
-
-fn flush_span(spans: &mut Vec<Span<'static>>, text: &mut String, style: Style) {
-    if !text.is_empty() {
-        spans.push(Span::styled(std::mem::take(text), style));
-    }
-}
-
-fn read_csi(raw: &str, start: usize) -> Option<(&str, usize)> {
-    let mut end = start;
-    for ch in raw[start..].chars() {
-        end += ch.len_utf8();
-        if ('@'..='~').contains(&ch) {
-            return Some((&raw[start..end], end));
-        }
-    }
-    None
-}
-
-fn skip_osc(bytes: &[u8], mut i: usize) -> usize {
-    while i < bytes.len() {
-        if bytes[i] == 0x07 {
-            return i + 1;
-        }
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-            return i + 2;
-        }
-        i += 1;
-    }
-    i
-}
-
-fn apply_sgr(params: &str, style: &mut Style) {
-    let mut nums: Vec<u16> = if params.is_empty() {
-        vec![0]
+    let lines: Vec<Line> = if let Some(error) = terminal_error {
+        vec![Line::from(Span::styled(
+            error.to_string(),
+            Style::default().fg(Color::LightRed),
+        ))]
+    } else if terminal_rows.is_empty() {
+        vec![Line::from(Span::styled(
+            "starting tmux terminal...",
+            Style::default().fg(Color::DarkGray),
+        ))]
     } else {
-        params
-            .split(';')
-            .map(|p| {
-                if p.is_empty() {
-                    0
-                } else {
-                    p.parse().unwrap_or(0)
-                }
-            })
+        terminal_rows
+            .into_iter()
+            .map(|row| Line::from(terminal_row_spans(row)))
             .collect()
     };
-    if nums.is_empty() {
-        nums.push(0);
-    }
 
-    let mut i = 0;
-    while i < nums.len() {
-        match nums[i] {
-            0 => *style = Style::default(),
-            1 => style.add_modifier |= Modifier::BOLD,
-            2 => style.add_modifier |= Modifier::DIM,
-            3 => style.add_modifier |= Modifier::ITALIC,
-            4 => style.add_modifier |= Modifier::UNDERLINED,
-            7 => style.add_modifier |= Modifier::REVERSED,
-            22 => {
-                style.add_modifier.remove(Modifier::BOLD | Modifier::DIM);
-                style.sub_modifier |= Modifier::BOLD | Modifier::DIM;
+    f.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::Gray).bg(Color::Black)),
+        inner,
+    );
+
+    if show_cursor {
+        if let Some((row, col)) = terminal_cursor {
+            if inner.width > 0 && inner.height > 0 {
+                let x = inner
+                    .x
+                    .saturating_add(col)
+                    .min(inner.right().saturating_sub(1));
+                let y = inner
+                    .y
+                    .saturating_add(row)
+                    .min(inner.bottom().saturating_sub(1));
+                f.set_cursor(x, y);
             }
-            23 => {
-                style.add_modifier.remove(Modifier::ITALIC);
-                style.sub_modifier |= Modifier::ITALIC;
-            }
-            24 => {
-                style.add_modifier.remove(Modifier::UNDERLINED);
-                style.sub_modifier |= Modifier::UNDERLINED;
-            }
-            27 => {
-                style.add_modifier.remove(Modifier::REVERSED);
-                style.sub_modifier |= Modifier::REVERSED;
-            }
-            30..=37 => style.fg = Some(ansi_basic_color(nums[i] - 30, false)),
-            40..=47 => style.bg = Some(ansi_basic_color(nums[i] - 40, false)),
-            90..=97 => style.fg = Some(ansi_basic_color(nums[i] - 90, true)),
-            100..=107 => style.bg = Some(ansi_basic_color(nums[i] - 100, true)),
-            39 => style.fg = None,
-            49 => style.bg = None,
-            38 | 48 => {
-                let is_fg = nums[i] == 38;
-                if i + 2 < nums.len() && nums[i + 1] == 5 {
-                    let color = Color::Indexed(nums[i + 2].min(255) as u8);
-                    if is_fg {
-                        style.fg = Some(color);
-                    } else {
-                        style.bg = Some(color);
-                    }
-                    i += 2;
-                } else if i + 4 < nums.len() && nums[i + 1] == 2 {
-                    let color = Color::Rgb(
-                        nums[i + 2].min(255) as u8,
-                        nums[i + 3].min(255) as u8,
-                        nums[i + 4].min(255) as u8,
-                    );
-                    if is_fg {
-                        style.fg = Some(color);
-                    } else {
-                        style.bg = Some(color);
-                    }
-                    i += 4;
-                }
-            }
-            _ => {}
         }
-        i += 1;
     }
 }
 
-fn ansi_basic_color(idx: u16, bright: bool) -> Color {
-    match (idx, bright) {
-        (0, false) => Color::Black,
-        (1, false) => Color::Red,
-        (2, false) => Color::Green,
-        (3, false) => Color::Yellow,
-        (4, false) => Color::Blue,
-        (5, false) => Color::Magenta,
-        (6, false) => Color::Cyan,
-        (7, false) => Color::Gray,
-        (0, true) => Color::DarkGray,
-        (1, true) => Color::LightRed,
-        (2, true) => Color::LightGreen,
-        (3, true) => Color::LightYellow,
-        (4, true) => Color::LightBlue,
-        (5, true) => Color::LightMagenta,
-        (6, true) => Color::LightCyan,
-        (7, true) => Color::White,
-        _ => Color::Reset,
+fn terminal_row_spans(row: Vec<TerminalSpan>) -> Vec<Span<'static>> {
+    row.into_iter()
+        .map(|span| Span::styled(span.text, terminal_style(span.style)))
+        .collect()
+}
+
+fn terminal_style(style: TerminalStyle) -> Style {
+    let mut fg = terminal_color(style.fg).unwrap_or(Color::Gray);
+    let mut bg = terminal_color(style.bg).unwrap_or(Color::Black);
+    if style.inverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+
+    let mut rendered = Style::default().fg(fg).bg(bg);
+    if style.bold {
+        rendered = rendered.add_modifier(Modifier::BOLD);
+    }
+    if style.dim {
+        rendered = rendered.add_modifier(Modifier::DIM);
+    }
+    if style.italic {
+        rendered = rendered.add_modifier(Modifier::ITALIC);
+    }
+    if style.underline {
+        rendered = rendered.add_modifier(Modifier::UNDERLINED);
+    }
+    rendered
+}
+
+fn terminal_color(color: TerminalColor) -> Option<Color> {
+    match color {
+        TerminalColor::Default => None,
+        TerminalColor::Rgb(red, green, blue) => Some(Color::Rgb(red, green, blue)),
+        TerminalColor::Indexed(index) => Some(match index {
+            0 => Color::Black,
+            1 => Color::Red,
+            2 => Color::Green,
+            3 => Color::Yellow,
+            4 => Color::Blue,
+            5 => Color::Magenta,
+            6 => Color::Cyan,
+            7 => Color::Gray,
+            8 => Color::DarkGray,
+            9 => Color::LightRed,
+            10 => Color::LightGreen,
+            11 => Color::LightYellow,
+            12 => Color::LightBlue,
+            13 => Color::LightMagenta,
+            14 => Color::LightCyan,
+            15 => Color::White,
+            index => Color::Indexed(index),
+        }),
     }
 }
 
@@ -903,40 +887,6 @@ fn close_style(hot: bool) -> Style {
     }
 }
 
-fn key_event_to_send_keys(key: KeyEvent) -> Option<Vec<String>> {
-    if key.kind != KeyEventKind::Press {
-        return None;
-    }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let KeyCode::Char(c) = key.code {
-            return Some(vec![format!("C-{}", c.to_ascii_lowercase())]);
-        }
-    }
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        if let KeyCode::Char(c) = key.code {
-            return Some(vec![format!("M-{c}")]);
-        }
-    }
-    match key.code {
-        KeyCode::Char(c) => Some(vec!["-l".to_string(), c.to_string()]),
-        KeyCode::Enter => Some(vec!["Enter".to_string()]),
-        KeyCode::Backspace => Some(vec!["BSpace".to_string()]),
-        KeyCode::Delete => Some(vec!["Delete".to_string()]),
-        KeyCode::Home => Some(vec!["Home".to_string()]),
-        KeyCode::End => Some(vec!["End".to_string()]),
-        KeyCode::PageUp => Some(vec!["PageUp".to_string()]),
-        KeyCode::PageDown => Some(vec!["PageDown".to_string()]),
-        KeyCode::Tab => Some(vec!["Tab".to_string()]),
-        KeyCode::Esc => Some(vec!["Escape".to_string()]),
-        KeyCode::Left => Some(vec!["Left".to_string()]),
-        KeyCode::Right => Some(vec!["Right".to_string()]),
-        KeyCode::Up => Some(vec!["Up".to_string()]),
-        KeyCode::Down => Some(vec!["Down".to_string()]),
-        KeyCode::F(n) => Some(vec![format!("F{n}")]),
-        _ => None,
-    }
-}
-
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1003,86 +953,16 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
+fn terminal_cell_at(x: u16, y: u16, body: Rect) -> Option<(u16, u16)> {
+    if body.width == 0 || body.height == 0 || !contains(body, x, y) {
+        return None;
+    }
+    Some((y.saturating_sub(body.y), x.saturating_sub(body.x)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyEvent;
-
-    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-        KeyEvent::new(code, modifiers)
-    }
-
-    #[test]
-    fn key_mapping_sends_literal_text_and_named_keys_to_tmux() {
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Char('a'), KeyModifiers::NONE)),
-            Some(vec!["-l".to_string(), "a".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(vec!["Enter".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Backspace, KeyModifiers::NONE)),
-            Some(vec!["BSpace".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Delete, KeyModifiers::NONE)),
-            Some(vec!["Delete".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Home, KeyModifiers::NONE)),
-            Some(vec!["Home".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::End, KeyModifiers::NONE)),
-            Some(vec!["End".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::PageUp, KeyModifiers::NONE)),
-            Some(vec!["PageUp".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::PageDown, KeyModifiers::NONE)),
-            Some(vec!["PageDown".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::F(5), KeyModifiers::NONE)),
-            Some(vec!["F5".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Left, KeyModifiers::NONE)),
-            Some(vec!["Left".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(vec!["C-c".to_string()])
-        );
-        assert_eq!(
-            key_event_to_send_keys(key(KeyCode::Char('x'), KeyModifiers::ALT)),
-            Some(vec!["M-x".to_string()])
-        );
-    }
-
-    #[test]
-    fn only_press_key_events_are_forwarded_to_tmux() {
-        let press = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let repeat = KeyEvent {
-            kind: KeyEventKind::Repeat,
-            ..press
-        };
-        let release = KeyEvent {
-            kind: KeyEventKind::Release,
-            ..press
-        };
-
-        assert_eq!(
-            key_event_to_send_keys(press),
-            Some(vec!["Enter".to_string()])
-        );
-        assert_eq!(key_event_to_send_keys(repeat), None);
-        assert_eq!(key_event_to_send_keys(release), None);
-    }
 
     #[test]
     fn hit_test_prefers_window_close_x_over_window_row() {
@@ -1110,28 +990,6 @@ mod tests {
         assert_eq!(last.content.as_ref(), "✕");
         assert_eq!(last.style.fg, Some(Color::Red));
         assert_eq!(last.style.bg, Some(Color::Black));
-    }
-
-    #[test]
-    fn ansi_sgr_parser_applies_color_and_removes_escape_glyphs() {
-        let line = pane_line_from_ansi("normal \x1b[31mred\x1b[0m done");
-        assert_eq!(line.spans.len(), 3);
-        assert_eq!(line.spans[0].content.as_ref(), "normal ");
-        assert_eq!(line.spans[1].content.as_ref(), "red");
-        assert_eq!(line.spans[1].style.fg, Some(Color::Red));
-        assert_eq!(line.spans[2].content.as_ref(), " done");
-        assert_eq!(line.spans[2].style.fg, None);
-    }
-
-    #[test]
-    fn ansi_sgr_parser_supports_256_color_truecolor_and_reverse() {
-        let line = pane_line_from_ansi("\x1b[38;5;196mhot\x1b[48;2;1;2;3;7mrev\x1b[0m");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Indexed(196)));
-        assert_eq!(line.spans[1].style.bg, Some(Color::Rgb(1, 2, 3)));
-        assert!(line.spans[1]
-            .style
-            .add_modifier
-            .contains(Modifier::REVERSED));
     }
 
     #[test]

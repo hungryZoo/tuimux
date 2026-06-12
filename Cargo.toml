@@ -1,6 +1,6 @@
 [package]
 name = "tuimux"
-version = "0.1.9"
+version = "0.2.0-alpha.1"
 edition = "2021"
 rust-version = "1.74"
 description = "A prefix-free, mouse-first TUI front-end for tmux (VS Code-inspired layout)"
@@ -15,9 +15,12 @@ name = "tuimux"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.27"
+portable-pty = "0.9"
 ratatui = "0.26"
+vt100 = "0.16"
 
 [profile.release]
 strip = true

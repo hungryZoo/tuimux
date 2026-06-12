@@ -224,14 +224,6 @@ impl<R: TmuxRunner> Tmux<R> {
         Self { runner }
     }
 
-    /// Whether tuimux itself is running inside a tmux client (the `TMUX` env var
-    /// is set). The UI uses this to decide whether switching a session is safe:
-    /// inside tmux we `switch-client`; outside we must not `attach-session`
-    /// (that would spawn an interactive tmux on top of us), so we just report it.
-    pub fn inside_tmux(&self) -> bool {
-        self.runner.inside_tmux()
-    }
-
     pub fn list_sessions(&self) -> Result<Vec<Session>, TmuxError> {
         match self.runner.run(&list_sessions_args()) {
             Ok(stdout) => Ok(parse_sessions(&stdout)),
@@ -246,12 +238,6 @@ impl<R: TmuxRunner> Tmux<R> {
             Err(err) if is_no_server_error(&err) => Ok(Vec::new()),
             Err(err) => Err(err),
         }
-    }
-
-    pub fn switch_session(&self, name: &str) -> Result<(), TmuxError> {
-        self.runner
-            .run(&switch_session_args(name, self.runner.inside_tmux()))
-            .map(|_| ())
     }
 
     pub fn new_session(&self, name: &str) -> Result<(), TmuxError> {
@@ -289,41 +275,6 @@ impl<R: TmuxRunner> Tmux<R> {
         self.runner
             .run(&kill_window_args(session, index))
             .map(|_| ())
-    }
-
-    pub fn capture_pane(
-        &self,
-        session: &str,
-        width: u16,
-        height: u16,
-    ) -> Result<Vec<String>, TmuxError> {
-        let _ = width;
-        match self.runner.run(&capture_pane_args(session)) {
-            Ok(stdout) => Ok(parse_pane_screen(&stdout, height)),
-            Err(err) if is_no_server_error(&err) => Ok(Vec::new()),
-            Err(err) => Err(err),
-        }
-    }
-
-    pub fn resize_window(&self, session: &str, width: u16, height: u16) -> Result<(), TmuxError> {
-        if width == 0 || height == 0 {
-            return Ok(());
-        }
-        self.runner
-            .run(&resize_window_args(session, width, height))
-            .map(|_| ())
-    }
-
-    pub fn send_keys(&self, session: &str, keys: &[String]) -> Result<(), TmuxError> {
-        self.runner.run(&send_keys_args(session, keys)).map(|_| ())
-    }
-
-    pub fn detach(&self) -> Result<(), TmuxError> {
-        if self.runner.inside_tmux() {
-            self.runner.run(&detach_args()).map(|_| ())
-        } else {
-            Ok(())
-        }
     }
 }
 
@@ -369,21 +320,6 @@ pub(crate) fn parse_windows(raw: &str) -> Vec<Window> {
         .collect()
 }
 
-pub(crate) fn parse_pane_screen(raw: &str, height: u16) -> Vec<String> {
-    let mut lines: Vec<String> = raw.split('\n').map(str::to_string).collect();
-    if raw.ends_with('\n') {
-        lines.pop();
-    }
-    let height = height as usize;
-    if height > 0 {
-        lines.truncate(height);
-        while lines.len() < height {
-            lines.push(String::new());
-        }
-    }
-    lines
-}
-
 pub(crate) fn list_sessions_args() -> Vec<String> {
     vec![
         "list-sessions".to_string(),
@@ -400,22 +336,6 @@ pub(crate) fn list_windows_args(session: &str) -> Vec<String> {
         "-F".to_string(),
         "#{window_index}\t#{window_name}\t#{window_active}".to_string(),
     ]
-}
-
-pub(crate) fn switch_session_args(session: &str, inside_tmux: bool) -> Vec<String> {
-    if inside_tmux {
-        vec![
-            "switch-client".to_string(),
-            "-t".to_string(),
-            session.to_string(),
-        ]
-    } else {
-        vec![
-            "attach-session".to_string(),
-            "-t".to_string(),
-            session.to_string(),
-        ]
-    }
 }
 
 pub(crate) fn new_session_args(session: &str) -> Vec<String> {
@@ -475,41 +395,6 @@ pub(crate) fn kill_window_args(session: &str, index: u32) -> Vec<String> {
         "-t".to_string(),
         format!("{session}:{index}"),
     ]
-}
-
-pub(crate) fn resize_window_args(session: &str, width: u16, height: u16) -> Vec<String> {
-    vec![
-        "resize-window".to_string(),
-        "-t".to_string(),
-        format!("{session}:"),
-        "-x".to_string(),
-        width.to_string(),
-        "-y".to_string(),
-        height.to_string(),
-    ]
-}
-
-pub(crate) fn capture_pane_args(session: &str) -> Vec<String> {
-    vec![
-        "capture-pane".to_string(),
-        "-pe".to_string(),
-        "-t".to_string(),
-        session.to_string(),
-    ]
-}
-
-pub(crate) fn send_keys_args(session: &str, keys: &[String]) -> Vec<String> {
-    let mut args = vec![
-        "send-keys".to_string(),
-        "-t".to_string(),
-        session.to_string(),
-    ];
-    args.extend(keys.iter().cloned());
-    args
-}
-
-pub(crate) fn detach_args() -> Vec<String> {
-    vec!["detach-client".to_string()]
 }
 
 #[cfg(test)]
@@ -638,14 +523,6 @@ mod tests {
             ]
         );
         assert_eq!(
-            switch_session_args("work", true),
-            vec!["switch-client", "-t", "work"]
-        );
-        assert_eq!(
-            switch_session_args("work", false),
-            vec!["attach-session", "-t", "work"]
-        );
-        assert_eq!(
             new_session_args("scratch"),
             vec!["new-session", "-d", "-s", "scratch"]
         );
@@ -663,31 +540,13 @@ mod tests {
             vec!["select-window", "-t", "dev:2"]
         );
         assert_eq!(new_window_args("dev"), vec!["new-window", "-t", "dev"]);
-        assert_eq!(detach_args(), vec!["detach-client"]);
     }
 
     #[test]
-    fn tmux_command_args_cover_real_pane_and_window_actions() {
-        assert_eq!(
-            capture_pane_args("dev"),
-            vec!["capture-pane", "-pe", "-t", "dev"]
-        );
-        assert_eq!(
-            resize_window_args("dev", 100, 30),
-            vec!["resize-window", "-t", "dev:", "-x", "100", "-y", "30"]
-        );
-        assert_eq!(
-            send_keys_args("dev", &["-l".to_string(), "a".to_string()]),
-            vec!["send-keys", "-t", "dev", "-l", "a"]
-        );
+    fn tmux_command_args_cover_window_actions() {
         assert_eq!(
             kill_window_args("dev", 2),
             vec!["kill-window", "-t", "dev:2"]
         );
-    }
-
-    #[test]
-    fn parses_pane_screen_preserves_and_pads_blank_rows() {
-        assert_eq!(parse_pane_screen("alpha\n\n", 4), vec!["alpha", "", "", ""]);
     }
 }
