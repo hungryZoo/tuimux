@@ -2,7 +2,7 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.18 keeps the default runtime on the Rust-native path and focuses
+v0.2.0-alpha.19 keeps the default runtime on the Rust-native path and focuses
 the product on a single full-size terminal surface selected from a window list.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
 which owns sessions, windows, and PTY-backed shell processes. `tmux` is
@@ -44,8 +44,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.18/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.18 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.19/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.19 bash
 ```
 
 Verify:
@@ -72,9 +72,10 @@ cargo run -- --layout-preview
 python3 scripts/smoke_macos_ui_selection.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_apps.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux
+python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 ```
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.18` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.19` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

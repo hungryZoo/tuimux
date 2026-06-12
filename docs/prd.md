@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 2.2
-- **대상 릴리스**: v0.2.0-alpha.18
+- **문서 버전**: 2.3
+- **대상 릴리스**: v0.2.0-alpha.19
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.18의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.19의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -61,6 +61,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, host bracketed paste 전달, child bracketed paste wrapper 보존이 통과한다.
 - macOS session-flow smoke에서 detach/reattach shell state 유지와 window-list workflow, split deprecated status가 통과한다.
+- macOS no-tmux smoke에서 tmux 없는 PATH의 default TUI/doctor 성공과 `--native-client` 실패가 통과한다.
 - GitHub prerelease에 macOS Apple Silicon tarball과 `SHA256SUMS`가 게시된다.
 
 ## 6. 다음 단계
