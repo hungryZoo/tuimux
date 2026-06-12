@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# tuimux installer — macOS / Linux.
+# tuimux installer — macOS arm64 prerelease.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.5/scripts/install.sh | \
+#     TUIMUX_VERSION=v0.2.0-alpha.5 bash
 #
 # Environment variables:
-#   TUIMUX_VERSION       Tag to install (e.g. v0.2.0-alpha.4). Default: latest prerelease/release.
+#   TUIMUX_VERSION       Tag to install (e.g. v0.2.0-alpha.5). Default: latest prerelease/release.
 #   TUIMUX_INSTALL_DIR   Where to put the binary. Default: ~/.local/bin, falling
 #                        back to /usr/local/bin if the former isn't writable.
-#   TUIMUX_TMUX_CONF     tmux config file to update. Default: ~/.tmux.conf.
 #
 set -euo pipefail
 
@@ -43,75 +43,16 @@ need_cmd dirname
 OS="$(uname -s)"
 RAW_ARCH="$(uname -m)"
 
-# Detect OS/architecture and map to the Rust target triple used in asset names.
+# This prerelease publishes macOS Apple Silicon assets first. Other targets will
+# be re-enabled once the Rust-native multiplexer has been tested there.
 case "$OS:$RAW_ARCH" in
   Darwin:arm64|Darwin:aarch64) TARGET="aarch64-apple-darwin" ;;
-  Darwin:x86_64|Darwin:amd64) TARGET="x86_64-apple-darwin" ;;
-  Linux:x86_64|Linux:amd64) TARGET="x86_64-unknown-linux-gnu" ;;
-  Linux:aarch64|Linux:arm64) TARGET="aarch64-unknown-linux-gnu" ;;
-  Linux:armv7l|Linux:armv7) TARGET="armv7-unknown-linux-gnueabihf" ;;
-  Darwin:*) die "unsupported macOS architecture: $RAW_ARCH" ;;
-  Linux:armv6l) die "unsupported Raspberry Pi armv6 architecture: $RAW_ARCH; use a 32-bit armv7 or 64-bit arm64 OS image." ;;
-  Linux:*) die "unsupported Linux architecture: $RAW_ARCH" ;;
-  *) die "this installer currently supports macOS and Linux only; detected: $OS / $RAW_ARCH" ;;
+  Darwin:*) die "this prerelease currently supports macOS Apple Silicon only; detected macOS ${RAW_ARCH}" ;;
+  *) die "this prerelease currently supports macOS Apple Silicon only; detected: ${OS} / ${RAW_ARCH}" ;;
 esac
 info "Detected ${OS} / ${RAW_ARCH} (target: ${TARGET})"
 
-# tmux is a hard runtime dependency (tuimux is a tmux front-end).
-if ! command -v tmux >/dev/null 2>&1; then
-  warn "tmux is not installed — tuimux needs it at runtime."
-  case "$OS" in
-    Darwin) warn "Install it with:  ${BOLD}brew install tmux${RESET}" ;;
-    Linux) warn "Install it with your package manager, e.g. ${BOLD}sudo apt install tmux${RESET} or ${BOLD}sudo dnf install tmux${RESET}" ;;
-  esac
-else
-  info "Found tmux: $(tmux -V 2>/dev/null || echo 'unknown version')"
-fi
-
-tmux_conf_has_option() {
-  # $1 = tmux option name, e.g. mouse or history-limit
-  # Match active `set` / `set-option` lines and ignore comments/blank lines.
-  local option="$1"
-  [ -f "$TMUX_CONF" ] || return 1
-  awk -v option="$option" '
-    /^[[:space:]]*($|#)/ { next }
-    {
-      for (i = 1; i <= NF; i++) {
-        if ($i == option) {
-          for (j = 1; j < i; j++) {
-            if ($j == "set" || $j == "set-option") {
-              found = 1
-            }
-          }
-        }
-      }
-    }
-    END { exit found ? 0 : 1 }
-  ' "$TMUX_CONF"
-}
-
-ensure_tmux_conf_option() {
-  # $1 = option name, $2 = value
-  local option="$1"
-  local value="$2"
-  if tmux_conf_has_option "$option"; then
-    info "tmux ${option} already configured in ${TMUX_CONF}"
-    return
-  fi
-  mkdir -p "$(dirname "$TMUX_CONF")"
-  if [ ! -f "$TMUX_CONF" ]; then
-    : > "$TMUX_CONF"
-  fi
-  {
-    printf '\n# Added by tuimux installer\n'
-    printf 'set -g %s %s\n' "$option" "$value"
-  } >> "$TMUX_CONF"
-  info "Added tmux ${option} ${value} to ${TMUX_CONF}"
-}
-
-TMUX_CONF="${TUIMUX_TMUX_CONF:-${HOME}/.tmux.conf}"
-ensure_tmux_conf_option mouse on
-ensure_tmux_conf_option history-limit 100000
+info "tmux is optional. The default tuimux UI now uses the Rust-native multiplexer."
 
 # ---------------------------------------------------------------------------
 # Resolve version

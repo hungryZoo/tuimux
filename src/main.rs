@@ -1,10 +1,12 @@
-//! tuimux — a prefix-free, mouse-first TUI front-end for tmux.
+//! tuimux — a prefix-free, mouse-first terminal multiplexer.
 //!
 //! See `docs/prd.md` and `docs/srs.md` for the full design. This binary is an
-//! early MVP. The default path must show the tuimux ratatui interface; a plain
-//! native tmux client is available only as an explicit fallback.
+//! early MVP. The default path uses tuimux's Rust-native multiplexer; a plain
+//! native tmux client remains available only as an explicit fallback.
 
+mod clipboard;
 mod doctor;
+mod native_mux;
 mod preview;
 mod terminal;
 mod tmux;
@@ -23,9 +25,9 @@ use preview::PreviewData;
 #[command(
     name = "tuimux",
     version,
-    about = "Prefix-free, mouse-first TUI front-end for tmux",
-    long_about = "tuimux is a TUI front-end for tmux. Its default mode opens the tuimux ratatui \n\
-                  interface with a mouse-first session/window sidebar over live tmux state.\n\n\
+    about = "Prefix-free, mouse-first Rust-native terminal multiplexer",
+    long_about = "tuimux is a Rust-native terminal multiplexer with a ratatui interface, \n\
+                  PTY-backed windows, mouse-first sidebar controls, and native-feeling selection.\n\n\
                   This is an early 0.x MVP. Run with no flags to start the TUI, or use \n\
                   --layout-preview / --doctor for non-interactive output."
 )]
@@ -42,11 +44,11 @@ struct Cli {
     #[arg(long, hide = true)]
     dashboard: bool,
 
-    /// Fallback: open a plain native tmux client instead of the tuimux TUI.
+    /// Fallback: open a plain native tmux client instead of the Rust-native tuimux TUI.
     #[arg(long, hide = true)]
     native_client: bool,
 
-    /// tmux session to create/attach. Defaults to `tuimux`.
+    /// tuimux session to create. Defaults to `tuimux`.
     #[arg(long, value_name = "NAME", default_value = "tuimux")]
     session: String,
 
@@ -78,46 +80,48 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    match tmux::probe() {
-        Ok(probe) => {
-            if let Some(v) = probe.version {
-                if !v.is_supported() {
-                    eprintln!(
+    if cli.native_client {
+        match tmux::probe() {
+            Ok(probe) => {
+                if let Some(v) = probe.version {
+                    if !v.is_supported() {
+                        eprintln!(
                         "tuimux: warning — {} {} is older than the supported {}. Some features may not work.",
                         probe.binary,
                         v,
                         tmux::MIN_SUPPORTED
                     );
+                    }
+                } else {
+                    eprintln!(
+                        "tuimux: warning — could not parse tmux version from `{}`.",
+                        probe.raw_version
+                    );
                 }
-            } else {
-                eprintln!(
-                    "tuimux: warning — could not parse tmux version from `{}`.",
-                    probe.raw_version
-                );
+
+                match run_native_tmux(&probe, &cli.session) {
+                    Ok(rc) => code(rc),
+                    Err(e) => {
+                        eprintln!("tuimux: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
             }
-
-            let result = match choose_run_mode(&cli) {
-                RunMode::Dashboard => tui::run(&probe),
-                RunMode::NativeClient => run_native_tmux(&probe, &cli.session),
-            };
-
-            match result {
-                Ok(rc) => code(rc),
-                Err(e) => {
-                    eprintln!("tuimux: {e}");
-                    ExitCode::FAILURE
-                }
+            Err(e) => {
+                eprintln!("tuimux: {e}");
+                eprintln!(
+                    "\n`--native-client` requires tmux. The default tuimux TUI no longer depends on tmux."
+                );
+                code(1)
             }
         }
-        Err(e) => {
-            eprintln!("tuimux: {e}");
-            eprintln!(
-                "\ntmux is required. Install it and try again:\n  \
-                 macOS:  brew install tmux\n  \
-                 Debian: sudo apt install tmux\n\n\
-                 Then run `tuimux --doctor` to verify your environment."
-            );
-            code(1)
+    } else {
+        match tui::run(&cli.session, base) {
+            Ok(rc) => code(rc),
+            Err(e) => {
+                eprintln!("tuimux: {e}");
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -136,12 +140,14 @@ fn run_native_tmux(probe: &tmux::TmuxProbe, session: &str) -> std::io::Result<i3
     Ok(0)
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunMode {
     Dashboard,
     NativeClient,
 }
 
+#[cfg(test)]
 fn choose_run_mode(cli: &Cli) -> RunMode {
     if cli.native_client {
         RunMode::NativeClient

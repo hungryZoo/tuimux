@@ -1,8 +1,7 @@
 //! Non-interactive environment diagnostics (`tuimux --doctor`).
 //!
-//! Maps to PRD RK-2's "clear diagnostic command" and SRS ENV-1 checks. Prints a
-//! checklist and returns a non-zero exit code if anything required is missing, so
-//! it is usable in scripts and CI.
+//! Prints a checklist and returns a non-zero exit code if the native tuimux
+//! runtime is missing something required.
 
 use std::env;
 
@@ -16,49 +15,53 @@ pub fn run() -> i32 {
     println!("tuimux version : {}", env!("CARGO_PKG_VERSION"));
     println!();
 
-    // --- tmux presence & version -------------------------------------------
+    // --- optional tmux fallback --------------------------------------------
     match tmux::probe() {
         Ok(probe) => {
-            line("tmux binary", true, &probe.binary);
+            line("tmux fallback", true, &probe.binary);
             match probe.version {
                 Some(v) if v.is_supported() => {
                     line(
                         "tmux version",
                         true,
-                        &format!("{v} (>= {} required)", tmux::MIN_SUPPORTED),
+                        &format!("{v} (>= {} for --native-client)", tmux::MIN_SUPPORTED),
                     );
                 }
                 Some(v) => {
-                    ok = false;
                     line(
                         "tmux version",
-                        false,
+                        true,
                         &format!(
-                            "{v} is too old; need >= {}. Try: brew install tmux",
+                            "{v} is too old for --native-client; native tuimux is unaffected; recommended >= {}",
                             tmux::MIN_SUPPORTED
                         ),
                     );
                 }
                 None => {
-                    ok = false;
                     line(
                         "tmux version",
-                        false,
-                        &format!("could not parse `{}`", probe.raw_version),
+                        true,
+                        &format!(
+                            "could not parse `{}`; native tuimux is unaffected",
+                            probe.raw_version
+                        ),
                     );
                 }
             }
         }
         Err(e) => {
-            ok = false;
-            line("tmux binary", false, &e);
-            println!("                  install with: brew install tmux  (macOS) / apt install tmux (Debian)");
+            line(
+                "tmux fallback",
+                true,
+                &format!("not available ({e}); native tuimux does not require tmux"),
+            );
         }
     }
 
     // --- terminal environment ----------------------------------------------
     let term = env::var("TERM").unwrap_or_default();
     let term_ok = !term.is_empty() && term != "dumb";
+    ok &= term_ok;
     line(
         "TERM",
         term_ok,

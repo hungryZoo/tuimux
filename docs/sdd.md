@@ -1,255 +1,321 @@
-# tuimux SDD (Software Design Description)
+# tuimux SDD
 
-- **문서 버전**: 0.10
+- **문서 버전**: 1.0
+- **대상 릴리스**: v0.2.0-alpha.5
 - **작성일**: 2026-06-13
-- **상태**: PTY 기반 터미널 surface 및 tmux mouse pass-through 설계
-- **관련 요구사항**: [docs/srs.md](./srs.md)
-- **참고 구현**: [hungryZoo/tscode](https://github.com/hungryZoo/tscode)의 `portable-pty` + `vt100` terminal pane
-
----
+- **상태**: Rust-native in-process multiplexer 설계
 
 ## 1. 설계 목표
 
-tuimux의 가장 큰 문제는 main pane이 실제 터미널이 아니라 `tmux capture-pane` 결과를 주기적으로 그리는 “터미널처럼 보이는 preview”였다는 점이다. 이 구조는 `clear`, full-screen app, cursor, resize, ANSI style에서 쉽게 깨진다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.5는 default path에서 tmux를 제거하고, tuimux가 직접 PTY child process와 terminal screen model을 소유한다.
 
-새 설계의 목표는 다음과 같다.
+핵심 목표는 다음과 같다.
 
-- tuimux ratatui chrome/sidebar는 유지한다.
-- main pane은 실제 PTY에서 실행되는 tmux client 화면을 렌더한다.
-- output은 byte stream으로 받고 `vt100::Parser`가 screen cell state를 유지한다.
-- input은 `send-keys` 명령이 아니라 PTY writer에 terminal byte sequence로 전달한다.
-- terminal input mode의 mouse event는 Shift modifier를 포함해 tmux mouse protocol로 전달한다.
-- session/window 조작은 기존처럼 tmux command backend를 사용한다.
+- shell/editor/monitor가 실제 PTY 안에서 실행된다.
+- main terminal mode는 host terminal 전체 크기를 child PTY에 제공한다.
+- selection과 clipboard는 host terminal에 가까운 감각으로 동작한다.
+- tmux C 코드는 구조 참고로만 삼고 Rust 모듈로 직접 구현한다.
+- tmux fallback은 hidden `--native-client` 옵션에만 남긴다.
 
----
-
-## 2. 아키텍처 개요
+## 2. 전체 구조
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│ host terminal                                                 │
-│  └─ tuimux process                                            │
-│     ├─ ratatui/crossterm UI loop                              │
-│     │  ├─ main pane renderer                                  │
-│     │  ├─ right sidebar/session dialog                        │
-│     │  └─ keyboard/mouse router                               │
-│     ├─ tmux command backend                                   │
-│     │  ├─ list-sessions/list-windows                          │
-│     │  ├─ new-session/new-window/select-window/kill-window    │
-│     │  └─ native fallback                                     │
-│     └─ embedded terminal                                      │
-│        ├─ portable-pty master/slave                           │
-│        ├─ child: env -u TMUX tmux -u attach-session -t <s>     │
-│        ├─ reader thread -> mpsc<Vec<u8>>                      │
-│        ├─ vt100::Parser screen model                          │
-│        └─ PTY writer for key/paste/mouse bytes                 │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                         tuimux process                          │
+├─────────────────────────────────────────────────────────────────┤
+│ src/main.rs                                                     │
+│   ├─ CLI parse / doctor / layout-preview / tmux fallback         │
+│   └─ tui::run(initial_session, cwd)                              │
+├─────────────────────────────────────────────────────────────────┤
+│ src/tui.rs                                                      │
+│   ├─ ratatui frame rendering                                    │
+│   ├─ terminal mode vs navigation mode                            │
+│   ├─ mouse hit testing / selection state                         │
+│   ├─ Ctrl-C clipboard interception                               │
+│   └─ NativeMux command dispatch                                  │
+├─────────────────────────────────────────────────────────────────┤
+│ src/native_mux.rs                                               │
+│   ├─ sessions: Vec<NativeSession>                                │
+│   ├─ windows: Vec<NativeWindow>                                  │
+│   └─ each NativeWindow owns PtyTerminal                          │
+├─────────────────────────────────────────────────────────────────┤
+│ src/terminal.rs                                                 │
+│   ├─ portable-pty master/slave                                   │
+│   ├─ child shell process                                         │
+│   ├─ reader thread -> mpsc channel                               │
+│   ├─ vt100::Parser screen model                                  │
+│   └─ key/mouse/paste encoding                                    │
+├─────────────────────────────────────────────────────────────────┤
+│ src/clipboard.rs                                                │
+│   └─ pbcopy / wl-copy / xclip / xsel / clip adapters             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
----
+## 3. 모듈 설계
 
-## 3. 주요 컴포넌트
+### 3.1 `src/main.rs`
 
-### 3.1 `src/terminal.rs`
+`main.rs`는 CLI boundary다.
 
-새로운 terminal surface의 핵심 모듈이다.
+- `tuimux` 기본 실행은 `tui::run()`으로 들어간다.
+- `--doctor`는 native runtime 진단을 출력한다.
+- `--layout-preview`는 정적 preview를 출력한다.
+- `--native-client`가 있을 때만 `tmux::probe()`와 tmux fallback을 사용한다.
 
-- `TmuxTerminal`
-  - `portable_pty::native_pty_system().openpty(...)`로 PTY pair를 만든다.
-  - slave에서 `tmux -u attach-session -t <session>`을 실행한다.
-  - Unix에서는 `env -u TMUX`로 부모의 `TMUX` 환경변수를 제거해 nested tmux 경고/오동작을 줄인다.
-  - master reader를 별도 thread에서 읽고 `mpsc::Receiver<Vec<u8>>`로 UI loop에 전달한다.
-  - `vt100::Parser`가 output byte stream을 terminal screen cell로 유지한다.
+tmux가 설치되어 있지 않아도 기본 `tuimux` 실행과 `--doctor`는 성공할 수 있어야 한다.
 
-- `TerminalSpan`, `TerminalStyle`, `TerminalColor`
-  - `vt100::Cell`의 text/style/color를 ratatui가 소비하기 쉬운 중립 구조로 변환한다.
-  - UI layer가 `vt100` crate 세부 타입에 직접 의존하지 않게 한다.
+### 3.2 `src/native_mux.rs`
 
-- 입력 인코딩
-  - 일반 문자, Enter, Backspace, Tab, Esc, arrows, Home/End, PageUp/PageDown, Insert/Delete, F1-F12를 terminal byte sequence로 변환한다.
-  - Ctrl 문자와 일부 control punctuation을 ASCII control byte로 변환한다.
-  - Alt 조합은 ESC prefix를 붙인다.
-  - bracketed paste가 켜져 있으면 paste payload를 bracketed paste sequence로 감싼다.
+`NativeMux`는 현재 알파의 multiplexer core다.
 
-- mouse encoding
-  - child terminal이 mouse protocol을 켠 경우 SGR/default/UTF-8 mouse encoding을 사용해 event를 전달한다.
+```rust
+pub struct NativeMux {
+    sessions: Vec<NativeSession>,
+    active_session: usize,
+    cwd: PathBuf,
+    next_session: u32,
+    next_window_id: u32,
+}
+```
 
-### 3.2 `src/tui.rs`
+각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name과 `PtyTerminal`을 가진다.
 
-ratatui shell과 user interaction을 담당한다.
+주요 동작:
 
-- `UiState`
-  - tmux session/window metadata를 보관한다.
-  - 현재 session에 연결된 `Option<TmuxTerminal>`을 보관한다.
-  - session이 바뀌면 기존 embedded terminal을 drop하고 새 session으로 다시 attach한다.
+- `NativeMux::new()`는 초기 session과 첫 shell window를 생성한다.
+- `create_next_session()`은 `tuimux-<n>` 이름으로 새 session을 만든다.
+- `new_window()`는 active session에 새 shell PTY를 추가한다.
+- `select_window_by_row()`와 `switch_session_by_row()`는 외부 process 없이 active index만 바꾼다.
+- `kill_window_by_row()`는 마지막 window가 제거될 때 replacement shell을 만들어 빈 session을 방지한다.
+- `drain_all()`은 모든 window의 pending PTY output을 parser에 반영한다.
+- `resize_active()`는 active terminal만 host layout 크기에 맞춘다.
 
-- event loop
-  - 매 frame 전 `TmuxTerminal::drain()`으로 PTY output을 parser에 반영한다.
-  - main pane inner rect가 바뀌면 PTY size와 parser size를 함께 resize한다.
-  - tmux metadata는 `capture-pane`처럼 빠르게 polling하지 않고, mutation 이후 또는 느슨한 interval로 갱신한다.
-  - terminal input mode에서는 main pane mouse event를 tmux가 협상한 mouse protocol encoding으로 PTY writer에 전달한다. Shift modifier도 tmux가 일반 mouse input처럼 처리할 수 있게 인코딩한다.
+현재 설계는 in-process다. 따라서 tuimux process가 끝나면 child PTY들도 종료된다.
 
-- renderer
-  - `TmuxTerminal::styled_rows()`를 ratatui `Line/Span`으로 변환한다.
-  - cursor가 hidden이 아니고 session modal이 닫혀 있으면 parser cursor 좌표를 `Frame::set_cursor`에 반영한다.
-  - main pane border는 terminal input mode일 때 green, navigation mode일 때 dark gray로 표시한다.
+### 3.3 `src/terminal.rs`
 
-### 3.3 `src/tmux.rs`
+`PtyTerminal`은 terminal fidelity의 중심이다.
 
-tmux server 상태와 mutation command를 담당한다.
+```rust
+pub struct PtyTerminal {
+    parser: vt100::Parser,
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    rx: Receiver<Vec<u8>>,
+    rows: u16,
+    cols: u16,
+}
+```
 
-- 유지되는 책임
-  - tmux binary/version probe.
-  - session/window list parsing.
-  - session/window create/select/kill.
-  - native fallback 실행.
+생성 흐름:
 
-- 축소된 책임
-- TUI main pane 렌더링을 위한 `capture-pane`, `resize-window`, `send-keys` runtime path는 제거되었다.
+1. `portable_pty::native_pty_system().openpty()`로 PTY pair를 만든다.
+2. slave에서 `$SHELL`을 실행한다.
+3. child 환경에 `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=tuimux`를 설정한다.
+4. master reader는 background thread에서 읽고 `mpsc` channel로 bytes를 보낸다.
+5. UI loop는 `drain()`으로 bytes를 받아 `vt100::Parser::process()`에 넣는다.
 
----
+렌더링:
 
-## 4. 데이터 흐름
+- `styled_rows_with_selection(selection)`은 vt100 cell을 `TerminalSpan`으로 변환한다.
+- fg/bg가 default일 때 ratatui default color를 그대로 사용해 host terminal color를 보존한다.
+- selection cell은 inverse bit를 토글해 시각적으로 강조한다.
+- wide continuation cell은 중복 렌더하지 않는다.
 
-### 4.1 Output path
+입력:
+
+- `send_key()`는 crossterm `KeyEvent`를 xterm-compatible byte sequence로 변환한다.
+- Ctrl 문자, Alt prefix, arrow/application cursor, function key, delete/page key를 처리한다.
+- `send_paste()`는 bracketed paste mode를 감지해 paste wrapper를 적용한다.
+- `send_mouse_event()`는 child가 mouse protocol을 활성화한 경우에만 SGR/normal mouse sequence를 전달한다.
+
+### 3.4 `src/tui.rs`
+
+`tui.rs`는 UI state, rendering, input routing을 담당한다.
+
+```rust
+struct UiState {
+    session_modal_open: bool,
+    hover: Option<Hotspot>,
+    regions: Regions,
+    mux: NativeMux,
+    sessions: Vec<Session>,
+    windows: Vec<Window>,
+    current_session: String,
+    status: Option<String>,
+    terminal_error: Option<String>,
+    terminal_mode: bool,
+    selection: Option<SelectionState>,
+}
+```
+
+두 가지 mode가 있다.
+
+- **Terminal mode**: 첫 화면이자 기본 mode. terminal body가 전체 frame을 차지한다. 키 입력은 기본적으로 active PTY로 간다.
+- **Navigation mode**: `F12`로 진입한다. main pane border와 right sidebar가 보이고 session/window 조작을 할 수 있다.
+
+Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x24 host에서 sidebar 때문에 52x22 같은 작은 PTY를 받지 않도록 하기 위해서다.
+
+### 3.5 Selection
+
+선택 state는 anchor/focus/dragging으로 구성된다.
+
+```rust
+struct SelectionState {
+    anchor: (u16, u16),
+    focus: (u16, u16),
+    dragging: bool,
+}
+```
+
+동작:
+
+- child mouse protocol이 꺼져 있으면 left down/drag/up이 tuimux selection을 만든다.
+- child mouse protocol이 켜져 있으면 normal mouse는 child로 전달한다.
+- child mouse protocol이 켜져 있어도 Shift-left-drag는 tuimux selection을 만든다.
+- mouse-up은 selection을 종료하지만 selection 자체를 지우지 않는다.
+- selection이 zero-width이면 지운다.
+- 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C copy는 selection을 유지한다.
+
+### 3.6 Ctrl-C 처리
+
+terminal mode에서 Ctrl-C는 다음 순서로 처리된다.
+
+1. `selection_range()`가 있는지 확인한다.
+2. selection이 있으면 active terminal에서 `selected_text()`를 추출한다.
+3. `clipboard::copy_text()`로 system clipboard에 복사한다.
+4. 복사 성공 시 Ctrl-C byte를 PTY로 보내지 않는다.
+5. selection이 없으면 일반 Ctrl-C byte를 PTY로 보낸다.
+
+이 설계는 macOS 기본 Terminal처럼 “텍스트를 선택한 상태의 Ctrl-C는 복사”라는 동작을 우선한다.
+
+### 3.7 Clipboard
+
+별도 Rust clipboard crate를 추가하지 않고 platform command를 사용한다.
+
+- macOS: `pbcopy`
+- Windows: `clip`
+- Linux: `wl-copy`, `xclip -selection clipboard`, `xsel --clipboard --input`
+
+command가 없거나 실패하면 UI status에 error를 표시하고 panic하지 않는다.
+
+## 4. 주요 흐름
+
+### 4.1 시작
 
 ```text
-tmux client inside PTY
-  -> PTY master reader thread
-  -> mpsc channel
-  -> UiState::sync_terminal()
-  -> TmuxTerminal::drain()
-  -> vt100::Parser::process(bytes)
-  -> TmuxTerminal::styled_rows()
-  -> ratatui Paragraph/Span render
+main()
+  -> parse CLI
+  -> tui::run(session, cwd)
+  -> UiState::bootstrap()
+  -> NativeMux::new()
+  -> PtyTerminal::new_shell()
+  -> ratatui raw mode + alternate screen
 ```
 
-이 경로는 screen state를 누적 유지한다. 따라서 `clear`처럼 “기존 글자를 지우는” escape sequence도 parser가 cell state에 반영한다.
-
-### 4.2 Input path
+### 4.2 렌더 루프
 
 ```text
-crossterm Event::Key / Event::Paste / Event::Mouse
-  -> tui event router
-  -> terminal input mode 여부 확인
-  -> key/paste/mouse byte encoding
-  -> PTY writer
-  -> tmux client
-  -> active tmux pane/shell
+loop
+  -> state.sync_terminal(current terminal_body size)
+  -> mux.resize_active(width, height)
+  -> mux.drain_all()
+  -> terminal.draw(ui)
+  -> crossterm event poll/read
 ```
 
-terminal input mode에서 Ctrl-C는 tuimux 종료가 아니라 shell/tmux client로 전달된다. navigation mode에서는 기존처럼 Ctrl-C, q, Esc가 tuimux 종료 shortcut이다.
+terminal mode에서 `terminal_body`는 root frame 전체다. navigation mode에서는 main pane과 sidebar layout으로 나뉜다.
 
-### 4.3 Session switch path
+### 4.3 Key Input
 
 ```text
-session dialog row click
-  -> state.current_session = selected
-  -> drop old TmuxTerminal
-  -> next sync_terminal()
-  -> spawn new PTY tmux client attached to selected session
+crossterm KeyEvent
+  -> F12이면 mode toggle
+  -> terminal_mode이면 UiState::send_terminal_key()
+     -> Ctrl-C + selection이면 clipboard copy
+     -> 아니면 PtyTerminal::send_key()
+  -> navigation mode이면 sidebar/session shortcut 처리
 ```
 
-이 방식은 tuimux가 tmux 안에서 실행 중이어도 바깥 tmux client를 `switch-client`하지 않는다. 사용자가 보고 조작하는 것은 tuimux 내부 main pane이다.
+### 4.4 Mouse Input
 
----
-
-## 5. Resize 설계
-
-ratatui layout은 main pane의 border를 포함한 `Rect`를 만든다. 실제 terminal surface는 border 안쪽 `inner Rect`만 사용한다.
-
-- renderer가 `regions.terminal_body`에 inner rect를 기록한다.
-- 다음 loop에서 `sync_terminal(width, height)`가 이 값을 읽는다.
-- `TmuxTerminal::resize(width, height)`는 다음을 함께 수행한다.
-  - `vt100::Parser::screen_mut().set_size(rows, cols)`
-  - `portable_pty::MasterPty::resize(PtySize { rows, cols, ... })`
-
-이 구조는 tmux client가 실제 PTY resize를 받게 하므로 wrapping, full-screen app redraw, prompt 위치가 기존 `resize-window` + `capture-pane` 조합보다 자연스럽다.
-
----
-
-## 6. Error/cleanup 설계
-
-- stdout이 TTY가 아니면 interactive UI를 시작하지 않는다.
-- setup은 raw mode, alternate screen, mouse capture를 켠다.
-- restore는 raw mode 해제, alternate screen leave, mouse capture 해제, cursor 표시를 수행한다.
-- `TmuxTerminal`은 drop 시 child tmux client를 kill한다. tmux server/session은 종료하지 않는다.
-- embedded terminal spawn 실패 시 main pane에 error message를 표시하고 tuimux UI는 계속 유지한다.
-
----
-
-## 7. 설치/릴리즈 설계
-
-- `scripts/install.sh`
-  - macOS와 Linux에서 동작한다.
-  - OS/architecture를 release target triple로 변환한다.
-  - macOS: `aarch64-apple-darwin`, `x86_64-apple-darwin`
-  - Linux: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`
-  - release tarball과 `SHA256SUMS`를 내려받아 checksum을 검증한다.
-  - `TUIMUX_TMUX_CONF` 또는 기본 `~/.tmux.conf`에 활성 `mouse`/`history-limit` 설정이 없으면 다음을 추가한다.
-
-```tmux
-set -g mouse on
-set -g history-limit 100000
+```text
+crossterm MouseEvent
+  -> terminal cell 좌표로 변환
+  -> child mouse protocol 상태 확인
+  -> selection gesture이면 selection state 갱신
+  -> terminal mode이면 child PTY로 mouse event 전달
+  -> navigation mode이면 hit_test로 sidebar/modal action 처리
 ```
 
-- `scripts/install.ps1`
-  - Windows x86_64/arm64 zip asset을 설치한다.
-  - 기본 설치 위치는 `%LOCALAPPDATA%\Programs\tuimux\bin`이다.
-  - Windows에서도 tmux는 별도 런타임 의존성이다.
+### 4.5 Window 생성
 
-- `.github/workflows/release.yml`
-  - macOS tarball: x86_64, arm64
-  - Windows zip: x86_64, arm64
-  - Linux tarball: x86_64, arm64, armv7
-  - `.deb`: amd64, arm64, armhf
-  - `.rpm`: x86_64, aarch64, armv7hl
-  - Raspberry Pi는 64-bit OS에서 Linux arm64 asset, 32-bit OS에서 Linux armv7/armhf asset을 사용한다.
+```text
+sidebar + new
+  -> NativeMux::new_window(width, height)
+  -> PtyTerminal::new_shell()
+  -> active_window = new window
+  -> metadata refresh
+```
 
----
+### 4.6 Session 전환
 
-## 8. 왜 control-mode가 아닌가
+```text
+session modal row click
+  -> NativeMux::switch_session_by_row(row)
+  -> active_session = row
+  -> active terminal render source changes
+```
 
-장기적으로 가장 정교한 방향은 `tmux -CC` control-mode client다. control-mode는 pane output event, layout event, window/session event를 protocol 단위로 받을 수 있다.
+외부 tmux client나 host terminal은 전환하지 않는다.
 
-이번 설계는 다음 이유로 PTY embedded tmux client를 먼저 선택한다.
+## 5. 테스트 전략
 
-- 사용자가 지적한 핵심 문제는 “가짜 터미널처럼 보임”이며, PTY + VT parser가 이 문제를 즉시 줄인다.
-- `hungryZoo/tscode`에서 검증된 구조와 동일한 기반을 재사용할 수 있다.
-- 현재 tuimux의 sidebar/session/window command 구조를 크게 흔들지 않는다.
-- tmux option을 영구 변경하지 않고도 native tmux rendering fidelity를 얻는다.
+### 5.1 자동 테스트
 
-단, control-mode 전환을 막지 않도록 `src/terminal.rs`를 독립 모듈로 두었다. 향후 `ControlModeTerminal`을 같은 interface로 추가하면 renderer와 input router를 크게 바꾸지 않고 교체할 수 있다.
+- version parser와 legacy tmux fallback argument tests.
+- doctor의 `TERM` handling tests.
+- native mux session/window metadata tests.
+- layout preview deterministic output tests.
+- terminal key/mouse encoder unit tests.
 
----
+### 5.2 수동 PTY smoke
 
-## 9. 테스트 전략
+macOS Apple Silicon에서 다음을 확인한다.
 
-### 현재 자동화
+- `tuimux --session smoke`가 native shell을 연다.
+- `printf 'tuimux-native-smoke\n'`가 shell에서 실행된다.
+- mouse drag selection이 mouse-up 이후 유지된다.
+- selection 상태 Ctrl-C 후 `pbpaste`가 선택 텍스트를 반환한다.
+- `btop`이 80x24에서 terminal too small 없이 열린다.
+- `htop`이 full-screen UI로 열린다.
+- `nano`가 열리고 Ctrl-X prompt가 정상 처리된다.
+- `llmfit --help`가 PTY surface 안에서 표시된다.
 
-- tmux version parser.
-- tmux command argument builder.
-- run mode selection.
-- layout preview.
-- hit testing.
-- terminal key encoding.
-- terminal mouse encoding.
-- terminal style 변환(default fg/bg 보존, reverse modifier).
-- installer `.tmux.conf` idempotency.
+## 6. 릴리스 설계
 
-### 추가 권장 테스트
+v0.2.0-alpha.5는 macOS Apple Silicon만 대상으로 한다.
 
-- PTY smoke test: `tuimux` 실행 후 `Session`, `Detach`, `WINDOWS`와 shell prompt가 함께 보이는지 확인.
-- clear test: `printf 'AAAAA\nBBBBB\n'; clear` 후 이전 output이 main pane에 없는지 확인.
-- color test: 16색/256색/truecolor sample 출력.
-- resize test: PTY 크기 변경 후 border/sidebar/terminal wrapping 확인.
-- fullscreen test: `less`, `top`, `vim` 진입/종료 확인.
+- GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.5-aarch64-apple-darwin.tar.gz`다.
+- `SHA256SUMS`를 같이 게시한다.
+- installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
+- installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
 
----
+설치 명령:
 
-## 10. 알려진 trade-off
+```sh
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.5/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.5 bash
+```
 
-- embedded tmux client는 tmux statusline까지 그릴 수 있다. v0.10에서는 사용자의 tmux option을 강제로 바꾸지 않는 쪽을 선택했다.
-- main pane이 “active pane만”이 아니라 tmux client 화면 전체를 보여준다. 이는 terminal fidelity를 우선한 선택이다.
-- control-mode보다 session/window event 정밀도는 낮다. metadata는 command polling과 mutation 이후 refresh로 보정한다.
-- snapshot 기반 terminal emulation test는 제거되었고, terminal key/mouse encoding test는 `src/terminal.rs`가 담당한다.
+## 7. 알려진 한계와 다음 단계
+
+- 현재 mux는 in-process라서 UI 종료 시 child PTY도 종료된다.
+- `Detach`는 tmux의 detach와 동등하지 않다.
+- split panes가 없다.
+- session/window 상태가 disk나 daemon에 저장되지 않는다.
+- true persistent multiplexer가 되려면 별도 server process, Unix socket protocol, attach client, PTY ownership transfer 정책이 필요하다.
+
+다음 큰 단계는 `tuimux-server`를 별도 daemon으로 분리하고, 현재 `NativeMux`를 server-side state machine으로 옮기는 것이다.

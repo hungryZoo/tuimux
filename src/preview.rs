@@ -1,13 +1,13 @@
 //! Simplified layout preview (SRS §5.1).
 //!
-//! Renders the tuimux screen as a static text preview: a center tmux pane area,
+//! Renders the tuimux screen as a static text preview: a center terminal area,
 //! a compact right sidebar with a button-like session name, a red Detach button,
 //! vertical window tabs, and a centered session dialog scaffold. The early
 //! explorer, bottom menu bar, and PROCS panel were intentionally removed.
 
 use std::path::Path;
 
-/// Preview content. The live client reads equivalent data from tmux commands;
+/// Preview content. The live client derives equivalent data from NativeMux;
 /// this static data keeps --layout-preview reproducible.
 pub struct PreviewData {
     pub sessions: Vec<(&'static str, u32, bool)>, // (name, windows, active)

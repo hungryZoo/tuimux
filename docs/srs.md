@@ -1,177 +1,130 @@
-# tuimux SRS (Software Requirements Specification)
+# tuimux SRS
 
-- **문서 버전**: 0.10
+- **문서 버전**: 1.0
+- **대상 릴리스**: v0.2.0-alpha.5
 - **작성일**: 2026-06-13
-- **상태**: PTY 기반 터미널 surface 및 tmux mouse pass-through 보정 명세
-- **프로젝트명**: tuimux
-- **상위 문서**: [docs/prd.md](./prd.md)
-- **설계 문서**: [docs/sdd.md](./sdd.md)
-- **한 줄 요약**: `tuimux`는 ratatui UI를 기본으로 유지하면서, main pane을 `capture-pane` 스냅샷이 아닌 실제 PTY + VT screen model 기반 터미널로 렌더해야 한다.
+- **상태**: Rust-native in-process multiplexer 알파 명세
 
----
+## 1. 목적
 
-## 1. 범위
+tuimux는 더 이상 기본 실행 경로에서 tmux server/client에 의존하지 않는다. 사용자가 `tuimux`를 실행하면 tuimux 프로세스가 직접 세션, 윈도우, PTY child process, 터미널 screen model, 입력 라우팅, 선택/복사 흐름을 관리해야 한다.
 
-### 포함
+tmux의 C 코드는 세션/윈도우 개념, PTY ownership, 입력 라우팅, mouse mode 처리의 참고 구현으로만 사용한다. 제품 코드는 Rust로 직접 구현한다.
 
-- 인자 없는 `tuimux` 실행 시 ratatui 기반 tuimux TUI 시작.
-- tmux server/session/window 조작은 실제 tmux backend를 사용.
-- main pane은 별도 PTY에서 실행한 real tmux client output을 `vt100::Parser`로 해석해 렌더.
-- `clear`, ANSI color/style, resize, cursor, alternate screen app에 대한 기본 terminal fidelity 개선.
-- right sidebar의 Session, Detach, WINDOWS, `+ new`, window close UX 유지.
-- session dialog에서 session 선택 시 embedded tmux client를 해당 session으로 재attach.
-- terminal input mode의 mouse event는 Shift modifier를 포함해 tmux mouse protocol로 전달한다.
-- Unix 계열 설치 스크립트는 `.tmux.conf`에 `mouse on`, `history-limit 100000` 설정이 없을 때만 추가한다.
-- GitHub prerelease는 macOS, Windows, Linux tarball, Linux `.deb`/`.rpm`, Raspberry Pi용 Linux ARM asset을 제공한다.
-- `--native-client`, `--doctor`, `--version`, `--layout-preview` 유지.
-- 한국어 SRS/SDD 문서 유지.
+## 2. 범위
 
-### 제외
+### 2.1 포함 범위
 
-- v0.10에서 iTerm2 수준의 full `tmux -CC` control-mode client 구현.
-- tmux pane split 전체를 tuimux 레이아웃으로 재구성하는 기능.
-- tmux statusline/옵션을 영구 변경하는 방식의 UI 통합.
-- native tmux client를 기본 UX로 되돌리는 변경.
+- Rust-native 세션 목록과 활성 세션 관리.
+- Rust-native 윈도우 목록, 생성, 선택, 종료.
+- 각 윈도우별 실제 PTY-backed shell 실행.
+- `vt100` parser 기반 screen model 렌더링.
+- ratatui 기반 TUI chrome, navigation/sidebar mode, terminal fullscreen mode.
+- mouse drag selection, mouse-up 이후 선택 유지.
+- 선택 영역이 있을 때 Ctrl-C를 child process SIGINT가 아니라 system clipboard copy로 처리.
+- paste event를 active PTY로 전달하되 bracketed paste mode를 존중.
+- child application이 mouse tracking을 켠 경우 normal mouse는 child로 전달하고, Shift-drag는 tuimux selection으로 처리.
+- tmux는 hidden `--native-client` fallback에서만 사용.
+- macOS Apple Silicon 프리릴리즈 설치 스크립트.
 
----
+### 2.2 제외 범위
 
-## 2. 기능 요구사항
+- tmux와 동일한 persistent daemon/server.
+- detach 이후에도 session/process가 살아남는 기능.
+- split pane layout.
+- tmux plugin/config 호환성.
+- tmux command language 호환성.
+- tmux control-mode protocol 구현.
+- Windows/Linux 프리릴리즈 asset.
 
-### 2.1 CLI
+현재 `Detach`는 영속 detach가 아니라 tuimux UI 종료에 가깝다. 영속 세션은 다음 backend 단계의 P0 후보다.
 
-- **FR-CLI-1 [P0]** `tuimux`는 기본적으로 tuimux ratatui TUI를 실행해야 한다.
-- **FR-CLI-2 [P0]** `tuimux --native-client`를 지정한 경우에만 plain native tmux client fallback을 실행해야 한다.
-- **FR-CLI-3 [P0]** `tuimux --doctor`는 tmux 설치/버전/TERM/truecolor/TMUX 여부를 진단해야 한다.
-- **FR-CLI-4 [P1]** `tuimux --layout-preview`는 non-interactive 환경에서 레이아웃 preview를 출력해야 한다.
-- **FR-CLI-5 [P0]** stdout이 TTY가 아니면 raw mode/alternate screen에 진입하지 않고 안내 메시지와 non-zero exit code를 반환해야 한다.
+## 3. 기능 요구사항
 
-### 2.2 TUI shell
+### 3.1 CLI
 
-- **FR-TUI-1 [P0]** TUI는 crossterm raw mode, alternate screen, mouse capture를 사용해야 한다.
-- **FR-TUI-2 [P0]** tmux server/session이 없으면 detached `tuimux` session을 생성해야 한다.
-- **FR-TUI-3 [P0]** 오른쪽 sidebar는 Session button, Detach button, WINDOWS list, `+ new` row를 렌더해야 한다.
-- **FR-TUI-4 [P0]** session dialog는 session rows, `New Session`, `Detach` action을 제공해야 한다.
-- **FR-TUI-5 [P0]** window row의 close target은 `tmux kill-window`를 실행해야 한다.
-- **FR-TUI-6 [P0]** window 선택과 생성은 `tmux select-window`, `tmux new-window`를 통해 실제 tmux server에 반영되어야 한다.
+- **FR-CLI-1 [P0]** 인자 없는 `tuimux`는 Rust-native tuimux TUI를 실행해야 한다.
+- **FR-CLI-2 [P0]** `--native-client`를 지정한 경우에만 plain tmux client fallback을 실행해야 한다.
+- **FR-CLI-3 [P0]** `--doctor`는 tmux 부재를 실패로 처리하지 않아야 한다.
+- **FR-CLI-4 [P0]** `--doctor`는 `TERM`이 비어 있거나 `dumb`이면 실패해야 한다.
+- **FR-CLI-5 [P1]** `--layout-preview`는 CI/문서 확인용 정적 preview를 출력해야 한다.
 
-### 2.3 Main Terminal Surface
+### 3.2 Native Multiplexer
 
-- **FR-TERM-1 [P0]** main pane은 별도 PTY 안에서 `tmux -u attach-session -t <session>`을 실행한 real tmux client의 화면을 표시해야 한다.
-- **FR-TERM-2 [P0]** PTY output byte stream은 `vt100::Parser`로 처리해 terminal screen cell state를 유지해야 한다.
-- **FR-TERM-3 [P0]** main pane 렌더링은 `capture-pane` 반복 polling에 의존하면 안 된다.
-- **FR-TERM-4 [P0]** `clear`, `reset`, `tput clear`, CSI clear sequence 이후 지워진 cell에 이전 glyph가 남으면 안 된다.
-- **FR-TERM-5 [P0]** 16색, bold, dim, italic, underline, reverse style을 가능한 범위에서 ratatui style로 변환해야 한다.
-- **FR-TERM-6 [P1]** 256색과 truecolor foreground/background를 지원하되, terminal default foreground/background는 host terminal 기본값을 덮어쓰면 안 된다.
-- **FR-TERM-7 [P0]** terminal cursor 위치와 cursor hidden state를 `vt100` screen model에서 읽어 main pane 안에 반영해야 한다.
-- **FR-TERM-8 [P0]** host terminal resize 시 main pane inner rect 크기를 PTY size와 `vt100` parser size에 동기화해야 한다.
-- **FR-TERM-9 [P1]** terminal app이 mouse protocol을 활성화하면 main pane mouse event를 child terminal로 전달해야 한다.
-- **FR-TERM-10 [P1]** bracketed paste가 활성화된 경우 paste payload를 `\x1b[200~`/`\x1b[201~`로 감싸 전달해야 한다.
-- **FR-TERM-11 [P0]** terminal input mode에서 Shift를 포함한 mouse modifier는 child tmux terminal의 mouse protocol 인코딩에 반영되어야 한다.
+- **FR-MUX-1 [P0]** tuimux는 시작 시 초기 session 하나와 shell window 하나를 직접 생성해야 한다.
+- **FR-MUX-2 [P0]** session 생성은 외부 tmux 명령 없이 `NativeMux` 상태와 PTY child process를 생성해야 한다.
+- **FR-MUX-3 [P0]** session 선택은 active session index만 변경하고 host terminal이나 외부 tmux client를 조작하지 않아야 한다.
+- **FR-MUX-4 [P0]** window 생성은 active session에 새 PTY-backed shell을 추가해야 한다.
+- **FR-MUX-5 [P0]** window 선택은 active window를 변경하고 해당 window의 screen을 렌더해야 한다.
+- **FR-MUX-6 [P0]** 마지막 window를 종료하면 session이 비어 panic하지 않도록 replacement shell window를 만들어야 한다.
+- **FR-MUX-7 [P1]** 모든 session/window metadata는 in-memory native state에서 파생되어야 한다.
 
-### 2.4 Input Mode
+### 3.3 PTY Terminal
 
-- **FR-IN-1 [P0]** main pane 클릭 시 terminal input mode에 진입해야 한다.
-- **FR-IN-2 [P0]** terminal input mode에서 일반 문자, Enter, Backspace, Delete, Tab, arrows, Home/End, PageUp/PageDown, function key를 PTY byte sequence로 전달해야 한다.
-- **FR-IN-3 [P0]** Ctrl-C, Ctrl-D, Ctrl-L 같은 shell control key는 terminal input mode에서 shell/tmux client로 전달되어야 한다.
-- **FR-IN-4 [P0]** F12는 terminal input mode를 종료하고 navigation mode로 돌아와야 한다.
-- **FR-IN-5 [P0]** navigation mode에서 `q`, `Esc`, Ctrl-C는 tuimux 종료로 처리되어야 한다.
+- **FR-TERM-1 [P0]** 각 window는 real PTY를 소유해야 한다.
+- **FR-TERM-2 [P0]** PTY child는 사용자의 `$SHELL`을 현재 작업 디렉터리에서 실행해야 한다.
+- **FR-TERM-3 [P0]** child 환경에는 `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=tuimux`를 제공해야 한다.
+- **FR-TERM-4 [P0]** PTY output은 byte stream 그대로 `vt100::Parser`에 입력해야 한다.
+- **FR-TERM-5 [P0]** 화면 렌더링은 cell별 fg/bg, bold, dim, italic, underline, inverse를 보존해야 한다.
+- **FR-TERM-6 [P0]** default foreground/background는 강제로 칠하지 않아 host terminal의 native color 느낌을 유지해야 한다.
+- **FR-TERM-7 [P0]** terminal mode에서는 main terminal body가 host TUI 전체 크기를 사용해야 한다.
+- **FR-TERM-8 [P0]** host resize 시 active PTY size와 parser screen size를 같이 갱신해야 한다.
+- **FR-TERM-9 [P0]** full-screen TUI 앱의 alternate screen, cursor visibility, mouse tracking escape sequence를 보존해야 한다.
 
-### 2.5 Session 전환
+### 3.4 입력과 마우스
 
-- **FR-SESS-1 [P0]** session dialog에서 session을 선택하면 tuimux host process가 바깥 tmux client를 `switch-client`하지 않아야 한다.
-- **FR-SESS-2 [P0]** session 선택 시 embedded tmux terminal을 종료하고 선택 session에 새 PTY tmux client를 attach해야 한다.
-- **FR-SESS-3 [P0]** session/window metadata는 tmux command output을 주기적으로 또는 mutation 이후 갱신해야 한다.
+- **FR-IN-1 [P0]** terminal mode의 일반 키 입력은 active PTY로 전달해야 한다.
+- **FR-IN-2 [P0]** navigation mode에서는 `F12`, `q`, `Esc`, sidebar mouse action 등 tuimux chrome 조작을 처리해야 한다.
+- **FR-IN-3 [P0]** `F12`는 terminal mode와 navigation/sidebar mode를 전환해야 한다.
+- **FR-IN-4 [P0]** 선택 영역이 없을 때 Ctrl-C는 active PTY로 전달되어 실행 중 프로그램의 일반 Ctrl-C로 동작해야 한다.
+- **FR-IN-5 [P0]** 선택 영역이 있을 때 Ctrl-C는 선택 텍스트를 system clipboard에 복사하고 PTY로 Ctrl-C를 보내지 않아야 한다.
+- **FR-IN-6 [P0]** mouse-up 이후 선택 영역은 자동으로 사라지지 않아야 한다.
+- **FR-IN-7 [P0]** child가 mouse protocol을 켜지 않은 상태에서는 left drag가 tuimux selection을 시작해야 한다.
+- **FR-IN-8 [P0]** child가 mouse protocol을 켠 상태에서는 normal mouse를 child로 보내야 한다.
+- **FR-IN-9 [P0]** child mouse protocol 활성 상태에서도 Shift-left-drag는 tuimux selection을 시작해야 한다.
+- **FR-IN-10 [P1]** paste event는 bracketed paste mode가 활성일 때 `ESC [ 200 ~` / `ESC [ 201 ~`로 감싸야 한다.
 
-### 2.6 Native fallback
+### 3.5 Clipboard
 
-- **FR-NATIVE-1 [P0]** `--native-client`는 명시적으로 요청한 경우에만 target session을 ensure하고 native tmux client를 실행해야 한다.
-- **FR-NATIVE-2 [P0]** tmux 밖에서는 `tmux -u attach-session -t <session>`을 실행해야 한다.
-- **FR-NATIVE-3 [P0]** tmux 안에서는 nested attach 대신 `tmux switch-client -t <session>`을 실행해야 한다.
+- **FR-CLIP-1 [P0]** macOS에서는 `pbcopy`로 system clipboard에 복사해야 한다.
+- **FR-CLIP-2 [P1]** Linux에서는 `wl-copy`, `xclip`, `xsel` 순서로 가능한 clipboard command를 사용해야 한다.
+- **FR-CLIP-3 [P1]** Windows에서는 `clip`을 사용할 수 있어야 한다.
+- **FR-CLIP-4 [P0]** clipboard command 실패는 panic이 아니라 status message로 알려야 한다.
 
-### 2.7 Installer / Release
+### 3.6 설치와 릴리스
 
-- **FR-INSTALL-1 [P0]** `scripts/install.sh`는 macOS와 Linux에서 실행 가능해야 한다.
-- **FR-INSTALL-2 [P0]** `scripts/install.sh`는 OS/architecture를 감지해 macOS x86_64/arm64, Linux x86_64/arm64/armv7 tarball asset을 설치해야 한다.
-- **FR-INSTALL-3 [P0]** `scripts/install.sh`는 `.tmux.conf`에 활성 `mouse` 설정이 없으면 `set -g mouse on`을 추가해야 한다.
-- **FR-INSTALL-4 [P0]** `scripts/install.sh`는 `.tmux.conf`에 활성 `history-limit` 설정이 없으면 `set -g history-limit 100000`을 추가해야 한다.
-- **FR-INSTALL-5 [P0]** `scripts/install.ps1`는 Windows x86_64/arm64 zip asset을 설치해야 한다.
-- **FR-REL-1 [P0]** tag push release workflow는 macOS x86_64/arm64 tarball을 생성해야 한다.
-- **FR-REL-2 [P0]** tag push release workflow는 Windows x86_64/arm64 zip을 생성해야 한다.
-- **FR-REL-3 [P0]** tag push release workflow는 Linux x86_64/arm64/armv7 tarball을 생성해야 한다.
-- **FR-REL-4 [P0]** tag push release workflow는 Debian/Ubuntu용 amd64/arm64/armhf `.deb`를 생성해야 한다.
-- **FR-REL-5 [P0]** tag push release workflow는 RPM 계열용 x86_64/aarch64/armv7hl `.rpm`을 생성해야 한다.
-- **FR-REL-6 [P0]** release는 모든 artifact에 대한 `SHA256SUMS`를 제공해야 한다.
+- **FR-REL-1 [P0]** v0.2.0-alpha.5 프리릴리즈는 macOS Apple Silicon tarball만 게시한다.
+- **FR-REL-2 [P0]** `scripts/install.sh`는 macOS Apple Silicon 외의 OS/architecture에서 명확히 실패해야 한다.
+- **FR-REL-3 [P0]** installer는 tmux 설치를 요구하거나 `.tmux.conf`를 수정하지 않아야 한다.
+- **FR-REL-4 [P0]** installer는 release asset checksum이 있으면 검증해야 한다.
 
----
+## 4. 비기능 요구사항
 
-## 3. 비기능 요구사항
+- **NFR-UX-1 [P0]** terminal mode는 “가짜 터미널 preview”처럼 보이지 않아야 하며, shell/editor/monitor 프로그램이 실제 PTY 안에서 실행되어야 한다.
+- **NFR-UX-2 [P0]** `btop`, `htop`, `nano` 같은 full-screen 앱은 80x24 host에서 크기 부족 오류 없이 실행되어야 한다.
+- **NFR-UX-3 [P0]** 선택/복사는 macOS 기본 Terminal에 가깝게 동작해야 한다.
+- **NFR-COMPAT-1 [P0]** macOS Terminal.app / iTerm2 계열 xterm-compatible host에서 동작해야 한다.
+- **NFR-PERF-1 [P1]** idle loop는 과도한 external command polling을 수행하지 않아야 한다.
+- **NFR-ROBUST-1 [P0]** child PTY read error나 process 종료가 tuimux panic으로 이어지면 안 된다.
+- **NFR-OBS-1 [P1]** doctor 출력에서 native tuimux가 tmux를 요구하지 않는다는 사실이 드러나야 한다.
 
-- **NFR-FIDELITY-1 [P0]** main pane은 “text preview”처럼 보이면 안 되며, terminal screen state를 지속적으로 유지해야 한다.
-- **NFR-SAFE-1 [P0]** 종료, detach, panic path 이후 raw mode, alternate screen, mouse capture, cursor 상태를 복구해야 한다.
-- **NFR-PERF-1 [P1]** idle 상태에서 과도한 tmux command polling을 수행하지 않아야 한다.
-- **NFR-PERF-2 [P1]** output이 빠르게 들어와도 UI input loop가 장시간 멈추면 안 된다.
-- **NFR-COMPAT-1 [P0]** macOS, Linux, Raspberry Pi OS의 xterm-compatible terminal에서 동작해야 한다.
-- **NFR-COMPAT-1A [P1]** Windows binary는 빌드/배포하되, 런타임은 PATH에서 접근 가능한 tmux 환경(MSYS2/Cygwin/WSL interop 등)을 요구한다.
-- **NFR-COMPAT-2 [P0]** minimum tmux version은 `tmux 3.0` 이상으로 유지한다.
-- **NFR-DOC-1 [P0]** 문서는 한국어로 새 구조와 알려진 한계를 설명해야 한다.
+## 5. 수용 기준
 
----
+- **AC-1 [P0]** `cargo test`가 통과한다.
+- **AC-2 [P0]** `TERM=xterm-256color tuimux --doctor`가 0으로 종료한다.
+- **AC-3 [P0]** `TERM=dumb tuimux --doctor`가 non-zero로 종료한다.
+- **AC-4 [P0]** `tuimux` 실행 시 tmux attach 화면이 아니라 tuimux native UI가 뜬다.
+- **AC-5 [P0]** terminal mode에서 `printf 'hello\n'` 입력이 active shell에서 실행된다.
+- **AC-6 [P0]** `btop`이 80x24 host에서 “terminal too small” 오류 없이 열린다.
+- **AC-7 [P0]** `htop`이 full-screen UI로 열린 뒤 `q`로 종료된다.
+- **AC-8 [P0]** `nano`가 열리고 입력, Ctrl-X, 저장 여부 prompt가 정상 처리된다.
+- **AC-9 [P0]** `llmfit --help` 출력이 native PTY surface 안에서 깨지지 않고 표시된다.
+- **AC-10 [P0]** mouse drag로 선택한 텍스트가 mouse-up 이후 남아 있다.
+- **AC-11 [P0]** 선택 영역이 있을 때 Ctrl-C 후 macOS `pbpaste`가 선택 텍스트를 반환한다.
+- **AC-12 [P0]** 선택 영역이 있을 때 Ctrl-C가 shell에 SIGINT를 보내지 않는다.
+- **AC-13 [P0]** `cargo build --release --locked --target aarch64-apple-darwin`가 성공한다.
+- **AC-14 [P0]** macOS ARM installer가 `tuimux --version`과 `tuimux --doctor` 검증 안내를 출력한다.
 
-## 4. tmux command 명세
+## 6. 변경 이력
 
-```text
-TUI bootstrap/state:
-  tmux list-sessions -F '#{session_name}\t#{session_windows}\t#{session_attached}'
-  tmux new-session -d -s tuimux
-  tmux list-windows -t <session> -F '#{window_index}\t#{window_name}\t#{window_active}'
-
-Embedded terminal:
-  env -u TMUX tmux -u attach-session -t <session>   # Unix PTY child
-
-TUI mutations:
-  tmux select-window -t <session>:<index>
-  tmux new-window -t <session>
-  tmux kill-window -t <session>:<index>
-  tmux new-session -d -s <name>
-
-Native fallback only:
-  tmux set-option -gq mouse on
-  tmux -u attach-session -t <session>               # outside tmux
-  tmux switch-client -t <session>                   # inside tmux
-```
-
----
-
-## 5. 인수 기준
-
-- **AC-1 [P0]** `cargo test --quiet`가 통과한다.
-- **AC-2 [P0]** `cargo fmt -- --check`가 통과한다.
-- **AC-3 [P0]** `tuimux` 기본 run mode는 ratatui TUI이며 `--native-client`에서만 native fallback을 선택한다.
-- **AC-4 [P0]** main pane은 PTY-backed terminal surface로 동작하고 `capture-pane` 렌더링 경로를 사용하지 않는다.
-- **AC-5 [P0]** `clear`/Ctrl-L 이후 이전 output이 main pane에 잔상으로 남지 않는다.
-- **AC-6 [P0]** ANSI 16색과 bold/underline/reverse style이 렌더된다.
-- **AC-7 [P0]** resize 후 main pane inner rect와 PTY/parser size가 일치한다.
-- **AC-8 [P0]** terminal input mode에서 `echo hello`가 정확히 한 번 실행된다.
-- **AC-9 [P0]** F12 후 `q`는 shell에 입력되지 않고 tuimux 종료로 처리된다.
-- **AC-10 [P1]** `less`, `top`, `vim` 같은 alternate-screen app이 이전 snapshot 방식보다 명확히 안정적으로 표시된다.
-- **AC-11 [P0]** `scripts/install.sh`를 빈 `TUIMUX_TMUX_CONF`로 실행하면 `set -g mouse on`과 `set -g history-limit 100000`이 추가되고, 재실행해도 중복되지 않는다.
-- **AC-12 [P0]** terminal default style unit test가 default foreground/background를 강제하지 않음을 검증한다.
-- **AC-13 [P0]** release workflow가 macOS, Windows, Linux tarball, `.deb`, `.rpm`, `SHA256SUMS` artifact를 생성한다.
-
----
-
-## 6. 알려진 한계와 후속 과제
-
-- 현재 구현은 `tmux -CC` control-mode client가 아니라 native tmux client를 PTY 안에 embedding하는 방식이다.
-- 따라서 장기적으로는 tmux pane 단위 event와 layout을 직접 해석하는 control-mode renderer로 발전할 수 있다.
-- embedded tmux client의 statusline과 tuimux sidebar가 동시에 보일 수 있다. 별도 tmux option을 영구 변경하지 않기 위해 v0.10에서는 이를 허용한다.
-- old `capture-pane`/`send-keys` 렌더링 경로는 runtime path에서 제거되었다.
-
----
-
-## 7. 변경 이력
-
-- **0.10 / 2026-06-13**: terminal default foreground/background를 강제로 칠하지 않도록 수정하고, Shift mouse drag override 요구사항을 제거해 tmux mouse protocol pass-through로 복구.
-- **0.9 / 2026-06-12**: `hungryZoo/tscode`의 terminal pane 구조를 참고해 `portable-pty` + `vt100` 기반 embedded tmux terminal surface로 main pane을 전환. SRS/SDD 한국어 재작성.
-- **0.8 / 2026-06-08**: default run mode를 tuimux ratatui TUI로 복구. plain native tmux client는 hidden `--native-client` fallback으로 이동.
-- **0.6-0.7 / 2026-06-08**: `capture-pane`/`send-keys` 기반 interaction 개선 및 default native client 회귀 수정.
+- **1.0 / 2026-06-13**: 기본 backend를 tmux embedding에서 Rust-native in-process multiplexer로 전환. PTY shell window, fullscreen terminal mode, mouse selection 유지, Ctrl-C clipboard copy, macOS ARM prerelease 요구사항을 명시.

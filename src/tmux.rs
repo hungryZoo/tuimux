@@ -1,8 +1,10 @@
-//! tmux discovery, command execution, and state parsing.
+//! Legacy tmux discovery, command execution, and state parsing.
 //!
-//! tuimux is a front-end for a tmux server. v0.1.9 keeps the ratatui UI as
-//! the default; the native tmux client helpers remain as an explicit fallback
-//! and for non-interactive state inspection.
+//! The default tuimux runtime is Rust-native. This module remains for the
+//! hidden `--native-client` fallback and for compatibility tests around the
+//! old tmux command boundary.
+
+#![allow(dead_code)]
 
 use std::fmt;
 use std::process::Command;

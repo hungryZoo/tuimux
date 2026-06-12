@@ -1,7 +1,7 @@
 name: release
 
-# Build prerelease assets for macOS, Windows, Linux, and Raspberry Pi-class
-# Linux ARM targets whenever a v* tag is pushed.
+# Build the current prerelease asset. v0.2.0-alpha.5 publishes macOS Apple
+# Silicon first while the Rust-native multiplexer is still being validated.
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.2.0-alpha.4). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.5). Used for manual runs."
         required: true
 
 permissions:
@@ -30,8 +30,6 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             arch: arm64
-          - target: x86_64-apple-darwin
-            arch: x86_64
     steps:
       - uses: actions/checkout@v4
 
@@ -79,9 +77,6 @@ jobs:
           cat > "dist/${STAGE}/INSTALL.txt" <<EOF
           tuimux ${VERSION} - macOS (${{ matrix.arch }} / ${TARGET})
 
-          Runtime dependency:
-            brew install tmux
-
           Install:
             install -m 0755 ${BINARY} ~/.local/bin/${BINARY}
 
@@ -90,7 +85,7 @@ jobs:
             ${BINARY} --doctor
 
           One-line installer:
-            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${VERSION}/scripts/install.sh | TUIMUX_VERSION=${VERSION} bash
           EOF
 
           tar -C dist -czf "${STAGE}.tar.gz" "$STAGE"
@@ -105,6 +100,7 @@ jobs:
           retention-days: 7
 
   build-windows:
+    if: ${{ false }}
     name: Windows ${{ matrix.arch }}
     runs-on: windows-latest
     strategy:
@@ -160,9 +156,6 @@ jobs:
           @"
           tuimux $version - Windows (${{ matrix.arch }} / $target)
 
-          Runtime dependency:
-            tmux must be available on PATH, typically through MSYS2, Cygwin, or WSL interop.
-
           Verify:
             ${env:BINARY}.exe --version
             ${env:BINARY}.exe --doctor
@@ -181,6 +174,7 @@ jobs:
           retention-days: 7
 
   build-linux:
+    if: ${{ false }}
     name: Linux ${{ matrix.arch }}
     runs-on: ubuntu-latest
     strategy:
@@ -266,9 +260,6 @@ jobs:
           cat > "dist/${STAGE}/INSTALL.txt" <<EOF
           tuimux ${VERSION} - Linux (${{ matrix.arch }} / ${TARGET})
 
-          Runtime dependency:
-            tmux must be installed by your package manager.
-
           Install tarball binary:
             install -m 0755 ${BINARY} ~/.local/bin/${BINARY}
 
@@ -288,9 +279,8 @@ jobs:
           Priority: optional
           Architecture: ${DEB_ARCH}
           Maintainer: hungryZoo
-          Depends: tmux
-          Description: Prefix-free, mouse-first TUI front-end for tmux
-           tuimux wraps tmux with a ratatui interface and a PTY-backed terminal pane.
+          Description: Prefix-free, mouse-first Rust-native terminal multiplexer
+           tuimux runs shell windows in PTYs and renders them with a ratatui interface.
           EOF
           dpkg-deb --build "${DEB_ROOT}" "artifacts/${BINARY}_${DEB_VERSION}_${DEB_ARCH}.deb"
 
@@ -301,14 +291,13 @@ jobs:
           Name: ${BINARY}
           Version: ${RPM_VERSION}
           Release: ${RPM_RELEASE}%{?dist}
-          Summary: Prefix-free, mouse-first TUI front-end for tmux
+          Summary: Prefix-free, mouse-first Rust-native terminal multiplexer
           License: MIT
           URL: https://github.com/${{ github.repository }}
           Source0: ${BINARY}
-          Requires: tmux
 
           %description
-          tuimux wraps tmux with a ratatui interface and a PTY-backed terminal pane.
+          tuimux runs shell windows in PTYs and renders them with a ratatui interface.
 
           %prep
 
@@ -337,7 +326,7 @@ jobs:
 
   release:
     name: publish prerelease
-    needs: [build-macos, build-windows, build-linux]
+    needs: [build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Resolve version
@@ -384,26 +373,16 @@ jobs:
           body: |
             ## tuimux ${{ steps.ver.outputs.version }} (prerelease)
 
-            Multiplatform prerelease assets are attached:
-            - macOS: x86_64 and arm64 tarballs
-            - Windows: x86_64 and arm64 zip archives
-            - Linux: x86_64, arm64, and armv7 tarballs
-            - Debian/Ubuntu: amd64, arm64, and armhf `.deb`
-            - Fedora/RHEL-style: x86_64, aarch64, and armv7hl `.rpm`
-            - Raspberry Pi: use the Linux arm64 asset for 64-bit OS images, or armv7/armhf for 32-bit images
+            macOS Apple Silicon prerelease asset is attached:
+            - `tuimux-${{ steps.ver.outputs.version }}-aarch64-apple-darwin.tar.gz`
 
-            This prerelease keeps the PTY-backed tmux terminal pane, adds installer tmux defaults (`mouse on`, `history-limit 100000` when absent), preserves terminal default colors instead of forcing a painted background, and passes mouse events through to tmux's mouse protocol.
+            This prerelease switches the default runtime to tuimux's Rust-native in-process multiplexer. It runs shell windows in real PTYs, renders through `vt100` + ratatui, keeps terminal mode fullscreen, preserves drag selection after mouse-up, and copies selected text with Ctrl-C through the system clipboard instead of interrupting the child process.
 
-            ### macOS/Linux installer
+            ### macOS Apple Silicon installer
             ```sh
-            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ steps.ver.outputs.version }}/scripts/install.sh | TUIMUX_VERSION=${{ steps.ver.outputs.version }} bash
             ```
 
-            ### Windows PowerShell installer
-            ```powershell
-            irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
-            ```
-
-            Requires `tmux` at runtime. Checksums are in `SHA256SUMS`.
+            The default tuimux UI no longer requires `tmux`. Checksums are in `SHA256SUMS`.
           files: |
             release/*

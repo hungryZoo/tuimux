@@ -1,13 +1,13 @@
 [package]
 name = "tuimux"
-version = "0.2.0-alpha.4"
+version = "0.2.0-alpha.5"
 edition = "2021"
 rust-version = "1.74"
-description = "A prefix-free, mouse-first TUI front-end for tmux (VS Code-inspired layout)"
+description = "A prefix-free, mouse-first Rust-native terminal multiplexer"
 license = "MIT"
 repository = "https://github.com/hungryZoo/tuimux"
 readme = "README.md"
-keywords = ["tmux", "tui", "terminal", "multiplexer"]
+keywords = ["tui", "terminal", "multiplexer", "ratatui"]
 categories = ["command-line-utilities"]
 
 [[bin]]

@@ -4,7 +4,7 @@
 #   irm https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.ps1 | iex
 #
 # Environment variables:
-#   TUIMUX_VERSION       Tag to install, e.g. v0.2.0-alpha.4. Default: latest prerelease/release.
+#   TUIMUX_VERSION       Tag to install, e.g. v0.2.0-alpha.5. Default: latest prerelease/release.
 #   TUIMUX_INSTALL_DIR   Where to put tuimux.exe. Default: %LOCALAPPDATA%\Programs\tuimux\bin.
 
 $ErrorActionPreference = "Stop"
@@ -33,15 +33,7 @@ switch ($Arch) {
 }
 Info "Detected Windows / $Arch (target: $Target)"
 
-if (-not (Get-Command tmux -ErrorAction SilentlyContinue)) {
-    Warn "tmux is not on PATH. tuimux needs tmux at runtime, typically through MSYS2, Cygwin, or WSL interop."
-} else {
-    try {
-        Info "Found tmux: $(& tmux -V)"
-    } catch {
-        Info "Found tmux"
-    }
-}
+Info "tmux is optional. The default tuimux UI now uses the Rust-native multiplexer."
 
 $Version = $env:TUIMUX_VERSION
 if ([string]::IsNullOrWhiteSpace($Version)) {

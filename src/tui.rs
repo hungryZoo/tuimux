@@ -1,17 +1,14 @@
 //! Default tuimux ratatui interface.
 //!
-//! v0.1.9 keeps this UI as the default after v0.1.7 accidentally launched a
-//! plain tmux client with no tuimux chrome. The main pane is now backed by a
-//! real tmux client running inside a PTY and rendered through a vt100 screen
-//! model, so it behaves like a terminal surface instead of a text snapshot.
-//!
-//! If there is no tmux server yet, tuimux creates a detached session named
-//! `tuimux` so the UI always has something real to show.
+//! The main pane is backed by tuimux's own Rust-native in-process multiplexer:
+//! sessions and windows are owned by tuimux, and each window runs a real shell
+//! in a PTY rendered through a vt100 screen model.
 //!
 //! If stdout is not a TTY we refuse to enter raw mode and instead print guidance,
 //! so piping or running under CI stays safe (PRD "keep safe").
 
 use std::io::{self, IsTerminal, Stdout};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -25,8 +22,9 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-use crate::terminal::{TerminalColor, TerminalSpan, TerminalStyle, TmuxTerminal};
-use crate::tmux::{RealTmux, Session, Tmux, TmuxProbe, Window};
+use crate::clipboard;
+use crate::native_mux::{NativeMux, Session, Window};
+use crate::terminal::{PtyTerminal, SelectionRange, TerminalColor, TerminalSpan, TerminalStyle};
 
 /// Why the UI loop ended — affects the farewell message.
 enum Exit {
@@ -67,153 +65,145 @@ struct UiState {
     session_modal_open: bool,
     hover: Option<Hotspot>,
     regions: Regions,
-    /// Live tmux state, refreshed after every mutating command.
+    mux: NativeMux,
+    /// Live native mux state, refreshed after every mutating command.
     sessions: Vec<Session>,
     windows: Vec<Window>,
     current_session: String,
-    /// Non-fatal, transient message shown in the status bar (e.g. why a switch
-    /// was refused outside tmux, or that a window was created).
+    /// Non-fatal, transient message shown in the status bar (e.g. that a
+    /// window was created, selected, or closed).
     status: Option<String>,
-    tmux_binary: String,
-    terminal: Option<TmuxTerminal>,
     terminal_error: Option<String>,
     terminal_mode: bool,
-    /// Monotonic counter behind the `tuimux-<n>` names created by the `n` key.
-    new_session_counter: u32,
+    selection: Option<SelectionState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectionState {
+    anchor: (u16, u16),
+    focus: (u16, u16),
+    dragging: bool,
 }
 
 impl UiState {
-    /// Build initial state from the live server, creating a detached `tuimux`
-    /// session if no server is running yet.
-    fn bootstrap(tmux: &Tmux<RealTmux>, tmux_binary: String) -> Self {
+    /// Build initial state from the native multiplexer.
+    fn bootstrap(initial_session: &str, cwd: PathBuf) -> anyhow::Result<Self> {
+        let mux = NativeMux::new(initial_session, cwd, 80, 24)?;
         let mut state = UiState {
-            // Open by default so users immediately see the session dialog; click
-            // the session button or Esc to toggle it.
-            session_modal_open: true,
+            // Native tuimux starts focused in the shell. The Session button or
+            // Alt-S opens the session switcher when needed.
+            session_modal_open: false,
             hover: None,
             regions: Regions::default(),
+            mux,
             sessions: Vec::new(),
             windows: Vec::new(),
             current_session: String::new(),
             status: None,
-            tmux_binary,
-            terminal: None,
             terminal_error: None,
-            terminal_mode: false,
-            new_session_counter: 0,
+            terminal_mode: true,
+            selection: None,
         };
-
-        let mut sessions = tmux.list_sessions().unwrap_or_default();
-        if sessions.is_empty() {
-            if let Err(e) = tmux.new_session("tuimux") {
-                state.status = Some(format!("could not create session 'tuimux': {e}"));
-            }
-            sessions = tmux.list_sessions().unwrap_or_default();
-        }
-        state.sessions = sessions;
-        state.current_session = state.pick_current();
-        state.reload_windows(tmux);
-        state.sync_terminal(80, 24);
-        state
-    }
-
-    /// Choose the session to focus: the attached one if any, else the first.
-    fn pick_current(&self) -> String {
-        self.sessions
-            .iter()
-            .find(|s| s.attached)
-            .or_else(|| self.sessions.first())
-            .map(|s| s.name.clone())
-            .unwrap_or_default()
-    }
-
-    fn reload_windows(&mut self, tmux: &Tmux<RealTmux>) {
-        self.windows = if self.current_session.is_empty() {
-            Vec::new()
-        } else {
-            tmux.list_windows(&self.current_session).unwrap_or_default()
-        };
+        state.refresh_metadata();
+        Ok(state)
     }
 
     fn sync_terminal(&mut self, width: u16, height: u16) {
-        if self.current_session.is_empty() {
-            self.terminal = None;
-            return;
-        }
         let size = (width.max(1), height.max(1));
-        let needs_spawn = self
-            .terminal
-            .as_ref()
-            .map(|terminal| terminal.session() != self.current_session)
-            .unwrap_or(true);
+        self.mux.resize_active(size.0, size.1);
+        self.mux.drain_all();
+        self.refresh_metadata();
+    }
 
-        if needs_spawn {
-            self.terminal = None;
-            match TmuxTerminal::new(&self.tmux_binary, &self.current_session, size.0, size.1) {
-                Ok(mut terminal) => {
-                    terminal.drain();
-                    self.terminal = Some(terminal);
-                    self.terminal_error = None;
-                }
-                Err(e) => {
-                    self.terminal_error = Some(format!("tmux PTY terminal failed to start: {e}"));
-                    self.status = self.terminal_error.clone();
-                    return;
-                }
+    fn refresh_metadata(&mut self) {
+        self.sessions = self.mux.session_infos();
+        self.windows = self.mux.window_infos();
+        self.current_session = self.mux.current_session_name().to_string();
+    }
+
+    fn active_terminal(&self) -> Option<&PtyTerminal> {
+        self.mux.active_terminal()
+    }
+
+    fn selection_range(&self) -> Option<SelectionRange> {
+        let selection = self.selection?;
+        (selection.anchor != selection.focus).then_some(SelectionRange::new(
+            selection.anchor.0,
+            selection.anchor.1,
+            selection.focus.0,
+            selection.focus.1,
+        ))
+    }
+
+    fn begin_selection(&mut self, row: u16, col: u16) {
+        self.selection = Some(SelectionState {
+            anchor: (row, col),
+            focus: (row, col),
+            dragging: false,
+        });
+    }
+
+    fn update_selection(&mut self, row: u16, col: u16) {
+        if let Some(selection) = &mut self.selection {
+            selection.focus = (row, col);
+            selection.dragging = true;
+        }
+    }
+
+    fn finish_selection(&mut self, row: u16, col: u16) {
+        self.update_selection(row, col);
+        if self.selection_range().is_none() {
+            self.selection = None;
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    fn copy_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let Some(terminal) = self.mux.active_terminal() else {
+            return false;
+        };
+        let text = terminal.selected_text(range);
+        if text.is_empty() {
+            return false;
+        }
+        match clipboard::copy_text(&text) {
+            Ok(()) => {
+                self.status = Some(format!("copied {} chars", text.chars().count()));
+                true
             }
-        }
-
-        if let Some(terminal) = &mut self.terminal {
-            terminal.resize(size.0, size.1);
-            terminal.drain();
-        }
-    }
-
-    /// Re-read sessions and windows after a mutating command.
-    fn refresh(&mut self, tmux: &Tmux<RealTmux>) {
-        let previous_session = self.current_session.clone();
-        self.sessions = tmux.list_sessions().unwrap_or_default();
-        if !self.sessions.iter().any(|s| s.name == self.current_session) {
-            self.current_session = self.pick_current();
-        }
-        self.reload_windows(tmux);
-        if self.current_session != previous_session {
-            self.terminal = None;
-            self.terminal_error = None;
-        }
-    }
-
-    /// Next free `tuimux-<n>` session name, skipping any that already exist.
-    fn next_session_name(&self) -> (String, u32) {
-        let mut n = self.new_session_counter + 1;
-        loop {
-            let name = format!("tuimux-{n}");
-            if !self.sessions.iter().any(|s| s.name == name) {
-                return (name, n);
-            }
-            n += 1;
-        }
-    }
-
-    fn refresh_tmux_metadata(&mut self, tmux: &Tmux<RealTmux>) {
-        match tmux.list_sessions() {
-            Ok(sessions) => self.sessions = sessions,
             Err(e) => {
-                self.status = Some(format!("list-sessions failed: {e}"));
-                return;
+                self.status = Some(format!("copy failed: {e}"));
+                false
             }
         }
+    }
 
-        if !self.sessions.iter().any(|s| s.name == self.current_session) {
-            self.current_session = self.pick_current();
-            self.terminal = None;
-            self.terminal_error = None;
-        }
-        self.reload_windows(tmux);
+    fn terminal_mouse_protocol_active(&self) -> bool {
+        self.mux
+            .active_terminal()
+            .map(PtyTerminal::mouse_protocol_active)
+            .unwrap_or(false)
     }
 
     fn send_terminal_key(&mut self, key: KeyEvent) {
-        if let Some(terminal) = &mut self.terminal {
+        if key.code == KeyCode::Char('c')
+            && key.modifiers == KeyModifiers::CONTROL
+            && self.copy_selection()
+        {
+            return;
+        }
+
+        if self.selection.is_some() {
+            self.clear_selection();
+        }
+
+        if let Some(terminal) = self.mux.active_terminal_mut() {
             if let Err(e) = terminal.send_key(key) {
                 self.status = Some(format!("terminal input failed: {e}"));
             }
@@ -223,7 +213,8 @@ impl UiState {
     }
 
     fn send_terminal_paste(&mut self, text: &str) {
-        if let Some(terminal) = &mut self.terminal {
+        self.clear_selection();
+        if let Some(terminal) = self.mux.active_terminal_mut() {
             if let Err(e) = terminal.send_paste(text) {
                 self.status = Some(format!("terminal paste failed: {e}"));
             }
@@ -239,7 +230,7 @@ impl UiState {
         col: u16,
         modifiers: KeyModifiers,
     ) {
-        if let Some(terminal) = &mut self.terminal {
+        if let Some(terminal) = self.mux.active_terminal_mut() {
             if let Err(e) = terminal.send_mouse_event(kind, row, col, modifiers) {
                 self.status = Some(format!("terminal mouse failed: {e}"));
             }
@@ -248,7 +239,7 @@ impl UiState {
 }
 
 /// Entry point for the default run. Returns a process exit code.
-pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
+pub fn run(initial_session: &str, cwd: PathBuf) -> io::Result<i32> {
     if !io::stdout().is_terminal() {
         eprintln!(
             "tuimux: stdout is not a terminal — refusing to start the interactive UI.\n\
@@ -258,11 +249,11 @@ pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
         return Ok(2);
     }
 
-    let tmux = Tmux::new(RealTmux::new(probe.binary.clone()));
-    let mut state = UiState::bootstrap(&tmux, probe.binary.clone());
+    let mut state = UiState::bootstrap(initial_session, cwd)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     let mut terminal = setup()?;
-    let result = run_loop(&mut terminal, &tmux, &mut state);
+    let result = run_loop(&mut terminal, &mut state);
     restore(&mut terminal)?;
 
     match result {
@@ -271,7 +262,7 @@ pub fn run(probe: &TmuxProbe) -> io::Result<i32> {
             Ok(0)
         }
         Ok(Exit::Detach) => {
-            println!("tuimux: detached embedded tmux client.");
+            println!("tuimux: closed native multiplexer UI.");
             Ok(0)
         }
         Err(e) => Err(e),
@@ -297,7 +288,7 @@ fn restore(terminal: &mut Term) -> io::Result<()> {
     terminal.show_cursor()
 }
 
-fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> io::Result<Exit> {
+fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
     let mut last_metadata_refresh = Instant::now();
     loop {
         let body = state.regions.terminal_body;
@@ -305,7 +296,7 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
             state.sync_terminal(body.width, body.height);
         }
         if last_metadata_refresh.elapsed() >= Duration::from_millis(750) {
-            state.refresh_tmux_metadata(tmux);
+            state.refresh_metadata();
             last_metadata_refresh = Instant::now();
         }
 
@@ -318,9 +309,16 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
         match event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 match (key.code, key.modifiers) {
-                    (KeyCode::F(12), _) if state.terminal_mode => {
-                        state.terminal_mode = false;
-                        state.status = Some("navigation mode".to_string());
+                    (KeyCode::F(12), _) => {
+                        state.terminal_mode = !state.terminal_mode;
+                        state.status = Some(
+                            if state.terminal_mode {
+                                "terminal mode"
+                            } else {
+                                "navigation mode"
+                            }
+                            .to_string(),
+                        );
                     }
                     _ if state.terminal_mode => {
                         state.send_terminal_key(key);
@@ -330,7 +328,7 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                     // `n` creates a fresh detached `tuimux-<n>` session, but only
                     // while the modal is open so it can't fire by accident.
                     (KeyCode::Char('n'), _) if state.session_modal_open => {
-                        new_session(tmux, state);
+                        new_session(state);
                     }
                     (KeyCode::Esc, _) if state.session_modal_open => {
                         state.session_modal_open = false;
@@ -346,6 +344,35 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                 }
             }
             Event::Mouse(mouse) => {
+                if let Some((row, col)) =
+                    terminal_cell_at(mouse.column, mouse.row, state.regions.terminal_body)
+                {
+                    let child_wants_mouse = state.terminal_mouse_protocol_active();
+                    let selection_gesture =
+                        mouse.modifiers.contains(KeyModifiers::SHIFT) || !child_wants_mouse;
+
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if selection_gesture => {
+                            state.terminal_mode = true;
+                            state.begin_selection(row, col);
+                            continue;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if state.selection.is_some() => {
+                            state.update_selection(row, col);
+                            continue;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) if state.selection.is_some() => {
+                            state.finish_selection(row, col);
+                            continue;
+                        }
+                        _ if state.terminal_mode => {
+                            state.send_terminal_mouse(mouse.kind, row, col, mouse.modifiers);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+
                 if state.terminal_mode {
                     if let Some((row, col)) =
                         terminal_cell_at(mouse.column, mouse.row, state.regions.terminal_body)
@@ -375,19 +402,19 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                                 Some("terminal mode (F12 returns to navigation)".to_string());
                         }
                         Some(Hotspot::WindowClose(idx)) => {
-                            kill_window(tmux, state, idx);
+                            kill_window(state, idx);
                         }
                         Some(Hotspot::Window(idx)) => {
-                            select_window(tmux, state, idx);
+                            select_window(state, idx);
                         }
                         Some(Hotspot::NewWindow) => {
-                            new_window(tmux, state);
+                            new_window(state);
                         }
                         Some(Hotspot::ModalNewSession) => {
-                            new_session(tmux, state);
+                            new_session(state);
                         }
                         Some(Hotspot::ModalSession(idx)) => {
-                            switch_session(tmux, state, idx);
+                            switch_session(state, idx);
                         }
                         _ => {}
                     }
@@ -402,75 +429,83 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
     }
 }
 
-fn select_window(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
-    let Some(index) = state.windows.get(idx).map(|w| w.index) else {
-        return;
-    };
-    match tmux.select_window(&state.current_session, index) {
-        Ok(()) => state.refresh(tmux),
+fn active_terminal_size(state: &UiState) -> (u16, u16) {
+    let body = state.regions.terminal_body;
+    (body.width.max(1), body.height.max(1))
+}
+
+fn select_window(state: &mut UiState, idx: usize) {
+    match state.mux.select_window_by_row(idx) {
+        Ok(()) => {
+            state.clear_selection();
+            state.refresh_metadata();
+        }
         Err(e) => state.status = Some(format!("select-window failed: {e}")),
     }
 }
 
-fn kill_window(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
-    let Some(index) = state.windows.get(idx).map(|w| w.index) else {
-        return;
-    };
-    match tmux.kill_window(&state.current_session, index) {
-        Ok(()) => {
+fn kill_window(state: &mut UiState, idx: usize) {
+    let (width, height) = active_terminal_size(state);
+    match state.mux.kill_window_by_row(idx, width, height) {
+        Ok(index) => {
             state.status = Some(format!("killed window {index}"));
-            state.refresh(tmux);
+            state.clear_selection();
+            state.refresh_metadata();
         }
         Err(e) => state.status = Some(format!("kill-window failed: {e}")),
     }
 }
 
-fn new_window(tmux: &Tmux<RealTmux>, state: &mut UiState) {
-    match tmux.new_window(&state.current_session) {
-        Ok(()) => {
-            state.status = Some(format!("created a window in '{}'", state.current_session));
-            state.refresh(tmux);
+fn new_window(state: &mut UiState) {
+    let (width, height) = active_terminal_size(state);
+    match state.mux.new_window(width, height) {
+        Ok(index) => {
+            state.status = Some(format!(
+                "created window {index} in '{}'",
+                state.current_session
+            ));
+            state.clear_selection();
+            state.refresh_metadata();
         }
         Err(e) => state.status = Some(format!("new-window failed: {e}")),
     }
 }
 
-fn new_session(tmux: &Tmux<RealTmux>, state: &mut UiState) {
-    let (name, counter) = state.next_session_name();
-    match tmux.new_session(&name) {
-        Ok(()) => {
-            state.new_session_counter = counter;
+fn new_session(state: &mut UiState) {
+    let (width, height) = active_terminal_size(state);
+    match state.mux.create_next_session(width, height) {
+        Ok(name) => {
             state.status = Some(format!("created session '{name}'"));
-            state.refresh(tmux);
+            state.clear_selection();
+            state.refresh_metadata();
         }
         Err(e) => state.status = Some(format!("new-session failed: {e}")),
     }
 }
 
-fn switch_session(tmux: &Tmux<RealTmux>, state: &mut UiState, idx: usize) {
-    let Some(name) = state.sessions.get(idx).map(|s| s.name.clone()) else {
-        return;
-    };
-    state.current_session = name.clone();
-    state.session_modal_open = false;
-    state.status = Some(format!("selected session '{name}'"));
-    state.terminal = None;
-    state.terminal_error = None;
-    state.reload_windows(tmux);
+fn switch_session(state: &mut UiState, idx: usize) {
+    match state.mux.switch_session_by_row(idx) {
+        Ok(()) => {
+            state.session_modal_open = false;
+            state.clear_selection();
+            state.refresh_metadata();
+            state.status = Some(format!("selected session '{}'", state.current_session));
+        }
+        Err(e) => state.status = Some(format!("select-session failed: {e}")),
+    }
 }
 
 fn ui(f: &mut Frame, state: &mut UiState) {
     let root = f.size();
+    let selection = state.selection_range();
     let terminal_rows = state
-        .terminal
-        .as_ref()
-        .map(TmuxTerminal::styled_rows)
+        .active_terminal()
+        .map(|terminal| terminal.styled_rows_with_selection(selection))
         .unwrap_or_default();
-    let terminal_cursor = state.terminal.as_ref().map(TmuxTerminal::cursor);
+    let terminal_cursor = state.active_terminal().map(PtyTerminal::cursor);
     let terminal_hide_cursor = state
-        .terminal
-        .as_ref()
-        .map(TmuxTerminal::hide_cursor)
+        .active_terminal()
+        .map(PtyTerminal::hide_cursor)
         .unwrap_or(true);
 
     let session_label = if state.current_session.is_empty() {
@@ -478,6 +513,22 @@ fn ui(f: &mut Frame, state: &mut UiState) {
     } else {
         &state.current_session
     };
+
+    if state.terminal_mode && !state.session_modal_open {
+        render_main(
+            f,
+            root,
+            terminal_rows,
+            state.terminal_mode,
+            !terminal_hide_cursor,
+            terminal_cursor,
+            state.terminal_error.as_deref(),
+            &mut state.regions,
+            false,
+        );
+        return;
+    }
+
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(30), Constraint::Length(26)])
@@ -492,6 +543,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         terminal_cursor,
         state.terminal_error.as_deref(),
         &mut state.regions,
+        true,
     );
     render_sidebar(
         f,
@@ -539,20 +591,26 @@ fn render_main(
     terminal_cursor: Option<(u16, u16)>,
     terminal_error: Option<&str>,
     regions: &mut Regions,
+    chrome: bool,
 ) {
     regions.main_pane = area;
-    let border = if terminal_mode {
-        Color::Green
-    } else {
-        Color::DarkGray
-    };
+    let inner = if chrome {
+        let border = if terminal_mode {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border));
-    let inner = block.inner(area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        inner
+    } else {
+        area
+    };
     regions.terminal_body = inner;
-    f.render_widget(block, area);
 
     let lines: Vec<Line> = if let Some(error) = terminal_error {
         vec![Line::from(Span::styled(
@@ -561,7 +619,7 @@ fn render_main(
         ))]
     } else if terminal_rows.is_empty() {
         vec![Line::from(Span::styled(
-            "starting tmux terminal...",
+            "starting native terminal...",
             Style::default().fg(Color::DarkGray),
         ))]
     } else {

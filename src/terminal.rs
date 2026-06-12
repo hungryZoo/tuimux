@@ -1,12 +1,11 @@
-//! PTY-backed tmux terminal surface.
+//! PTY-backed terminal surface.
 //!
-//! The old main pane used `tmux capture-pane` snapshots plus `send-keys`.
-//! That looked like a terminal but did not maintain a real screen model. This
-//! module follows the terminal pane architecture used by hungryZoo/tscode:
-//! run a real process in a PTY, feed its byte stream into `vt100::Parser`, and
-//! render the resulting cells with ratatui.
+//! tuimux owns real child processes directly: a shell, editor, monitor, or any
+//! other terminal program runs in a PTY, its byte stream is fed into
+//! `vt100::Parser`, and the resulting screen cells are rendered by ratatui.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -85,7 +84,63 @@ pub struct TerminalSpan {
     pub style: TerminalStyle,
 }
 
-pub struct TmuxTerminal {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionRange {
+    pub start_row: u16,
+    pub start_col: u16,
+    pub end_row: u16,
+    pub end_col: u16,
+}
+
+impl SelectionRange {
+    pub fn new(start_row: u16, start_col: u16, end_row: u16, end_col: u16) -> Self {
+        Self {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        }
+    }
+
+    pub fn normalized(self) -> Self {
+        if (self.start_row, self.start_col) <= (self.end_row, self.end_col) {
+            self
+        } else {
+            Self {
+                start_row: self.end_row,
+                start_col: self.end_col,
+                end_row: self.start_row,
+                end_col: self.start_col,
+            }
+        }
+    }
+
+    fn contains_cell(self, row: u16, col: u16) -> bool {
+        let range = self.normalized();
+        (range.start_row, range.start_col) <= (row, col)
+            && (row, col) <= (range.end_row, range.end_col)
+    }
+
+    fn selected_cols_for_row(self, row: u16) -> Option<(u16, u16)> {
+        let range = self.normalized();
+        if row < range.start_row || row > range.end_row {
+            return None;
+        }
+        let start = if row == range.start_row {
+            range.start_col
+        } else {
+            0
+        };
+        let end = if row == range.end_row {
+            range.end_col
+        } else {
+            u16::MAX
+        };
+        Some((start, end))
+    }
+}
+
+pub struct PtyTerminal {
     parser: vt100::Parser,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -93,11 +148,14 @@ pub struct TmuxTerminal {
     rx: Receiver<Vec<u8>>,
     rows: u16,
     cols: u16,
-    session: String,
 }
 
-impl TmuxTerminal {
-    pub fn new(tmux_binary: &str, session: &str, width: u16, height: u16) -> Result<Self> {
+impl PtyTerminal {
+    pub fn new_shell(title: &str, cwd: &Path, width: u16, height: u16) -> Result<Self> {
+        Self::spawn(shell_command(cwd), title.to_string(), width, height)
+    }
+
+    fn spawn(mut command: CommandBuilder, title: String, width: u16, height: u16) -> Result<Self> {
         let rows = height.max(1);
         let cols = width.max(2);
         let pty_system = native_pty_system();
@@ -108,7 +166,6 @@ impl TmuxTerminal {
             pixel_height: 0,
         })?;
 
-        let mut command = tmux_attach_command(tmux_binary, session);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "tuimux");
@@ -116,7 +173,7 @@ impl TmuxTerminal {
         let child = pair
             .slave
             .spawn_command(command)
-            .with_context(|| format!("failed to spawn tmux client for session '{session}'"))?;
+            .with_context(|| format!("failed to spawn terminal process '{title}'"))?;
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let master = pair.master;
@@ -145,12 +202,7 @@ impl TmuxTerminal {
             rx,
             rows,
             cols,
-            session: session.to_string(),
         })
-    }
-
-    pub fn session(&self) -> &str {
-        &self.session
     }
 
     pub fn drain(&mut self) -> bool {
@@ -180,13 +232,22 @@ impl TmuxTerminal {
         });
     }
 
+    #[allow(dead_code)]
     pub fn styled_rows(&self) -> Vec<Vec<TerminalSpan>> {
+        self.styled_rows_with_selection(None)
+    }
+
+    pub fn styled_rows_with_selection(
+        &self,
+        selection: Option<SelectionRange>,
+    ) -> Vec<Vec<TerminalSpan>> {
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
         let mut rendered_rows = Vec::with_capacity(rows as usize);
 
         for row in 0..rows {
             let mut last_used_col = None;
+            let selected_cols = selection.and_then(|range| range.selected_cols_for_row(row));
             for col in 0..cols {
                 let Some(cell) = screen.cell(row, col) else {
                     continue;
@@ -195,7 +256,12 @@ impl TmuxTerminal {
                     continue;
                 }
                 let style = TerminalStyle::from_cell(cell);
-                if cell.has_contents() || !style.is_default() {
+                if cell.has_contents()
+                    || !style.is_default()
+                    || selected_cols
+                        .map(|(start, end)| col >= start && col <= end)
+                        .unwrap_or(false)
+                {
                     last_used_col = Some(if cell.is_wide() {
                         col.saturating_add(1)
                     } else {
@@ -222,6 +288,17 @@ impl TmuxTerminal {
                 }
 
                 let style = TerminalStyle::from_cell(cell);
+                let style = if selection
+                    .map(|range| range.contains_cell(row, col))
+                    .unwrap_or(false)
+                {
+                    TerminalStyle {
+                        inverse: !style.inverse,
+                        ..style
+                    }
+                } else {
+                    style
+                };
                 let text = if cell.has_contents() {
                     cell.contents()
                 } else {
@@ -260,6 +337,56 @@ impl TmuxTerminal {
 
     pub fn hide_cursor(&self) -> bool {
         self.parser.screen().hide_cursor()
+    }
+
+    pub fn mouse_protocol_active(&self) -> bool {
+        self.parser.screen().mouse_protocol_mode() != MouseProtocolMode::None
+    }
+
+    pub fn selected_text(&self, selection: SelectionRange) -> String {
+        let screen = self.parser.screen();
+        let (rows, cols) = screen.size();
+        if rows == 0 || cols == 0 {
+            return String::new();
+        }
+
+        let range = selection.normalized();
+        let start_row = range.start_row.min(rows.saturating_sub(1));
+        let end_row = range.end_row.min(rows.saturating_sub(1));
+        let mut lines = Vec::new();
+
+        for row in start_row..=end_row {
+            let start_col = if row == range.start_row {
+                range.start_col
+            } else {
+                0
+            }
+            .min(cols.saturating_sub(1));
+            let end_col = if row == range.end_row {
+                range.end_col
+            } else {
+                cols.saturating_sub(1)
+            }
+            .min(cols.saturating_sub(1));
+
+            let mut line = String::new();
+            for col in start_col..=end_col {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                if cell.has_contents() {
+                    line.push_str(cell.contents());
+                } else {
+                    line.push(' ');
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
+
+        lines.join("\n")
     }
 
     pub fn bracketed_paste(&self) -> bool {
@@ -319,32 +446,25 @@ impl TmuxTerminal {
     }
 }
 
-impl Drop for TmuxTerminal {
+impl Drop for PtyTerminal {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
 }
 
 #[cfg(unix)]
-fn tmux_attach_command(tmux_binary: &str, session: &str) -> CommandBuilder {
-    let mut command = CommandBuilder::new("env");
-    command.arg("-u");
-    command.arg("TMUX");
-    command.arg(tmux_binary);
-    command.arg("-u");
-    command.arg("attach-session");
-    command.arg("-t");
-    command.arg(session);
+fn shell_command(cwd: &Path) -> CommandBuilder {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let mut command = CommandBuilder::new(shell);
+    command.cwd(cwd.as_os_str());
     command
 }
 
 #[cfg(not(unix))]
-fn tmux_attach_command(tmux_binary: &str, session: &str) -> CommandBuilder {
-    let mut command = CommandBuilder::new(tmux_binary);
-    command.arg("-u");
-    command.arg("attach-session");
-    command.arg("-t");
-    command.arg(session);
+fn shell_command(cwd: &Path) -> CommandBuilder {
+    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    let mut command = CommandBuilder::new(shell);
+    command.cwd(cwd.as_os_str());
     command
 }
 
