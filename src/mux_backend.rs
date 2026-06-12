@@ -599,6 +599,8 @@ mod unix_remote {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -827,19 +829,39 @@ mod unix_remote {
         }
         let listener = UnixListener::bind(&socket)
             .with_context(|| format!("could not bind {}", socket.display()))?;
-        let mut mux = NativeMux::new(initial_session, cwd, 80, 24)?;
-        let mut shutdown = false;
+        listener.set_nonblocking(true)?;
 
-        while !shutdown {
-            let (stream, _) = listener.accept()?;
-            shutdown = handle_client(stream, &mut mux)?;
+        let mux = Arc::new(Mutex::new(NativeMux::new(initial_session, cwd, 80, 24)?));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        while !shutdown.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false)?;
+                    let mux = Arc::clone(&mux);
+                    let shutdown = Arc::clone(&shutdown);
+                    thread::spawn(move || {
+                        if let Err(err) = handle_client(stream, mux, shutdown) {
+                            eprintln!("tuimux daemon client: {err:#}");
+                        }
+                    });
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
 
         let _ = fs::remove_file(socket);
         Ok(())
     }
 
-    fn handle_client(stream: UnixStream, mux: &mut NativeMux) -> Result<bool> {
+    fn handle_client(
+        stream: UnixStream,
+        mux: Arc<Mutex<NativeMux>>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<()> {
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut writer = stream;
         let mut line = String::new();
@@ -848,14 +870,20 @@ mod unix_remote {
             line.clear();
             let read = reader.read_line(&mut line)?;
             if read == 0 {
-                return Ok(false);
+                return Ok(());
             }
-            let (response, shutdown) = match serde_json::from_str::<Request>(line.trim_end()) {
+            let (response, should_shutdown) = match serde_json::from_str::<Request>(line.trim_end())
+            {
                 Ok(request) => {
-                    let shutdown = matches!(request, Request::Shutdown);
-                    let response = handle_request(request, mux);
-                    let shutdown = shutdown && matches!(response, Response::Ok);
-                    (response, shutdown)
+                    if matches!(request, Request::Shutdown) {
+                        (Response::Ok, true)
+                    } else {
+                        let response = match mux.lock() {
+                            Ok(mut mux) => handle_request(request, &mut mux),
+                            Err(err) => Response::Error(format!("native mux lock poisoned: {err}")),
+                        };
+                        (response, false)
+                    }
                 }
                 Err(err) => (Response::Error(err.to_string()), false),
             };
@@ -863,8 +891,9 @@ mod unix_remote {
             writer.write_all(encoded.as_bytes())?;
             writer.write_all(b"\n")?;
             writer.flush()?;
-            if shutdown {
-                return Ok(true);
+            if should_shutdown {
+                shutdown.store(true, Ordering::SeqCst);
+                return Ok(());
             }
         }
     }
@@ -969,6 +998,94 @@ mod unix_remote {
         match response {
             Response::Ok => Ok(()),
             other => bail!("unexpected daemon response: {other:?}"),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        #[test]
+        fn daemon_accepts_second_client_while_first_client_stays_open() {
+            let socket = std::env::temp_dir().join(format!(
+                "tuimux-test-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            let daemon_socket = socket.clone();
+            let daemon = thread::spawn(move || {
+                run_daemon_inner(daemon_socket, "multi-test", PathBuf::from("."))
+            });
+            wait_for_socket(&socket);
+
+            let mut first = UnixStream::connect(&socket).expect("first client connects");
+            first
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            write_request(
+                &mut first,
+                Request::Snapshot {
+                    width: 80,
+                    height: 24,
+                    selection: None,
+                },
+            );
+            assert!(matches!(read_response(&mut first), Response::Snapshot(_)));
+
+            let mut second = UnixStream::connect(&socket).expect("second client connects");
+            second
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            write_request(
+                &mut second,
+                Request::Snapshot {
+                    width: 80,
+                    height: 24,
+                    selection: None,
+                },
+            );
+            assert!(matches!(read_response(&mut second), Response::Snapshot(_)));
+
+            let mut third = UnixStream::connect(&socket).expect("shutdown client connects");
+            third
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            write_request(&mut third, Request::Shutdown);
+            assert!(matches!(read_response(&mut third), Response::Ok));
+
+            daemon
+                .join()
+                .expect("daemon thread joins")
+                .expect("daemon exits cleanly");
+        }
+
+        fn wait_for_socket(socket: &Path) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                if socket.exists() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            panic!("socket did not appear: {}", socket.display());
+        }
+
+        fn write_request(stream: &mut UnixStream, request: Request) {
+            let encoded = serde_json::to_string(&request).expect("encode request");
+            stream.write_all(encoded.as_bytes()).expect("write request");
+            stream.write_all(b"\n").expect("write newline");
+            stream.flush().expect("flush request");
+        }
+
+        fn read_response(stream: &mut UnixStream) -> Response {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read response");
+            serde_json::from_str(line.trim_end()).expect("decode response")
         }
     }
 
