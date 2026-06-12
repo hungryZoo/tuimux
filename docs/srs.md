@@ -1,8 +1,8 @@
 # tuimux SRS (Software Requirements Specification)
 
-- **문서 버전**: 0.9
-- **작성일**: 2026-06-12
-- **상태**: PTY 기반 터미널 surface 전환 명세
+- **문서 버전**: 0.10
+- **작성일**: 2026-06-13
+- **상태**: PTY 기반 터미널 surface 및 tmux mouse pass-through 보정 명세
 - **프로젝트명**: tuimux
 - **상위 문서**: [docs/prd.md](./prd.md)
 - **설계 문서**: [docs/sdd.md](./sdd.md)
@@ -20,7 +20,7 @@
 - `clear`, ANSI color/style, resize, cursor, alternate screen app에 대한 기본 terminal fidelity 개선.
 - right sidebar의 Session, Detach, WINDOWS, `+ new`, window close UX 유지.
 - session dialog에서 session 선택 시 embedded tmux client를 해당 session으로 재attach.
-- Shift + 왼쪽 마우스 드래그는 tuimux가 소비하지 않고 host terminal native text selection에 맡긴다.
+- terminal input mode의 mouse event는 Shift modifier를 포함해 tmux mouse protocol로 전달한다.
 - Unix 계열 설치 스크립트는 `.tmux.conf`에 `mouse on`, `history-limit 100000` 설정이 없을 때만 추가한다.
 - GitHub prerelease는 macOS, Windows, Linux tarball, Linux `.deb`/`.rpm`, Raspberry Pi용 Linux ARM asset을 제공한다.
 - `--native-client`, `--doctor`, `--version`, `--layout-preview` 유지.
@@ -28,7 +28,7 @@
 
 ### 제외
 
-- v0.9에서 iTerm2 수준의 full `tmux -CC` control-mode client 구현.
+- v0.10에서 iTerm2 수준의 full `tmux -CC` control-mode client 구현.
 - tmux pane split 전체를 tuimux 레이아웃으로 재구성하는 기능.
 - tmux statusline/옵션을 영구 변경하는 방식의 UI 통합.
 - native tmux client를 기본 UX로 되돌리는 변경.
@@ -61,12 +61,12 @@
 - **FR-TERM-3 [P0]** main pane 렌더링은 `capture-pane` 반복 polling에 의존하면 안 된다.
 - **FR-TERM-4 [P0]** `clear`, `reset`, `tput clear`, CSI clear sequence 이후 지워진 cell에 이전 glyph가 남으면 안 된다.
 - **FR-TERM-5 [P0]** 16색, bold, dim, italic, underline, reverse style을 가능한 범위에서 ratatui style로 변환해야 한다.
-- **FR-TERM-6 [P1]** 256색과 truecolor foreground/background를 지원해야 한다.
+- **FR-TERM-6 [P1]** 256색과 truecolor foreground/background를 지원하되, terminal default foreground/background는 host terminal 기본값을 덮어쓰면 안 된다.
 - **FR-TERM-7 [P0]** terminal cursor 위치와 cursor hidden state를 `vt100` screen model에서 읽어 main pane 안에 반영해야 한다.
 - **FR-TERM-8 [P0]** host terminal resize 시 main pane inner rect 크기를 PTY size와 `vt100` parser size에 동기화해야 한다.
 - **FR-TERM-9 [P1]** terminal app이 mouse protocol을 활성화하면 main pane mouse event를 child terminal로 전달해야 한다.
 - **FR-TERM-10 [P1]** bracketed paste가 활성화된 경우 paste payload를 `\x1b[200~`/`\x1b[201~`로 감싸 전달해야 한다.
-- **FR-TERM-11 [P0]** Shift + 왼쪽 mouse down/drag/up은 hover, sidebar action, child terminal mouse event로 처리하지 않아야 한다.
+- **FR-TERM-11 [P0]** terminal input mode에서 Shift를 포함한 mouse modifier는 child tmux terminal의 mouse protocol 인코딩에 반영되어야 한다.
 
 ### 2.4 Input Mode
 
@@ -155,7 +155,7 @@ Native fallback only:
 - **AC-9 [P0]** F12 후 `q`는 shell에 입력되지 않고 tuimux 종료로 처리된다.
 - **AC-10 [P1]** `less`, `top`, `vim` 같은 alternate-screen app이 이전 snapshot 방식보다 명확히 안정적으로 표시된다.
 - **AC-11 [P0]** `scripts/install.sh`를 빈 `TUIMUX_TMUX_CONF`로 실행하면 `set -g mouse on`과 `set -g history-limit 100000`이 추가되고, 재실행해도 중복되지 않는다.
-- **AC-12 [P0]** Shift + 왼쪽 mouse drag unit test가 tuimux host text selection override를 검증한다.
+- **AC-12 [P0]** terminal default style unit test가 default foreground/background를 강제하지 않음을 검증한다.
 - **AC-13 [P0]** release workflow가 macOS, Windows, Linux tarball, `.deb`, `.rpm`, `SHA256SUMS` artifact를 생성한다.
 
 ---
@@ -164,13 +164,14 @@ Native fallback only:
 
 - 현재 구현은 `tmux -CC` control-mode client가 아니라 native tmux client를 PTY 안에 embedding하는 방식이다.
 - 따라서 장기적으로는 tmux pane 단위 event와 layout을 직접 해석하는 control-mode renderer로 발전할 수 있다.
-- embedded tmux client의 statusline과 tuimux sidebar가 동시에 보일 수 있다. 별도 tmux option을 영구 변경하지 않기 위해 v0.9에서는 이를 허용한다.
+- embedded tmux client의 statusline과 tuimux sidebar가 동시에 보일 수 있다. 별도 tmux option을 영구 변경하지 않기 위해 v0.10에서는 이를 허용한다.
 - old `capture-pane`/`send-keys` 렌더링 경로는 runtime path에서 제거되었다.
 
 ---
 
 ## 7. 변경 이력
 
+- **0.10 / 2026-06-13**: terminal default foreground/background를 강제로 칠하지 않도록 수정하고, Shift mouse drag override 요구사항을 제거해 tmux mouse protocol pass-through로 복구.
 - **0.9 / 2026-06-12**: `hungryZoo/tscode`의 terminal pane 구조를 참고해 `portable-pty` + `vt100` 기반 embedded tmux terminal surface로 main pane을 전환. SRS/SDD 한국어 재작성.
 - **0.8 / 2026-06-08**: default run mode를 tuimux ratatui TUI로 복구. plain native tmux client는 hidden `--native-client` fallback으로 이동.
 - **0.6-0.7 / 2026-06-08**: `capture-pane`/`send-keys` 기반 interaction 개선 및 default native client 회귀 수정.

@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.2.0-alpha.3). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.4). Used for manual runs."
         required: true
 
 permissions:
@@ -392,7 +392,7 @@ jobs:
             - Fedora/RHEL-style: x86_64, aarch64, and armv7hl `.rpm`
             - Raspberry Pi: use the Linux arm64 asset for 64-bit OS images, or armv7/armhf for 32-bit images
 
-            This prerelease keeps the PTY-backed tmux terminal pane, adds installer tmux defaults (`mouse on`, `history-limit 100000` when absent), and reserves Shift+left mouse drag for host terminal text selection.
+            This prerelease keeps the PTY-backed tmux terminal pane, adds installer tmux defaults (`mouse on`, `history-limit 100000` when absent), preserves terminal default colors instead of forcing a painted background, and passes mouse events through to tmux's mouse protocol.
 
             ### macOS/Linux installer
             ```sh

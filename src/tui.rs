@@ -346,11 +346,6 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                 }
             }
             Event::Mouse(mouse) => {
-                if host_text_selection_mouse_override(mouse.kind, mouse.modifiers) {
-                    state.hover = None;
-                    continue;
-                }
-
                 if state.terminal_mode {
                     if let Some((row, col)) =
                         terminal_cell_at(mouse.column, mouse.row, state.regions.terminal_body)
@@ -576,10 +571,7 @@ fn render_main(
             .collect()
     };
 
-    f.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(Color::Gray).bg(Color::Black)),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines).style(Style::default()), inner);
 
     if show_cursor {
         if let Some((row, col)) = terminal_cursor {
@@ -605,13 +597,17 @@ fn terminal_row_spans(row: Vec<TerminalSpan>) -> Vec<Span<'static>> {
 }
 
 fn terminal_style(style: TerminalStyle) -> Style {
-    let mut fg = terminal_color(style.fg).unwrap_or(Color::Gray);
-    let mut bg = terminal_color(style.bg).unwrap_or(Color::Black);
-    if style.inverse {
-        std::mem::swap(&mut fg, &mut bg);
+    let mut rendered = Style::default();
+    if let Some(fg) = terminal_color(style.fg) {
+        rendered = rendered.fg(fg);
+    }
+    if let Some(bg) = terminal_color(style.bg) {
+        rendered = rendered.bg(bg);
     }
 
-    let mut rendered = Style::default().fg(fg).bg(bg);
+    if style.inverse {
+        rendered = rendered.add_modifier(Modifier::REVERSED);
+    }
     if style.bold {
         rendered = rendered.add_modifier(Modifier::BOLD);
     }
@@ -965,16 +961,6 @@ fn terminal_cell_at(x: u16, y: u16, body: Rect) -> Option<(u16, u16)> {
     Some((y.saturating_sub(body.y), x.saturating_sub(body.x)))
 }
 
-fn host_text_selection_mouse_override(kind: MouseEventKind, modifiers: KeyModifiers) -> bool {
-    modifiers.contains(KeyModifiers::SHIFT)
-        && matches!(
-            kind,
-            MouseEventKind::Down(MouseButton::Left)
-                | MouseEventKind::Drag(MouseButton::Left)
-                | MouseEventKind::Up(MouseButton::Left)
-        )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,26 +1007,18 @@ mod tests {
     }
 
     #[test]
-    fn shift_left_mouse_drag_is_reserved_for_host_text_selection() {
-        assert!(host_text_selection_mouse_override(
-            MouseEventKind::Down(MouseButton::Left),
-            KeyModifiers::SHIFT
-        ));
-        assert!(host_text_selection_mouse_override(
-            MouseEventKind::Drag(MouseButton::Left),
-            KeyModifiers::SHIFT
-        ));
-        assert!(host_text_selection_mouse_override(
-            MouseEventKind::Up(MouseButton::Left),
-            KeyModifiers::SHIFT
-        ));
-        assert!(!host_text_selection_mouse_override(
-            MouseEventKind::Drag(MouseButton::Left),
-            KeyModifiers::NONE
-        ));
-        assert!(!host_text_selection_mouse_override(
-            MouseEventKind::Drag(MouseButton::Right),
-            KeyModifiers::SHIFT
-        ));
+    fn terminal_default_style_does_not_force_a_background() {
+        let style = terminal_style(TerminalStyle::default());
+        assert_eq!(style.fg, None);
+        assert_eq!(style.bg, None);
+    }
+
+    #[test]
+    fn terminal_reverse_style_uses_reverse_video_modifier() {
+        let style = terminal_style(TerminalStyle {
+            inverse: true,
+            ..TerminalStyle::default()
+        });
+        assert!(style.add_modifier.contains(Modifier::REVERSED));
     }
 }

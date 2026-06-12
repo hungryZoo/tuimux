@@ -707,5 +707,16 @@ mod tests {
             ),
             Some(b"\x1b[<69;4;3M".to_vec())
         );
+        assert_eq!(
+            mouse_event_to_bytes(
+                MouseEventKind::Drag(MouseButton::Left),
+                1,
+                2,
+                KeyModifiers::SHIFT,
+                MouseProtocolMode::ButtonMotion,
+                MouseProtocolEncoding::Sgr,
+            ),
+            Some(b"\x1b[<36;3;2M".to_vec())
+        );
     }
 }

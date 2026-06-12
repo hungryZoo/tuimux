@@ -1,8 +1,8 @@
 # tuimux SDD (Software Design Description)
 
-- **문서 버전**: 0.9
-- **작성일**: 2026-06-12
-- **상태**: PTY 기반 터미널 surface 설계
+- **문서 버전**: 0.10
+- **작성일**: 2026-06-13
+- **상태**: PTY 기반 터미널 surface 및 tmux mouse pass-through 설계
 - **관련 요구사항**: [docs/srs.md](./srs.md)
 - **참고 구현**: [hungryZoo/tscode](https://github.com/hungryZoo/tscode)의 `portable-pty` + `vt100` terminal pane
 
@@ -18,7 +18,7 @@ tuimux의 가장 큰 문제는 main pane이 실제 터미널이 아니라 `tmux 
 - main pane은 실제 PTY에서 실행되는 tmux client 화면을 렌더한다.
 - output은 byte stream으로 받고 `vt100::Parser`가 screen cell state를 유지한다.
 - input은 `send-keys` 명령이 아니라 PTY writer에 terminal byte sequence로 전달한다.
-- Shift + 왼쪽 마우스 드래그는 host terminal text selection을 위해 UI router가 처리하지 않는다.
+- terminal input mode의 mouse event는 Shift modifier를 포함해 tmux mouse protocol로 전달한다.
 - session/window 조작은 기존처럼 tmux command backend를 사용한다.
 
 ---
@@ -87,7 +87,7 @@ ratatui shell과 user interaction을 담당한다.
   - 매 frame 전 `TmuxTerminal::drain()`으로 PTY output을 parser에 반영한다.
   - main pane inner rect가 바뀌면 PTY size와 parser size를 함께 resize한다.
   - tmux metadata는 `capture-pane`처럼 빠르게 polling하지 않고, mutation 이후 또는 느슨한 interval로 갱신한다.
-  - Shift + left mouse down/drag/up은 `host_text_selection_mouse_override`에서 걸러 hover, modal, sidebar, child terminal로 전달하지 않는다. 대부분의 터미널 emulator는 이 조합을 앱 mouse tracking bypass/native selection으로 사용한다.
+  - terminal input mode에서는 main pane mouse event를 tmux가 협상한 mouse protocol encoding으로 PTY writer에 전달한다. Shift modifier도 tmux가 일반 mouse input처럼 처리할 수 있게 인코딩한다.
 
 - renderer
   - `TmuxTerminal::styled_rows()`를 ratatui `Line/Span`으로 변환한다.
@@ -234,7 +234,7 @@ set -g history-limit 100000
 - hit testing.
 - terminal key encoding.
 - terminal mouse encoding.
-- Shift mouse drag override.
+- terminal style 변환(default fg/bg 보존, reverse modifier).
 - installer `.tmux.conf` idempotency.
 
 ### 추가 권장 테스트
@@ -249,7 +249,7 @@ set -g history-limit 100000
 
 ## 10. 알려진 trade-off
 
-- embedded tmux client는 tmux statusline까지 그릴 수 있다. v0.9에서는 사용자의 tmux option을 강제로 바꾸지 않는 쪽을 선택했다.
+- embedded tmux client는 tmux statusline까지 그릴 수 있다. v0.10에서는 사용자의 tmux option을 강제로 바꾸지 않는 쪽을 선택했다.
 - main pane이 “active pane만”이 아니라 tmux client 화면 전체를 보여준다. 이는 terminal fidelity를 우선한 선택이다.
 - control-mode보다 session/window event 정밀도는 낮다. metadata는 command polling과 mutation 이후 refresh로 보정한다.
 - snapshot 기반 terminal emulation test는 제거되었고, terminal key/mouse encoding test는 `src/terminal.rs`가 담당한다.
