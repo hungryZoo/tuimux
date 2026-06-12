@@ -18,6 +18,7 @@ tuimux의 가장 큰 문제는 main pane이 실제 터미널이 아니라 `tmux 
 - main pane은 실제 PTY에서 실행되는 tmux client 화면을 렌더한다.
 - output은 byte stream으로 받고 `vt100::Parser`가 screen cell state를 유지한다.
 - input은 `send-keys` 명령이 아니라 PTY writer에 terminal byte sequence로 전달한다.
+- Shift + 왼쪽 마우스 드래그는 host terminal text selection을 위해 UI router가 처리하지 않는다.
 - session/window 조작은 기존처럼 tmux command backend를 사용한다.
 
 ---
@@ -86,6 +87,7 @@ ratatui shell과 user interaction을 담당한다.
   - 매 frame 전 `TmuxTerminal::drain()`으로 PTY output을 parser에 반영한다.
   - main pane inner rect가 바뀌면 PTY size와 parser size를 함께 resize한다.
   - tmux metadata는 `capture-pane`처럼 빠르게 polling하지 않고, mutation 이후 또는 느슨한 interval로 갱신한다.
+  - Shift + left mouse down/drag/up은 `host_text_selection_mouse_override`에서 걸러 hover, modal, sidebar, child terminal로 전달하지 않는다. 대부분의 터미널 emulator는 이 조합을 앱 mouse tracking bypass/native selection으로 사용한다.
 
 - renderer
   - `TmuxTerminal::styled_rows()`를 ratatui `Line/Span`으로 변환한다.
@@ -176,7 +178,37 @@ ratatui layout은 main pane의 border를 포함한 `Rect`를 만든다. 실제 t
 
 ---
 
-## 7. 왜 control-mode가 아닌가
+## 7. 설치/릴리즈 설계
+
+- `scripts/install.sh`
+  - macOS와 Linux에서 동작한다.
+  - OS/architecture를 release target triple로 변환한다.
+  - macOS: `aarch64-apple-darwin`, `x86_64-apple-darwin`
+  - Linux: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`
+  - release tarball과 `SHA256SUMS`를 내려받아 checksum을 검증한다.
+  - `TUIMUX_TMUX_CONF` 또는 기본 `~/.tmux.conf`에 활성 `mouse`/`history-limit` 설정이 없으면 다음을 추가한다.
+
+```tmux
+set -g mouse on
+set -g history-limit 100000
+```
+
+- `scripts/install.ps1`
+  - Windows x86_64/arm64 zip asset을 설치한다.
+  - 기본 설치 위치는 `%LOCALAPPDATA%\Programs\tuimux\bin`이다.
+  - Windows에서도 tmux는 별도 런타임 의존성이다.
+
+- `.github/workflows/release.yml`
+  - macOS tarball: x86_64, arm64
+  - Windows zip: x86_64, arm64
+  - Linux tarball: x86_64, arm64, armv7
+  - `.deb`: amd64, arm64, armhf
+  - `.rpm`: x86_64, aarch64, armv7hl
+  - Raspberry Pi는 64-bit OS에서 Linux arm64 asset, 32-bit OS에서 Linux armv7/armhf asset을 사용한다.
+
+---
+
+## 8. 왜 control-mode가 아닌가
 
 장기적으로 가장 정교한 방향은 `tmux -CC` control-mode client다. control-mode는 pane output event, layout event, window/session event를 protocol 단위로 받을 수 있다.
 
@@ -191,7 +223,7 @@ ratatui layout은 main pane의 border를 포함한 `Rect`를 만든다. 실제 t
 
 ---
 
-## 8. 테스트 전략
+## 9. 테스트 전략
 
 ### 현재 자동화
 
@@ -202,6 +234,8 @@ ratatui layout은 main pane의 border를 포함한 `Rect`를 만든다. 실제 t
 - hit testing.
 - terminal key encoding.
 - terminal mouse encoding.
+- Shift mouse drag override.
+- installer `.tmux.conf` idempotency.
 
 ### 추가 권장 테스트
 
@@ -213,7 +247,7 @@ ratatui layout은 main pane의 border를 포함한 `Rect`를 만든다. 실제 t
 
 ---
 
-## 9. 알려진 trade-off
+## 10. 알려진 trade-off
 
 - embedded tmux client는 tmux statusline까지 그릴 수 있다. v0.9에서는 사용자의 tmux option을 강제로 바꾸지 않는 쪽을 선택했다.
 - main pane이 “active pane만”이 아니라 tmux client 화면 전체를 보여준다. 이는 terminal fidelity를 우선한 선택이다.

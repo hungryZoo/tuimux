@@ -20,6 +20,9 @@
 - `clear`, ANSI color/style, resize, cursor, alternate screen app에 대한 기본 terminal fidelity 개선.
 - right sidebar의 Session, Detach, WINDOWS, `+ new`, window close UX 유지.
 - session dialog에서 session 선택 시 embedded tmux client를 해당 session으로 재attach.
+- Shift + 왼쪽 마우스 드래그는 tuimux가 소비하지 않고 host terminal native text selection에 맡긴다.
+- Unix 계열 설치 스크립트는 `.tmux.conf`에 `mouse on`, `history-limit 100000` 설정이 없을 때만 추가한다.
+- GitHub prerelease는 macOS, Windows, Linux tarball, Linux `.deb`/`.rpm`, Raspberry Pi용 Linux ARM asset을 제공한다.
 - `--native-client`, `--doctor`, `--version`, `--layout-preview` 유지.
 - 한국어 SRS/SDD 문서 유지.
 
@@ -63,6 +66,7 @@
 - **FR-TERM-8 [P0]** host terminal resize 시 main pane inner rect 크기를 PTY size와 `vt100` parser size에 동기화해야 한다.
 - **FR-TERM-9 [P1]** terminal app이 mouse protocol을 활성화하면 main pane mouse event를 child terminal로 전달해야 한다.
 - **FR-TERM-10 [P1]** bracketed paste가 활성화된 경우 paste payload를 `\x1b[200~`/`\x1b[201~`로 감싸 전달해야 한다.
+- **FR-TERM-11 [P0]** Shift + 왼쪽 mouse down/drag/up은 hover, sidebar action, child terminal mouse event로 처리하지 않아야 한다.
 
 ### 2.4 Input Mode
 
@@ -84,6 +88,20 @@
 - **FR-NATIVE-2 [P0]** tmux 밖에서는 `tmux -u attach-session -t <session>`을 실행해야 한다.
 - **FR-NATIVE-3 [P0]** tmux 안에서는 nested attach 대신 `tmux switch-client -t <session>`을 실행해야 한다.
 
+### 2.7 Installer / Release
+
+- **FR-INSTALL-1 [P0]** `scripts/install.sh`는 macOS와 Linux에서 실행 가능해야 한다.
+- **FR-INSTALL-2 [P0]** `scripts/install.sh`는 OS/architecture를 감지해 macOS x86_64/arm64, Linux x86_64/arm64/armv7 tarball asset을 설치해야 한다.
+- **FR-INSTALL-3 [P0]** `scripts/install.sh`는 `.tmux.conf`에 활성 `mouse` 설정이 없으면 `set -g mouse on`을 추가해야 한다.
+- **FR-INSTALL-4 [P0]** `scripts/install.sh`는 `.tmux.conf`에 활성 `history-limit` 설정이 없으면 `set -g history-limit 100000`을 추가해야 한다.
+- **FR-INSTALL-5 [P0]** `scripts/install.ps1`는 Windows x86_64/arm64 zip asset을 설치해야 한다.
+- **FR-REL-1 [P0]** tag push release workflow는 macOS x86_64/arm64 tarball을 생성해야 한다.
+- **FR-REL-2 [P0]** tag push release workflow는 Windows x86_64/arm64 zip을 생성해야 한다.
+- **FR-REL-3 [P0]** tag push release workflow는 Linux x86_64/arm64/armv7 tarball을 생성해야 한다.
+- **FR-REL-4 [P0]** tag push release workflow는 Debian/Ubuntu용 amd64/arm64/armhf `.deb`를 생성해야 한다.
+- **FR-REL-5 [P0]** tag push release workflow는 RPM 계열용 x86_64/aarch64/armv7hl `.rpm`을 생성해야 한다.
+- **FR-REL-6 [P0]** release는 모든 artifact에 대한 `SHA256SUMS`를 제공해야 한다.
+
 ---
 
 ## 3. 비기능 요구사항
@@ -92,7 +110,8 @@
 - **NFR-SAFE-1 [P0]** 종료, detach, panic path 이후 raw mode, alternate screen, mouse capture, cursor 상태를 복구해야 한다.
 - **NFR-PERF-1 [P1]** idle 상태에서 과도한 tmux command polling을 수행하지 않아야 한다.
 - **NFR-PERF-2 [P1]** output이 빠르게 들어와도 UI input loop가 장시간 멈추면 안 된다.
-- **NFR-COMPAT-1 [P0]** macOS와 Linux의 xterm-compatible terminal에서 동작해야 한다.
+- **NFR-COMPAT-1 [P0]** macOS, Linux, Raspberry Pi OS의 xterm-compatible terminal에서 동작해야 한다.
+- **NFR-COMPAT-1A [P1]** Windows binary는 빌드/배포하되, 런타임은 PATH에서 접근 가능한 tmux 환경(MSYS2/Cygwin/WSL interop 등)을 요구한다.
 - **NFR-COMPAT-2 [P0]** minimum tmux version은 `tmux 3.0` 이상으로 유지한다.
 - **NFR-DOC-1 [P0]** 문서는 한국어로 새 구조와 알려진 한계를 설명해야 한다.
 
@@ -135,6 +154,9 @@ Native fallback only:
 - **AC-8 [P0]** terminal input mode에서 `echo hello`가 정확히 한 번 실행된다.
 - **AC-9 [P0]** F12 후 `q`는 shell에 입력되지 않고 tuimux 종료로 처리된다.
 - **AC-10 [P1]** `less`, `top`, `vim` 같은 alternate-screen app이 이전 snapshot 방식보다 명확히 안정적으로 표시된다.
+- **AC-11 [P0]** `scripts/install.sh`를 빈 `TUIMUX_TMUX_CONF`로 실행하면 `set -g mouse on`과 `set -g history-limit 100000`이 추가되고, 재실행해도 중복되지 않는다.
+- **AC-12 [P0]** Shift + 왼쪽 mouse drag unit test가 tuimux host text selection override를 검증한다.
+- **AC-13 [P0]** release workflow가 macOS, Windows, Linux tarball, `.deb`, `.rpm`, `SHA256SUMS` artifact를 생성한다.
 
 ---
 

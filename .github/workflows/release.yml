@@ -1,7 +1,7 @@
 name: release
 
-# Build a macOS Apple Silicon asset and publish a GitHub *prerelease* whenever a
-# v* tag is pushed.
+# Build prerelease assets for macOS, Windows, Linux, and Raspberry Pi-class
+# Linux ARM targets whenever a v* tag is pushed.
 
 on:
   push:
@@ -10,27 +10,34 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.1.0). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.2). Used for manual runs."
         required: true
 
 permissions:
-  contents: write # needed to create the release and upload assets
+  contents: write
 
 env:
   BINARY: tuimux
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
-    name: build macOS arm64
+  build-macos:
+    name: macOS ${{ matrix.arch }}
     runs-on: macos-latest
-    env:
-      TARGET: aarch64-apple-darwin
-      ARCH: arm64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
 
       - name: Resolve version
         id: ver
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
@@ -39,9 +46,10 @@ jobs:
           fi
 
       - name: Install Rust toolchain
+        shell: bash
         run: |
           rustup toolchain install stable --profile minimal
-          rustup target add "$TARGET"
+          rustup target add "${{ matrix.target }}"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -50,62 +58,286 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-aarch64-apple-darwin-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          key: macos-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target "$TARGET"
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}"
 
       - name: Package tarball
-        id: pkg
+        shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
+          TARGET="${{ matrix.target }}"
           STAGE="${BINARY}-${VERSION}-${TARGET}"
           mkdir -p "dist/${STAGE}"
 
           cp "target/${TARGET}/release/${BINARY}" "dist/${STAGE}/"
           cp README.md "dist/${STAGE}/" 2>/dev/null || true
           [ -f LICENSE ] && cp LICENSE "dist/${STAGE}/" || true
-
-          # Short install notes bundled with the binary.
           cat > "dist/${STAGE}/INSTALL.txt" <<EOF
-          tuimux ${VERSION} — macOS (${ARCH} / ${TARGET})
+          tuimux ${VERSION} - macOS (${{ matrix.arch }} / ${TARGET})
 
-          1. Ensure tmux is installed:   brew install tmux
-          2. Move the binary onto your PATH, e.g.:
-               install -m 0755 ${BINARY} ~/.local/bin/${BINARY}
-          3. If macOS blocks it (Gatekeeper):
-               xattr -d com.apple.quarantine ~/.local/bin/${BINARY}
-          4. Verify:
-               ${BINARY} --version
-               ${BINARY} --doctor
+          Runtime dependency:
+            brew install tmux
 
-          Or use the one-line installer:
+          Install:
+            install -m 0755 ${BINARY} ~/.local/bin/${BINARY}
+
+          Verify:
+            ${BINARY} --version
+            ${BINARY} --doctor
+
+          One-line installer:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
           EOF
 
-          ARCHIVE="${STAGE}.tar.gz"
-          tar -C dist -czf "$ARCHIVE" "$STAGE"
-          shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+          tar -C dist -czf "${STAGE}.tar.gz" "$STAGE"
+          mkdir -p artifacts
+          mv "${STAGE}.tar.gz" artifacts/
 
-          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aarch64-apple-darwin
+          name: macos-${{ matrix.target }}
+          path: artifacts/*
+          retention-days: 7
+
+  build-windows:
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "version=${{ github.event.inputs.tag }}" >> $env:GITHUB_OUTPUT
+          } else {
+            "version=$env:GITHUB_REF_NAME" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
           path: |
-            ${{ steps.pkg.outputs.archive }}
-            ${{ steps.pkg.outputs.archive }}.sha256
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.ver.outputs.version }}"
+          $target = "${{ matrix.target }}"
+          $stage = "${env:BINARY}-${version}-${target}"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item "target/$target/release/${env:BINARY}.exe" "dist/$stage/"
+          Copy-Item "README.md" "dist/$stage/" -ErrorAction SilentlyContinue
+          if (Test-Path "LICENSE") { Copy-Item "LICENSE" "dist/$stage/" }
+          @"
+          tuimux $version - Windows (${{ matrix.arch }} / $target)
+
+          Runtime dependency:
+            tmux must be available on PATH, typically through MSYS2, Cygwin, or WSL interop.
+
+          Verify:
+            ${env:BINARY}.exe --version
+            ${env:BINARY}.exe --doctor
+
+          PowerShell installer:
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
+          "@ | Set-Content -Encoding UTF8 "dist/$stage/INSTALL.txt"
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Compress-Archive -Path "dist/$stage" -DestinationPath "artifacts/$stage.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.target }}
+          path: artifacts/*
+          retention-days: 7
+
+  build-linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            deb_arch: amd64
+            rpm_arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
+            deb_arch: arm64
+            rpm_arch: aarch64
+          - target: armv7-unknown-linux-gnueabihf
+            arch: armv7
+            deb_arch: armhf
+            rpm_arch: armv7hl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust and packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          rustup toolchain install stable --profile minimal
+          rustup target add "${{ matrix.target }}"
+          cargo install cargo-zigbuild --locked
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+
+      - name: Build release binary
+        shell: bash
+        run: cargo zigbuild --release --locked --target "${{ matrix.target }}"
+
+      - name: Package tarball, deb, and rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          PKG_VERSION="${VERSION#v}"
+          DEB_VERSION="${PKG_VERSION/-/~}"
+          RPM_VERSION="${PKG_VERSION%%-*}"
+          RPM_RELEASE="${PKG_VERSION#*-}"
+          if [ "$RPM_RELEASE" = "$PKG_VERSION" ]; then RPM_RELEASE="1"; fi
+          RPM_RELEASE="${RPM_RELEASE//-/_}"
+          TARGET="${{ matrix.target }}"
+          DEB_ARCH="${{ matrix.deb_arch }}"
+          RPM_ARCH="${{ matrix.rpm_arch }}"
+          STAGE="${BINARY}-${VERSION}-${TARGET}"
+          BIN="target/${TARGET}/release/${BINARY}"
+
+          mkdir -p artifacts "dist/${STAGE}"
+          cp "$BIN" "dist/${STAGE}/"
+          cp README.md "dist/${STAGE}/" 2>/dev/null || true
+          [ -f LICENSE ] && cp LICENSE "dist/${STAGE}/" || true
+          cat > "dist/${STAGE}/INSTALL.txt" <<EOF
+          tuimux ${VERSION} - Linux (${{ matrix.arch }} / ${TARGET})
+
+          Runtime dependency:
+            tmux must be installed by your package manager.
+
+          Install tarball binary:
+            install -m 0755 ${BINARY} ~/.local/bin/${BINARY}
+
+          Or install the .deb/.rpm asset for your distro and architecture.
+          EOF
+          tar -C dist -czf "artifacts/${STAGE}.tar.gz" "$STAGE"
+
+          DEB_ROOT="pkg/deb/${BINARY}_${DEB_VERSION}_${DEB_ARCH}"
+          mkdir -p "${DEB_ROOT}/DEBIAN" "${DEB_ROOT}/usr/bin" "${DEB_ROOT}/usr/share/doc/${BINARY}"
+          install -m 0755 "$BIN" "${DEB_ROOT}/usr/bin/${BINARY}"
+          cp README.md "${DEB_ROOT}/usr/share/doc/${BINARY}/README.md"
+          [ -f LICENSE ] && cp LICENSE "${DEB_ROOT}/usr/share/doc/${BINARY}/LICENSE" || true
+          cat > "${DEB_ROOT}/DEBIAN/control" <<EOF
+          Package: ${BINARY}
+          Version: ${DEB_VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: ${DEB_ARCH}
+          Maintainer: hungryZoo
+          Depends: tmux
+          Description: Prefix-free, mouse-first TUI front-end for tmux
+           tuimux wraps tmux with a ratatui interface and a PTY-backed terminal pane.
+          EOF
+          dpkg-deb --build "${DEB_ROOT}" "artifacts/${BINARY}_${DEB_VERSION}_${DEB_ARCH}.deb"
+
+          RPM_TOP="$PWD/pkg/rpm/${RPM_ARCH}"
+          mkdir -p "${RPM_TOP}"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          install -m 0755 "$BIN" "${RPM_TOP}/SOURCES/${BINARY}"
+          cat > "${RPM_TOP}/SPECS/${BINARY}.spec" <<EOF
+          Name: ${BINARY}
+          Version: ${RPM_VERSION}
+          Release: ${RPM_RELEASE}%{?dist}
+          Summary: Prefix-free, mouse-first TUI front-end for tmux
+          License: MIT
+          URL: https://github.com/${{ github.repository }}
+          Requires: tmux
+
+          %description
+          tuimux wraps tmux with a ratatui interface and a PTY-backed terminal pane.
+
+          %prep
+
+          %build
+
+          %install
+          mkdir -p %{buildroot}/usr/bin
+          install -m 0755 %{SOURCE0} %{buildroot}/usr/bin/${BINARY}
+
+          %files
+          /usr/bin/${BINARY}
+          EOF
+          rpmbuild -bb \
+            --target "${RPM_ARCH}" \
+            --define "_topdir ${RPM_TOP}" \
+            --define "__os_install_post %{nil}" \
+            "${RPM_TOP}/SPECS/${BINARY}.spec"
+          find "${RPM_TOP}/RPMS" -type f -name '*.rpm' -exec cp {} artifacts/ \;
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.target }}
+          path: artifacts/*
           retention-days: 7
 
   release:
     name: publish prerelease
-    needs: build
-    runs-on: macos-latest
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Resolve version
         id: ver
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
@@ -119,15 +351,22 @@ jobs:
           path: artifacts
 
       - name: Assemble assets + SHA256SUMS
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p release
-          # Flatten the per-target artifact dirs into one folder.
-          find artifacts -type f -name '*.tar.gz' -exec cp {} release/ \;
+          find artifacts -type f \( \
+            -name '*.tar.gz' -o \
+            -name '*.zip' -o \
+            -name '*.deb' -o \
+            -name '*.rpm' \
+          \) -exec cp {} release/ \;
           cd release
-          # One combined checksum file across all archives.
-          shasum -a 256 *.tar.gz > SHA256SUMS
-          echo "Release assets:"; ls -la; echo; cat SHA256SUMS
+          sha256sum * > SHA256SUMS
+          echo "Release assets:"
+          ls -la
+          echo
+          cat SHA256SUMS
 
       - name: Create GitHub prerelease
         uses: softprops/action-gh-release@v2
@@ -140,18 +379,26 @@ jobs:
           body: |
             ## tuimux ${{ steps.ver.outputs.version }} (prerelease)
 
-            macOS Apple Silicon (arm64) binary is attached.
+            Multiplatform prerelease assets are attached:
+            - macOS: x86_64 and arm64 tarballs
+            - Windows: x86_64 and arm64 zip archives
+            - Linux: x86_64, arm64, and armv7 tarballs
+            - Debian/Ubuntu: amd64, arm64, and armhf `.deb`
+            - Fedora/RHEL-style: x86_64, aarch64, and armv7hl `.rpm`
+            - Raspberry Pi: use the Linux arm64 asset for 64-bit OS images, or armv7/armhf for 32-bit images
 
-            This prerelease replaces the old `capture-pane`/`send-keys` main pane with a real tmux client running inside a PTY. tuimux parses the PTY byte stream with `vt100`, renders terminal cells through ratatui, forwards terminal input as bytes, and resizes the PTY to match the main pane. The default command remains the tuimux ratatui UI; plain tmux remains hidden behind `--native-client`.
+            This prerelease keeps the PTY-backed tmux terminal pane, adds installer tmux defaults (`mouse on`, `history-limit 100000` when absent), and reserves Shift+left mouse drag for host terminal text selection.
 
-            ### Install (one-liner)
+            ### macOS/Linux installer
             ```sh
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | bash
             ```
 
-            Requires `tmux` at runtime (`brew install tmux`). Verify with `tuimux --doctor`.
+            ### Windows PowerShell installer
+            ```powershell
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
+            ```
 
-            Checksums are in `SHA256SUMS`.
+            Requires `tmux` at runtime. Checksums are in `SHA256SUMS`.
           files: |
-            release/*.tar.gz
-            release/SHA256SUMS
+            release/*

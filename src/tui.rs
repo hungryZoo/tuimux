@@ -346,6 +346,11 @@ fn run_loop(terminal: &mut Term, tmux: &Tmux<RealTmux>, state: &mut UiState) -> 
                 }
             }
             Event::Mouse(mouse) => {
+                if host_text_selection_mouse_override(mouse.kind, mouse.modifiers) {
+                    state.hover = None;
+                    continue;
+                }
+
                 if state.terminal_mode {
                     if let Some((row, col)) =
                         terminal_cell_at(mouse.column, mouse.row, state.regions.terminal_body)
@@ -960,6 +965,16 @@ fn terminal_cell_at(x: u16, y: u16, body: Rect) -> Option<(u16, u16)> {
     Some((y.saturating_sub(body.y), x.saturating_sub(body.x)))
 }
 
+fn host_text_selection_mouse_override(kind: MouseEventKind, modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(
+            kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,5 +1018,29 @@ mod tests {
             Some(Hotspot::ModalNewSession)
         );
         assert_eq!(hit_test(19, 21, &regions, true), Some(Hotspot::ModalDetach));
+    }
+
+    #[test]
+    fn shift_left_mouse_drag_is_reserved_for_host_text_selection() {
+        assert!(host_text_selection_mouse_override(
+            MouseEventKind::Down(MouseButton::Left),
+            KeyModifiers::SHIFT
+        ));
+        assert!(host_text_selection_mouse_override(
+            MouseEventKind::Drag(MouseButton::Left),
+            KeyModifiers::SHIFT
+        ));
+        assert!(host_text_selection_mouse_override(
+            MouseEventKind::Up(MouseButton::Left),
+            KeyModifiers::SHIFT
+        ));
+        assert!(!host_text_selection_mouse_override(
+            MouseEventKind::Drag(MouseButton::Left),
+            KeyModifiers::NONE
+        ));
+        assert!(!host_text_selection_mouse_override(
+            MouseEventKind::Drag(MouseButton::Right),
+            KeyModifiers::SHIFT
+        ));
     }
 }

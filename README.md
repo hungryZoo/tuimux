@@ -2,7 +2,7 @@
 
 `tuimux` is an early Rust MVP for a prefix-free, mouse-first TUI wrapper around tmux.
 
-v0.2.0-alpha.1 keeps the tuimux ratatui UI as the default and replaces the old snapshot-style main pane with a PTY-backed tmux terminal surface. Running `tuimux` opens the tuimux UI with a real tmux-backed main pane plus right sidebar session/window controls. Plain tmux remains opt-in only via the hidden `--native-client` fallback.
+v0.2.0-alpha.2 keeps the tuimux ratatui UI as the default and replaces the old snapshot-style main pane with a PTY-backed tmux terminal surface. Running `tuimux` opens the tuimux UI with a real tmux-backed main pane plus right sidebar session/window controls. Plain tmux remains opt-in only via the hidden `--native-client` fallback.
 
 See:
 
@@ -19,18 +19,26 @@ This is still a 0.x prerelease. Current behavior:
 - The session dialog opens by default and includes session selection, `New Session`, and `Detach`.
 - Session/window operations use real tmux commands.
 - The main pane runs a real tmux client inside a PTY, parses the byte stream with `vt100`, renders terminal cells with ratatui spans, and resizes the PTY to the TUI main-area size.
+- Shift + left mouse drag is reserved for the host terminal's native text selection.
 - `tuimux --native-client` is a hidden fallback that opens a plain tmux client if needed.
 - `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
 
-## macOS Apple Silicon install
+## Install
 
-Runtime dependency:
+Runtime dependency: `tmux`.
 
 ```sh
+# macOS
 brew install tmux
+
+# Debian/Ubuntu
+sudo apt install tmux
+
+# Fedora/RHEL
+sudo dnf install tmux
 ```
 
-### One-line installer
+### macOS / Linux one-line installer
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
@@ -39,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/insta
 Install a specific prerelease tag:
 
 ```sh
-TUIMUX_VERSION=v0.2.0-alpha.1 \
+TUIMUX_VERSION=v0.2.0-alpha.2 \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
 
@@ -49,6 +57,21 @@ Custom install directory:
 TUIMUX_INSTALL_DIR="$HOME/bin" \
   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.sh | bash
 ```
+
+The shell installer also ensures these tmux defaults exist in `~/.tmux.conf` without overwriting existing settings:
+
+```tmux
+set -g mouse on
+set -g history-limit 100000
+```
+
+### Windows PowerShell installer
+
+```powershell
+irm https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.ps1 | iex
+```
+
+Windows builds are published as zip archives. `tmux` still needs to be available on `PATH`, typically through MSYS2, Cygwin, or WSL interop.
 
 Verify:
 
@@ -75,4 +98,4 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.1` triggers `.github/workflows/release.yml`, which builds a macOS Apple Silicon archive and publishes a GitHub prerelease.
+Pushing a tag like `v0.2.0-alpha.2` triggers `.github/workflows/release.yml`, which publishes a GitHub prerelease with macOS, Windows, Linux tarballs, Linux `.deb`/`.rpm` packages, and Raspberry Pi arm64/armv7 assets.
