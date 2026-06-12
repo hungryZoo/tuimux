@@ -41,11 +41,6 @@ enum Hotspot {
     Window(usize),
     WindowClose(usize),
     NewWindow,
-    Pane(usize),
-    SplitPaneRight,
-    SplitPaneDown,
-    NextPane,
-    KillPane,
     ModalSession(usize),
     ModalNewSession,
     ModalDetach,
@@ -61,12 +56,6 @@ struct Regions {
     windows: [Rect; 8],
     window_close: [Rect; 8],
     window_count: usize,
-    pane_rows: [Rect; 8],
-    pane_count: usize,
-    split_pane_right: Rect,
-    split_pane_down: Rect,
-    next_pane: Rect,
-    kill_pane: Rect,
     terminal_panes: [Rect; 8],
     terminal_pane_count: usize,
     modal_new_session: Rect,
@@ -98,6 +87,7 @@ struct UiState {
     terminal_cursor: Option<(u16, u16)>,
     terminal_hide_cursor: bool,
     terminal_mouse_protocol_active: bool,
+    terminal_scrollback: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -134,6 +124,7 @@ impl UiState {
             terminal_cursor: None,
             terminal_hide_cursor: true,
             terminal_mouse_protocol_active: false,
+            terminal_scrollback: 0,
         };
         let snapshot = state.mux.snapshot(80, 24, None)?;
         state.apply_snapshot(snapshot);
@@ -165,6 +156,7 @@ impl UiState {
         self.terminal_cursor = snapshot.terminal.cursor;
         self.terminal_hide_cursor = snapshot.terminal.hide_cursor;
         self.terminal_mouse_protocol_active = snapshot.terminal.mouse_protocol_active;
+        self.terminal_scrollback = snapshot.terminal.scrollback;
     }
 
     fn selection_range(&self) -> Option<SelectionRange> {
@@ -379,29 +371,41 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     (KeyCode::Char('s'), KeyModifiers::ALT) => {
                         state.session_modal_open = !state.session_modal_open;
                     }
-                    (KeyCode::Char('|'), _) | (KeyCode::Char('v'), _) => {
-                        split_pane_right(state);
-                    }
-                    (KeyCode::Char('-'), _) | (KeyCode::Char('h'), _) => {
-                        split_pane_down(state);
+                    (KeyCode::Char('|'), _)
+                    | (KeyCode::Char('v'), _)
+                    | (KeyCode::Char('-'), _)
+                    | (KeyCode::Char('h'), _) => {
+                        deprecated_split_pane(state);
                     }
                     (KeyCode::Tab, _) => {
-                        select_next_pane(state);
+                        select_adjacent_window(state, 1);
+                    }
+                    (KeyCode::PageUp, _) => {
+                        scroll_active_pane(state, scroll_page_lines(state));
+                    }
+                    (KeyCode::PageDown, _) => {
+                        scroll_active_pane(state, -scroll_page_lines(state));
+                    }
+                    (KeyCode::Home, _) => {
+                        scroll_active_pane(state, 1_000_000);
+                    }
+                    (KeyCode::End, _) => {
+                        scroll_active_pane(state, 0);
                     }
                     (KeyCode::Left, _) => {
-                        resize_pane(state, PaneAxis::Columns, false);
+                        select_adjacent_window(state, -1);
                     }
                     (KeyCode::Right, _) => {
-                        resize_pane(state, PaneAxis::Columns, true);
+                        select_adjacent_window(state, 1);
                     }
                     (KeyCode::Up, _) => {
-                        resize_pane(state, PaneAxis::Rows, false);
+                        select_adjacent_window(state, -1);
                     }
                     (KeyCode::Down, _) => {
-                        resize_pane(state, PaneAxis::Rows, true);
+                        select_adjacent_window(state, 1);
                     }
                     (KeyCode::Char('x'), _) => {
-                        kill_active_pane(state);
+                        deprecated_split_pane(state);
                     }
                     (KeyCode::Char('d'), _) => {
                         return Ok(Exit::Detach);
@@ -457,6 +461,36 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     let selection_gesture =
                         mouse.modifiers.contains(KeyModifiers::SHIFT) || !child_wants_mouse;
 
+                    if !child_wants_mouse {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                if !state
+                                    .panes
+                                    .get(pane_row)
+                                    .map(|pane| pane.active)
+                                    .unwrap_or(false)
+                                {
+                                    select_pane(state, pane_row);
+                                }
+                                scroll_active_pane(state, 3);
+                                continue;
+                            }
+                            MouseEventKind::ScrollDown => {
+                                if !state
+                                    .panes
+                                    .get(pane_row)
+                                    .map(|pane| pane.active)
+                                    .unwrap_or(false)
+                                {
+                                    select_pane(state, pane_row);
+                                }
+                                scroll_active_pane(state, -3);
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) if selection_gesture => {
                             state.terminal_mode = true;
@@ -508,21 +542,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                         Some(Hotspot::NewWindow) => {
                             new_window(state);
                         }
-                        Some(Hotspot::Pane(idx)) => {
-                            select_pane(state, idx);
-                        }
-                        Some(Hotspot::SplitPaneRight) => {
-                            split_pane_right(state);
-                        }
-                        Some(Hotspot::SplitPaneDown) => {
-                            split_pane_down(state);
-                        }
-                        Some(Hotspot::NextPane) => {
-                            select_next_pane(state);
-                        }
-                        Some(Hotspot::KillPane) => {
-                            kill_active_pane(state);
-                        }
                         Some(Hotspot::ModalNewSession) => {
                             new_session(state);
                         }
@@ -558,6 +577,26 @@ fn select_window(state: &mut UiState, idx: usize) {
     }
 }
 
+fn select_adjacent_window(state: &mut UiState, delta: i32) {
+    let count = state.windows.len();
+    if count == 0 {
+        state.status = Some("no windows".to_string());
+        return;
+    }
+    if count == 1 {
+        state.status = Some("only one window".to_string());
+        return;
+    }
+
+    let active = state
+        .windows
+        .iter()
+        .position(|window| window.active)
+        .unwrap_or(0) as i32;
+    let next = (active + delta).rem_euclid(count as i32) as usize;
+    select_window(state, next);
+}
+
 fn kill_window(state: &mut UiState, idx: usize) {
     let (width, height) = active_terminal_size(state);
     match state.mux.kill_window_by_row(idx, width, height) {
@@ -581,69 +620,34 @@ fn select_pane(state: &mut UiState, idx: usize) {
     }
 }
 
-fn split_pane_right(state: &mut UiState) {
-    let (width, height) = active_terminal_size(state);
-    match state.mux.split_pane_right(width, height) {
-        Ok(index) => {
-            state.status = Some(format!("split pane {index} right"));
-            state.clear_selection();
-            state.sync_terminal(width, height);
-        }
-        Err(e) => state.status = Some(format!("split-pane failed: {e}")),
-    }
+fn deprecated_split_pane(state: &mut UiState) {
+    state.status = Some("split panes are deprecated; use windows".to_string());
 }
 
-fn split_pane_down(state: &mut UiState) {
-    let (width, height) = active_terminal_size(state);
-    match state.mux.split_pane_down(width, height) {
-        Ok(index) => {
-            state.status = Some(format!("split pane {index} down"));
-            state.clear_selection();
-            state.sync_terminal(width, height);
-        }
-        Err(e) => state.status = Some(format!("split-pane failed: {e}")),
-    }
+fn scroll_page_lines(state: &UiState) -> i32 {
+    state
+        .terminal_panes
+        .iter()
+        .find(|pane| pane.active)
+        .map(|pane| pane.rect.height)
+        .unwrap_or_else(|| state.regions.terminal_body.height)
+        .saturating_sub(1)
+        .max(1) as i32
 }
 
-fn select_next_pane(state: &mut UiState) {
-    match state.mux.select_next_pane() {
-        Ok(index) => {
-            state.status = Some(format!("selected pane {index}"));
+fn scroll_active_pane(state: &mut UiState, lines: i32) {
+    match state.mux.scroll_active_pane(lines) {
+        Ok(scrollback) => {
             state.clear_selection();
+            state.status = Some(if scrollback == 0 {
+                "scrollback bottom".to_string()
+            } else {
+                format!("scrollback {scrollback} rows")
+            });
             let (width, height) = active_terminal_size(state);
             state.sync_terminal(width, height);
         }
-        Err(e) => state.status = Some(format!("next-pane failed: {e}")),
-    }
-}
-
-fn kill_active_pane(state: &mut UiState) {
-    let (width, height) = active_terminal_size(state);
-    match state.mux.kill_active_pane(width, height) {
-        Ok(index) => {
-            state.status = Some(format!("killed pane {index}"));
-            state.clear_selection();
-            state.sync_terminal(width, height);
-        }
-        Err(e) => state.status = Some(format!("kill-pane failed: {e}")),
-    }
-}
-
-fn resize_pane(state: &mut UiState, axis: PaneAxis, grow: bool) {
-    let (width, height) = active_terminal_size(state);
-    match state.mux.resize_active_pane(axis, grow, width, height) {
-        Ok(()) => {
-            let direction = match (axis, grow) {
-                (PaneAxis::Columns, true) => "wider",
-                (PaneAxis::Columns, false) => "narrower",
-                (PaneAxis::Rows, true) => "taller",
-                (PaneAxis::Rows, false) => "shorter",
-            };
-            state.status = Some(format!("resized active pane {direction}"));
-            state.clear_selection();
-            state.sync_terminal(width, height);
-        }
-        Err(e) => state.status = Some(format!("resize-pane failed: {e}")),
+        Err(e) => state.status = Some(format!("scrollback failed: {e}")),
     }
 }
 
@@ -744,7 +748,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         body[1],
         session_label,
         &state.windows,
-        &state.panes,
+        state.status.as_deref(),
         state.hover,
         &mut state.regions,
     );
@@ -1045,17 +1049,17 @@ fn render_sidebar(
     area: Rect,
     session_label: &str,
     windows: &[Window],
-    panes: &[Pane],
+    status: Option<&str>,
     hover: Option<Hotspot>,
     regions: &mut Regions,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // session button
-            Constraint::Length(3),  // detach button
-            Constraint::Min(5),     // windows
-            Constraint::Length(10), // panes
+            Constraint::Length(3), // session button
+            Constraint::Length(3), // detach button
+            Constraint::Length(2), // status
+            Constraint::Min(5),    // windows
         ])
         .split(area);
 
@@ -1080,8 +1084,13 @@ fn render_sidebar(
     .block(button_block(None, Color::Red, detach_hot));
     f.render_widget(detach, chunks[1]);
 
-    render_windows(f, chunks[2], windows, hover, regions);
-    render_panes(f, chunks[3], panes, hover, regions);
+    let status_line = Paragraph::new(Line::from(Span::styled(
+        status.unwrap_or_default().to_string(),
+        Style::default().fg(Color::DarkGray),
+    )));
+    f.render_widget(status_line, chunks[2]);
+
+    render_windows(f, chunks[3], windows, hover, regions);
 }
 
 fn render_windows(
@@ -1145,118 +1154,6 @@ fn render_windows(
             .title(" WINDOWS "),
     );
     f.render_widget(windows, area);
-}
-
-fn render_panes(
-    f: &mut Frame,
-    area: Rect,
-    panes: &[Pane],
-    hover: Option<Hotspot>,
-    regions: &mut Regions,
-) {
-    let mut items = Vec::new();
-    regions.pane_count = 0;
-
-    let inner_top = area.y.saturating_add(1);
-    for (row, pane) in panes.iter().enumerate() {
-        if row >= regions.pane_rows.len() || row >= 4 {
-            break;
-        }
-        let row_rect = Rect::new(
-            area.x + 1,
-            inner_top.saturating_add(row as u16),
-            area.width.saturating_sub(2),
-            1,
-        );
-        regions.pane_rows[row] = row_rect;
-        regions.pane_count += 1;
-
-        let marker = if pane.active { "▸" } else { " " };
-        let hot = hover == Some(Hotspot::Pane(row));
-        let style = if hot {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
-        } else if pane.active {
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        items.push(ListItem::new(Line::from(Span::styled(
-            fit_text(
-                &format!("{marker} pane {} {}", pane.index, pane.title),
-                area.width.saturating_sub(2) as usize,
-            ),
-            style,
-        ))));
-    }
-
-    let base = inner_top.saturating_add(items.len() as u16);
-    regions.split_pane_right = Rect::new(area.x + 1, base, area.width.saturating_sub(2), 1);
-    regions.split_pane_down = Rect::new(
-        area.x + 1,
-        base.saturating_add(1),
-        area.width.saturating_sub(2),
-        1,
-    );
-    regions.next_pane = Rect::new(
-        area.x + 1,
-        base.saturating_add(2),
-        area.width.saturating_sub(2),
-        1,
-    );
-    regions.kill_pane = Rect::new(
-        area.x + 1,
-        base.saturating_add(3),
-        area.width.saturating_sub(2),
-        1,
-    );
-
-    items.push(control_row(
-        "+ split |",
-        area.width.saturating_sub(2),
-        hover == Some(Hotspot::SplitPaneRight),
-        Color::Green,
-    ));
-    items.push(control_row(
-        "+ split -",
-        area.width.saturating_sub(2),
-        hover == Some(Hotspot::SplitPaneDown),
-        Color::Green,
-    ));
-    items.push(control_row(
-        "next pane",
-        area.width.saturating_sub(2),
-        hover == Some(Hotspot::NextPane),
-        Color::Cyan,
-    ));
-    items.push(control_row(
-        "kill pane",
-        area.width.saturating_sub(2),
-        hover == Some(Hotspot::KillPane),
-        Color::Red,
-    ));
-
-    let panes = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" PANES "),
-    );
-    f.render_widget(panes, area);
-}
-
-fn control_row(label: &str, width: u16, hot: bool, color: Color) -> ListItem<'static> {
-    let style = if hot {
-        Style::default().fg(Color::Black).bg(color)
-    } else {
-        Style::default().fg(color)
-    };
-    ListItem::new(Line::from(Span::styled(
-        fit_text(label, width as usize),
-        style,
-    )))
 }
 
 fn render_session_modal(
@@ -1383,15 +1280,6 @@ fn window_row_line(
     ])
 }
 
-fn fit_text(text: &str, width: usize) -> String {
-    let len = text.chars().count();
-    if len >= width {
-        text.chars().take(width).collect()
-    } else {
-        format!("{}{}", text, " ".repeat(width - len))
-    }
-}
-
 fn close_style(hot: bool) -> Style {
     if hot {
         Style::default()
@@ -1458,23 +1346,6 @@ fn hit_test(x: u16, y: u16, regions: &Regions, modal_open: bool) -> Option<Hotsp
     }
     if contains(regions.new_window, x, y) {
         return Some(Hotspot::NewWindow);
-    }
-    for idx in 0..regions.pane_count {
-        if contains(regions.pane_rows[idx], x, y) {
-            return Some(Hotspot::Pane(idx));
-        }
-    }
-    if contains(regions.split_pane_right, x, y) {
-        return Some(Hotspot::SplitPaneRight);
-    }
-    if contains(regions.split_pane_down, x, y) {
-        return Some(Hotspot::SplitPaneDown);
-    }
-    if contains(regions.next_pane, x, y) {
-        return Some(Hotspot::NextPane);
-    }
-    if contains(regions.kill_pane, x, y) {
-        return Some(Hotspot::KillPane);
     }
     None
 }
@@ -1684,27 +1555,10 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_sees_pane_rows_and_controls() {
-        let mut regions = Regions {
-            pane_count: 1,
-            split_pane_right: Rect::new(20, 8, 8, 1),
-            split_pane_down: Rect::new(20, 9, 8, 1),
-            next_pane: Rect::new(20, 10, 8, 1),
-            kill_pane: Rect::new(20, 11, 8, 1),
-            ..Regions::default()
-        };
-        regions.pane_rows[0] = Rect::new(20, 7, 8, 1);
+    fn hit_test_only_exposes_windows_not_deprecated_pane_controls() {
+        let regions = Regions::default();
 
-        assert_eq!(hit_test(21, 7, &regions, false), Some(Hotspot::Pane(0)));
-        assert_eq!(
-            hit_test(21, 8, &regions, false),
-            Some(Hotspot::SplitPaneRight)
-        );
-        assert_eq!(
-            hit_test(21, 9, &regions, false),
-            Some(Hotspot::SplitPaneDown)
-        );
-        assert_eq!(hit_test(21, 10, &regions, false), Some(Hotspot::NextPane));
-        assert_eq!(hit_test(21, 11, &regions, false), Some(Hotspot::KillPane));
+        assert_eq!(hit_test(21, 7, &regions, false), None);
+        assert_eq!(hit_test(21, 8, &regions, false), None);
     }
 }

@@ -340,6 +340,26 @@ impl PtyTerminal {
         self.parser.screen().hide_cursor()
     }
 
+    pub fn scrollback(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    pub fn scrollback_up(&mut self, rows: usize) -> usize {
+        let next = self.scrollback().saturating_add(rows);
+        self.parser.screen_mut().set_scrollback(next);
+        self.scrollback()
+    }
+
+    pub fn scrollback_down(&mut self, rows: usize) -> usize {
+        let next = self.scrollback().saturating_sub(rows);
+        self.parser.screen_mut().set_scrollback(next);
+        self.scrollback()
+    }
+
+    pub fn scrollback_bottom(&mut self) {
+        self.parser.screen_mut().set_scrollback(0);
+    }
+
     pub fn mouse_protocol_active(&self) -> bool {
         self.parser.screen().mouse_protocol_mode() != MouseProtocolMode::None
     }
@@ -399,6 +419,7 @@ impl PtyTerminal {
             return Ok(());
         }
 
+        self.scrollback_bottom();
         if let Some(bytes) = key_to_bytes(key, self.parser.screen().application_cursor()) {
             self.writer.write_all(&bytes)?;
             self.writer.flush()?;
@@ -407,6 +428,7 @@ impl PtyTerminal {
     }
 
     pub fn send_paste(&mut self, text: &str) -> Result<()> {
+        self.scrollback_bottom();
         if self.bracketed_paste() {
             self.writer.write_all(b"\x1b[200~")?;
             self.writer.write_all(text.as_bytes())?;
@@ -441,6 +463,7 @@ impl PtyTerminal {
             return Ok(true);
         };
 
+        self.scrollback_bottom();
         self.writer.write_all(&bytes)?;
         self.writer.flush()?;
         Ok(true)

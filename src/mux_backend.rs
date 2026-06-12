@@ -19,6 +19,7 @@ pub struct PaneSnapshot {
     pub title: String,
     pub active: bool,
     pub rect: PaneRect,
+    pub scrollback: usize,
     pub rows: Vec<Vec<TerminalSpan>>,
     pub cursor: Option<(u16, u16)>,
     pub hide_cursor: bool,
@@ -34,6 +35,7 @@ pub struct TerminalSnapshot {
     pub cursor: Option<(u16, u16)>,
     pub hide_cursor: bool,
     pub mouse_protocol_active: bool,
+    pub scrollback: usize,
 }
 
 impl Default for TerminalSnapshot {
@@ -46,6 +48,7 @@ impl Default for TerminalSnapshot {
             cursor: None,
             hide_cursor: true,
             mouse_protocol_active: false,
+            scrollback: 0,
         }
     }
 }
@@ -137,30 +140,6 @@ impl MuxBackend {
         }
     }
 
-    pub fn split_pane_right(&mut self, width: u16, height: u16) -> Result<u32> {
-        match self {
-            #[cfg(unix)]
-            MuxBackend::Remote(client) => client.split_pane_right(width, height),
-            MuxBackend::Local(mux) => mux.split_active_pane_right(width, height),
-        }
-    }
-
-    pub fn split_pane_down(&mut self, width: u16, height: u16) -> Result<u32> {
-        match self {
-            #[cfg(unix)]
-            MuxBackend::Remote(client) => client.split_pane_down(width, height),
-            MuxBackend::Local(mux) => mux.split_active_pane_down(width, height),
-        }
-    }
-
-    pub fn select_next_pane(&mut self) -> Result<u32> {
-        match self {
-            #[cfg(unix)]
-            MuxBackend::Remote(client) => client.select_next_pane(),
-            MuxBackend::Local(mux) => mux.select_next_pane(),
-        }
-    }
-
     pub fn select_pane_by_row(&mut self, row: usize) -> Result<()> {
         match self {
             #[cfg(unix)]
@@ -169,25 +148,16 @@ impl MuxBackend {
         }
     }
 
-    pub fn kill_active_pane(&mut self, width: u16, height: u16) -> Result<u32> {
+    pub fn scroll_active_pane(&mut self, lines: i32) -> Result<usize> {
         match self {
             #[cfg(unix)]
-            MuxBackend::Remote(client) => client.kill_active_pane(width, height),
-            MuxBackend::Local(mux) => mux.kill_active_pane(width, height),
-        }
-    }
-
-    pub fn resize_active_pane(
-        &mut self,
-        axis: PaneAxis,
-        grow: bool,
-        width: u16,
-        height: u16,
-    ) -> Result<()> {
-        match self {
-            #[cfg(unix)]
-            MuxBackend::Remote(client) => client.resize_active_pane(axis, grow, width, height),
-            MuxBackend::Local(mux) => mux.resize_active_pane(axis, grow, width, height),
+            MuxBackend::Remote(client) => client.scroll_active_pane(lines),
+            MuxBackend::Local(mux) => {
+                let Some(terminal) = mux.active_terminal_mut() else {
+                    bail!("terminal is not ready");
+                };
+                Ok(scroll_terminal(terminal, lines))
+            }
         }
     }
 
@@ -287,9 +257,10 @@ fn terminal_snapshot(
                 title: pane.title.to_string(),
                 active: pane.active,
                 rect: pane.rect,
+                scrollback: pane.terminal.scrollback(),
                 rows: pane.terminal.styled_rows_with_selection(pane_selection),
                 cursor: Some(pane.terminal.cursor()),
-                hide_cursor: pane.terminal.hide_cursor(),
+                hide_cursor: pane.terminal.hide_cursor() || pane.terminal.scrollback() > 0,
                 mouse_protocol_active: pane.terminal.mouse_protocol_active(),
             }
         })
@@ -303,7 +274,19 @@ fn terminal_snapshot(
         cursor: active.cursor,
         hide_cursor: active.hide_cursor,
         mouse_protocol_active: active.mouse_protocol_active,
+        scrollback: active.scrollback,
         panes,
+    }
+}
+
+fn scroll_terminal(terminal: &mut crate::terminal::PtyTerminal, lines: i32) -> usize {
+    match lines.cmp(&0) {
+        std::cmp::Ordering::Greater => terminal.scrollback_up(lines as usize),
+        std::cmp::Ordering::Less => terminal.scrollback_down(lines.unsigned_abs() as usize),
+        std::cmp::Ordering::Equal => {
+            terminal.scrollback_bottom();
+            terminal.scrollback()
+        }
     }
 }
 
@@ -542,27 +525,11 @@ enum Request {
         width: u16,
         height: u16,
     },
-    SplitPaneRight {
-        width: u16,
-        height: u16,
-    },
-    SplitPaneDown {
-        width: u16,
-        height: u16,
-    },
-    SelectNextPane,
     SelectPaneByRow {
         row: usize,
     },
-    KillActivePane {
-        width: u16,
-        height: u16,
-    },
-    ResizePane {
-        axis: PaneAxis,
-        grow: bool,
-        width: u16,
-        height: u16,
+    ScrollPane {
+        lines: i32,
     },
     SelectedText {
         selection: SelectionRange,
@@ -585,6 +552,7 @@ enum Response {
     Snapshot(MuxSnapshot),
     Name(String),
     Index(u32),
+    Scrollback(usize),
     Text(String),
     Error(String),
 }
@@ -735,51 +703,15 @@ mod unix_remote {
             }
         }
 
-        pub fn split_pane_right(&mut self, width: u16, height: u16) -> Result<u32> {
-            match self.request(Request::SplitPaneRight { width, height })? {
-                Response::Index(index) => Ok(index),
-                other => bail!("unexpected daemon response: {other:?}"),
-            }
-        }
-
-        pub fn split_pane_down(&mut self, width: u16, height: u16) -> Result<u32> {
-            match self.request(Request::SplitPaneDown { width, height })? {
-                Response::Index(index) => Ok(index),
-                other => bail!("unexpected daemon response: {other:?}"),
-            }
-        }
-
-        pub fn select_next_pane(&mut self) -> Result<u32> {
-            match self.request(Request::SelectNextPane)? {
-                Response::Index(index) => Ok(index),
-                other => bail!("unexpected daemon response: {other:?}"),
-            }
-        }
-
         pub fn select_pane_by_row(&mut self, row: usize) -> Result<()> {
             expect_ok(self.request(Request::SelectPaneByRow { row })?)
         }
 
-        pub fn kill_active_pane(&mut self, width: u16, height: u16) -> Result<u32> {
-            match self.request(Request::KillActivePane { width, height })? {
-                Response::Index(index) => Ok(index),
+        pub fn scroll_active_pane(&mut self, lines: i32) -> Result<usize> {
+            match self.request(Request::ScrollPane { lines })? {
+                Response::Scrollback(scrollback) => Ok(scrollback),
                 other => bail!("unexpected daemon response: {other:?}"),
             }
-        }
-
-        pub fn resize_active_pane(
-            &mut self,
-            axis: PaneAxis,
-            grow: bool,
-            width: u16,
-            height: u16,
-        ) -> Result<()> {
-            expect_ok(self.request(Request::ResizePane {
-                axis,
-                grow,
-                width,
-                height,
-            })?)
         }
 
         pub fn selected_text(&mut self, selection: SelectionRange) -> Result<String> {
@@ -924,27 +856,16 @@ mod unix_remote {
             Request::KillWindowByRow { row, width, height } => {
                 into_response(mux.kill_window_by_row(row, width, height), Response::Index)
             }
-            Request::SplitPaneRight { width, height } => {
-                into_response(mux.split_active_pane_right(width, height), Response::Index)
-            }
-            Request::SplitPaneDown { width, height } => {
-                into_response(mux.split_active_pane_down(width, height), Response::Index)
-            }
-            Request::SelectNextPane => into_response(mux.select_next_pane(), Response::Index),
             Request::SelectPaneByRow { row } => {
                 into_response(mux.select_pane_by_row(row), |_| Response::Ok)
             }
-            Request::KillActivePane { width, height } => {
-                into_response(mux.kill_active_pane(width, height), Response::Index)
+            Request::ScrollPane { lines } => {
+                let result = mux
+                    .active_terminal_mut()
+                    .ok_or_else(|| anyhow!("terminal is not ready"))
+                    .map(|terminal| scroll_terminal(terminal, lines));
+                into_response(result, Response::Scrollback)
             }
-            Request::ResizePane {
-                axis,
-                grow,
-                width,
-                height,
-            } => into_response(mux.resize_active_pane(axis, grow, width, height), |_| {
-                Response::Ok
-            }),
             Request::SelectedText { selection } => {
                 let result = mux
                     .active_terminal()
@@ -1063,6 +984,77 @@ mod unix_remote {
                 .expect("daemon exits cleanly");
         }
 
+        #[test]
+        fn daemon_scrolls_active_terminal_history() {
+            let socket = std::env::temp_dir().join(format!(
+                "tuimux-scroll-test-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            let daemon_socket = socket.clone();
+            let daemon = thread::spawn(move || {
+                run_daemon_inner(daemon_socket, "scroll-test", PathBuf::from("."))
+            });
+            wait_for_socket(&socket);
+
+            let mut client = UnixStream::connect(&socket).expect("client connects");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+
+            let command = "for i in $(seq 1 50); do printf 'SB%02d\\n' \"$i\"; done";
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::SendPaste {
+                        text: command.to_string()
+                    },
+                ),
+                Response::Ok
+            ));
+            let enter = KeyInput::from_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("enter key input");
+            assert!(matches!(
+                request_response(&mut client, Request::SendKey { key: enter }),
+                Response::Ok
+            ));
+
+            let bottom = wait_for_snapshot_text(&mut client, 40, 6, "SB50");
+            let bottom_text = snapshot_text(&bottom);
+
+            let scrolled = request_response(&mut client, Request::ScrollPane { lines: 20 });
+            let Response::Scrollback(scrollback) = scrolled else {
+                panic!("expected scrollback response");
+            };
+            assert!(scrollback > 0);
+
+            let scrolled_snapshot = snapshot(&mut client, 40, 6);
+            assert!(scrolled_snapshot.terminal.scrollback > 0);
+            assert!(scrolled_snapshot.terminal.hide_cursor);
+            assert_ne!(snapshot_text(&scrolled_snapshot), bottom_text);
+
+            assert!(matches!(
+                request_response(&mut client, Request::ScrollPane { lines: 0 }),
+                Response::Scrollback(0)
+            ));
+
+            let mut shutdown = UnixStream::connect(&socket).expect("shutdown client connects");
+            shutdown
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            assert!(matches!(
+                request_response(&mut shutdown, Request::Shutdown),
+                Response::Ok
+            ));
+            daemon
+                .join()
+                .expect("daemon thread joins")
+                .expect("daemon exits cleanly");
+        }
+
         fn wait_for_socket(socket: &Path) {
             let deadline = Instant::now() + Duration::from_secs(3);
             while Instant::now() < deadline {
@@ -1072,6 +1064,58 @@ mod unix_remote {
                 thread::sleep(Duration::from_millis(20));
             }
             panic!("socket did not appear: {}", socket.display());
+        }
+
+        fn request_response(stream: &mut UnixStream, request: Request) -> Response {
+            write_request(stream, request);
+            read_response(stream)
+        }
+
+        fn snapshot(stream: &mut UnixStream, width: u16, height: u16) -> MuxSnapshot {
+            match request_response(
+                stream,
+                Request::Snapshot {
+                    width,
+                    height,
+                    selection: None,
+                },
+            ) {
+                Response::Snapshot(snapshot) => snapshot,
+                other => panic!("expected snapshot response, got {other:?}"),
+            }
+        }
+
+        fn wait_for_snapshot_text(
+            stream: &mut UnixStream,
+            width: u16,
+            height: u16,
+            needle: &str,
+        ) -> MuxSnapshot {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut last_text = String::new();
+            while Instant::now() < deadline {
+                let snapshot = snapshot(stream, width, height);
+                last_text = snapshot_text(&snapshot);
+                if last_text.contains(needle) {
+                    return snapshot;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            panic!("snapshot did not contain {needle:?}; last text was {last_text:?}");
+        }
+
+        fn snapshot_text(snapshot: &MuxSnapshot) -> String {
+            snapshot
+                .terminal
+                .rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         }
 
         fn write_request(stream: &mut UnixStream, request: Request) {

@@ -117,6 +117,10 @@ struct NativePane {
     terminal: PtyTerminal,
 }
 
+// Deprecated product surface: split panes are no longer exposed by the default
+// UI or daemon protocol, but the legacy layout code is retained while v0.2
+// focuses on window-list-driven navigation.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PaneNode {
     Leaf(u32),
@@ -290,6 +294,7 @@ impl NativeMux {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn select_next_pane(&mut self) -> Result<u32> {
         let Some(window) = self.active_window_mut() else {
             bail!("no active window");
@@ -354,14 +359,17 @@ impl NativeMux {
         Ok(removed)
     }
 
+    #[allow(dead_code)]
     pub fn split_active_pane_right(&mut self, width: u16, height: u16) -> Result<u32> {
         self.split_active_pane(PaneAxis::Columns, width, height)
     }
 
+    #[allow(dead_code)]
     pub fn split_active_pane_down(&mut self, width: u16, height: u16) -> Result<u32> {
         self.split_active_pane(PaneAxis::Rows, width, height)
     }
 
+    #[allow(dead_code)]
     pub fn kill_active_pane(&mut self, width: u16, height: u16) -> Result<u32> {
         let (window_index, needs_replacement) = {
             let Some(window) = self.active_window() else {
@@ -402,6 +410,7 @@ impl NativeMux {
         Ok(removed)
     }
 
+    #[allow(dead_code)]
     pub fn resize_active_pane(
         &mut self,
         axis: PaneAxis,
@@ -495,6 +504,7 @@ impl NativeMux {
         })
     }
 
+    #[allow(dead_code)]
     fn split_active_pane(&mut self, axis: PaneAxis, width: u16, height: u16) -> Result<u32> {
         let (window_index, pane_index) = {
             let Some(window) = self.active_window() else {
@@ -678,6 +688,7 @@ impl PaneNode {
     }
 }
 
+#[allow(dead_code)]
 fn split_leaf_in_layout(node: &PaneNode, target: u32, new_pane: u32, axis: PaneAxis) -> PaneNode {
     match node {
         PaneNode::Leaf(index) if *index == target => PaneNode::Split {
@@ -701,6 +712,7 @@ fn split_leaf_in_layout(node: &PaneNode, target: u32, new_pane: u32, axis: PaneA
     }
 }
 
+#[allow(dead_code)]
 fn remove_leaf_from_layout(node: &PaneNode, target: u32) -> Option<PaneNode> {
     match node {
         PaneNode::Leaf(index) if *index == target => None,
