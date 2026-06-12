@@ -863,4 +863,26 @@ mod tests {
             Some(b"\x1b[<36;3;2M".to_vec())
         );
     }
+
+    #[test]
+    fn terminal_parser_preserves_truecolor_cell_styles() {
+        let mut parser = vt100::Parser::new(4, 40, 0);
+        parser.process(
+            b"\x1b[38;2;12;34;56mFG_TRUECOLOR\x1b[0m\r\n\
+              \x1b[48;2;78;90;123mBG_TRUECOLOR\x1b[0m",
+        );
+        let screen = parser.screen();
+
+        let fg = screen.cell(0, 0).expect("fg cell");
+        assert_eq!(
+            TerminalStyle::from_cell(fg).fg,
+            TerminalColor::Rgb(12, 34, 56)
+        );
+
+        let bg = screen.cell(1, 0).expect("bg cell");
+        assert_eq!(
+            TerminalStyle::from_cell(bg).bg,
+            TerminalColor::Rgb(78, 90, 123)
+        );
+    }
 }

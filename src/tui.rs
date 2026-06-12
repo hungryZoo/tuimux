@@ -16,6 +16,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
+use crossterm::style::force_color_output;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -307,6 +308,7 @@ pub fn run(initial_session: &str, cwd: PathBuf) -> io::Result<i32> {
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
 fn setup() -> io::Result<Term> {
+    preserve_child_terminal_colors();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -316,6 +318,12 @@ fn setup() -> io::Result<Term> {
         EnableBracketedPaste
     )?;
     Terminal::new(CrosstermBackend::new(stdout))
+}
+
+fn preserve_child_terminal_colors() {
+    // tuimux is rendering a child terminal, so parent-side NO_COLOR must not
+    // strip ANSI colors that the child process explicitly emitted.
+    force_color_output(true);
 }
 
 fn restore(terminal: &mut Term) -> io::Result<()> {
@@ -1476,6 +1484,8 @@ fn split_lengths(total: u16, count: usize) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::buffer::Cell;
 
     fn test_state() -> UiState {
         let mux = crate::native_mux::NativeMux::new("ui-test", PathBuf::from("."), 20, 5).unwrap();
@@ -1559,6 +1569,83 @@ mod tests {
             ..TerminalStyle::default()
         });
         assert!(style.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn terminal_truecolor_style_maps_to_ratatui_rgb() {
+        let style = terminal_style(TerminalStyle {
+            fg: TerminalColor::Rgb(12, 34, 56),
+            bg: TerminalColor::Rgb(78, 90, 123),
+            ..TerminalStyle::default()
+        });
+
+        assert_eq!(style.fg, Some(Color::Rgb(12, 34, 56)));
+        assert_eq!(style.bg, Some(Color::Rgb(78, 90, 123)));
+    }
+
+    #[test]
+    fn terminal_paragraph_rendering_preserves_truecolor_cells() {
+        let rows = vec![
+            Line::from(terminal_row_spans(vec![TerminalSpan {
+                text: "FG_TRUECOLOR".to_string(),
+                style: TerminalStyle {
+                    fg: TerminalColor::Rgb(12, 34, 56),
+                    ..TerminalStyle::default()
+                },
+            }])),
+            Line::from(terminal_row_spans(vec![TerminalSpan {
+                text: "BG_TRUECOLOR".to_string(),
+                style: TerminalStyle {
+                    bg: TerminalColor::Rgb(78, 90, 123),
+                    ..TerminalStyle::default()
+                },
+            }])),
+            Line::from(terminal_row_spans(vec![TerminalSpan {
+                text: "DEFAULT_COLOR".to_string(),
+                style: TerminalStyle::default(),
+            }])),
+        ];
+        let backend = TestBackend::new(32, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new(rows.clone()).style(Style::default()),
+                    frame.size(),
+                );
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.get(0, 0).fg, Color::Rgb(12, 34, 56));
+        assert_eq!(buffer.get(0, 0).bg, Color::Reset);
+        assert_eq!(buffer.get(0, 1).fg, Color::Reset);
+        assert_eq!(buffer.get(0, 1).bg, Color::Rgb(78, 90, 123));
+        assert_eq!(buffer.get(0, 2).fg, Color::Reset);
+        assert_eq!(buffer.get(0, 2).bg, Color::Reset);
+    }
+
+    #[test]
+    fn crossterm_backend_emits_truecolor_sgr() {
+        preserve_child_terminal_colors();
+
+        let mut output = Vec::new();
+        let mut cell = Cell::default();
+        cell.set_symbol("F").set_style(
+            Style::default()
+                .fg(Color::Rgb(12, 34, 56))
+                .bg(Color::Rgb(78, 90, 123)),
+        );
+
+        {
+            let mut backend = CrosstermBackend::new(&mut output);
+            backend.draw(vec![(0, 0, &cell)].into_iter()).unwrap();
+        }
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("38;2;12;34;56"), "{rendered:?}");
+        assert!(rendered.contains("48;2;78;90;123"), "{rendered:?}");
     }
 
     #[test]

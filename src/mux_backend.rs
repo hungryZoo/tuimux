@@ -1218,13 +1218,26 @@ mod unix_remote {
 
         fn wait_for_socket(socket: &Path) {
             let deadline = Instant::now() + Duration::from_secs(3);
+            let mut last_error = None;
             while Instant::now() < deadline {
-                if socket.exists() {
-                    return;
+                match UnixStream::connect(socket) {
+                    Ok(_) => {
+                        return;
+                    }
+                    Err(err) => {
+                        last_error = Some(err);
+                    }
                 }
                 thread::sleep(Duration::from_millis(20));
             }
-            panic!("socket did not appear: {}", socket.display());
+            if let Some(err) = last_error {
+                panic!(
+                    "socket did not accept connections: {}: {err}",
+                    socket.display()
+                );
+            } else {
+                panic!("socket did not appear: {}", socket.display());
+            }
         }
 
         fn request_response(stream: &mut UnixStream, request: Request) -> Response {

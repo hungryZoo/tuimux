@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 2.6
-- **대상 릴리스**: v0.2.0-alpha.21
+- **문서 버전**: 2.7
+- **대상 릴리스**: v0.2.0-alpha.22
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.21은 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.22는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
 
 핵심 목표는 다음과 같다.
 
@@ -171,6 +171,7 @@ pub struct PtyTerminal {
 
 - `styled_rows_with_selection(selection)`은 vt100 cell을 `TerminalSpan`으로 변환한다.
 - fg/bg가 default일 때 ratatui default color를 그대로 사용해 host terminal color를 보존한다.
+- fg/bg가 truecolor일 때 `ratatui::Color::Rgb`로 유지하고, UI setup에서 `crossterm::style::force_color_output(true)`를 호출해 부모 환경의 `NO_COLOR`가 child가 명시적으로 출력한 SGR을 제거하지 못하게 한다.
 - selection cell은 inverse bit를 토글해 시각적으로 강조한다.
 - wide continuation cell은 중복 렌더하지 않는다.
 - scrollback viewport가 bottom이 아니면 cursor를 숨긴다.
@@ -226,7 +227,7 @@ Navigation mode 키:
 - `End`: scrollback bottom으로 이동.
 - `|`, `v`, `-`, `h`: split-pane deprecated status를 표시하고 새 pane을 만들지 않는다.
 
-`setup()`은 raw mode, alternate screen, mouse capture와 함께 `EnableBracketedPaste`를 실행한다. `restore()`는 alternate screen/mouse capture를 해제하면서 `DisableBracketedPaste`도 실행해 host terminal 상태를 되돌린다.
+`setup()`은 raw mode, alternate screen, mouse capture와 함께 `EnableBracketedPaste`를 실행한다. 또한 tuimux가 일반 CLI가 아니라 child terminal renderer라는 점 때문에 `force_color_output(true)`를 호출해 parent-side `NO_COLOR`가 child output color를 지우지 않게 한다. `restore()`는 alternate screen/mouse capture를 해제하면서 `DisableBracketedPaste`도 실행해 host terminal 상태를 되돌린다.
 
 ### 3.6 Selection과 Ctrl-C
 
@@ -413,6 +414,9 @@ F12, q, Esc, or Detach button
 - native mux single full-size pane regression test.
 - layout preview deterministic output tests.
 - terminal key/mouse encoder unit tests.
+- terminal parser truecolor preservation tests.
+- ratatui paragraph truecolor buffer preservation tests.
+- crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
 - UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
@@ -421,6 +425,7 @@ F12, q, Esc, or Detach button
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
 - macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal click forwarding, Shift-drag tuimux selection override, selection Ctrl-C child 누수 방지를 확인.
+- macOS truecolor smoke script: parent `NO_COLOR=1` 환경에서 child가 출력한 `38;2` foreground, `48;2` background, default color reset이 실제 TUI output에 남는지 확인.
 - macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, split hotkey deprecated status, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
 - macOS no-tmux smoke script: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `SHELL=/bin/sh` 환경에서 `--doctor`, default TUI PTY shell, `--native-client` failure boundary를 확인.
 
@@ -436,6 +441,7 @@ F12, q, Esc, or Detach button
 - `python3 scripts/smoke_macos_ui_selection.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_apps.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_mouse_protocol.py --binary target/debug/tuimux`
+- `python3 scripts/smoke_macos_color.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux`
 - `tuimux --session persist-smoke`에서 `export TUIMUX_PERSIST_MARK=alive`
@@ -445,16 +451,17 @@ F12, q, Esc, or Detach button
 - mouse drag selection, Ctrl-C, `pbpaste`가 선택 텍스트 반환 확인
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
 - child mouse tracking 중 normal click은 child로 전달되고 Shift-drag는 tuimux selection으로 처리되는지 확인
+- parent `NO_COLOR=1` 상태에서도 child truecolor foreground/background SGR과 default reset이 tuimux TUI output에 보존되는지 확인
 - mouse wheel/PageUp/PageDown scrollback 확인
 - navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
 - navigation mode에서 split hotkey가 새 pane을 만들지 않고 deprecated status를 표시하는지 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.21은 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.22는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.21-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.22-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -462,8 +469,8 @@ v0.2.0-alpha.21은 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.21/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.21 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.22/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.22 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

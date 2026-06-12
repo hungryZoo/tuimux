@@ -1,7 +1,8 @@
 name: release
 
-# Build the current prerelease asset. v0.2.0-alpha.21 publishes macOS Apple
-# Silicon first while the Rust-native daemon-backed multiplexer is still being validated.
+# Build the current prerelease asset. v0.2.0-alpha.22 publishes macOS Apple
+# Silicon first after the Rust-native daemon path gained truecolor preservation
+# coverage for parent NO_COLOR environments.
 
 on:
   push:
@@ -10,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.2.0-alpha.21). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.22). Used for manual runs."
         required: true
 
 permissions:
