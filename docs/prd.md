@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 2.6
-- **대상 릴리스**: v0.2.0-alpha.22
+- **문서 버전**: 2.7
+- **대상 릴리스**: v0.2.0-alpha.23
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.22의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.23의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -36,6 +36,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - host paste는 bracketed paste event로 받아 active PTY에 전달한다.
 - child가 mouse tracking을 켠 경우 normal mouse는 child로 보내고 Shift-drag를 tuimux selection override로 쓴다.
 - child가 명시적으로 출력한 truecolor foreground/background/default reset은 부모 환경의 `NO_COLOR`와 무관하게 native terminal color로 보존한다.
+- host terminal resize는 active child PTY까지 전달되어 full-screen 앱과 shell이 새 rows/cols를 관측한다.
 - macOS Apple Silicon 프리릴리즈를 먼저 배포한다.
 
 ## 4. 비목표
@@ -66,6 +67,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - `--layout-preview`가 split-pane/resize 샘플이 아닌 single full-size terminal + window-list preview를 출력한다.
 - macOS mouse-protocol smoke에서 child SGR mouse tracking 중 normal mouse forwarding과 Shift-drag selection override가 통과한다.
 - macOS truecolor smoke에서 `NO_COLOR=1` 부모 환경에서도 child `38;2`/`48;2` SGR과 default reset이 실제 TUI output에 보존된다.
+- macOS resize smoke에서 host PTY resize 후 child가 `SIGWINCH`와 새 `32x120` terminal size를 관측한다.
 - GitHub prerelease에 macOS Apple Silicon tarball과 `SHA256SUMS`가 게시된다.
 
 ## 6. 다음 단계

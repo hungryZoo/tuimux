@@ -1,6 +1,6 @@
 [package]
 name = "tuimux"
-version = "0.2.0-alpha.22"
+version = "0.2.0-alpha.23"
 edition = "2021"
 rust-version = "1.74"
 description = "A prefix-free, mouse-first Rust-native terminal multiplexer"
