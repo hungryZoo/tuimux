@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""End-to-end macOS smoke test for tuimux text selection.
+"""End-to-end macOS smoke test for tuimux clipboard behavior.
 
 The test starts the real tuimux TUI in a pseudo terminal, prints a stable target
 string in the child shell, selects it with SGR mouse escape sequences, presses
 Ctrl-C, and verifies that macOS `pbpaste` contains the selected text. A shell
-trap also confirms that Ctrl-C was not forwarded to the foreground child.
+trap also confirms that Ctrl-C was not forwarded to the foreground child. It
+then sends a host bracketed-paste sequence and verifies that the pasted command
+executes in the child PTY.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ from pathlib import Path
 
 
 MARKER = "TUIMUX_UI_COPY_TARGET"
+PASTE_MARKER = "TUIMUX_UI_PASTE_TARGET"
+PASTE_OUTPUT = f"PASTE_RAN:{PASTE_MARKER}"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -32,7 +36,7 @@ COLS = 100
 def build_parser() -> argparse.ArgumentParser:
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
-        description="Smoke-test tuimux mouse selection and Ctrl-C clipboard copy on macOS."
+        description="Smoke-test tuimux mouse selection, copy, and paste on macOS."
     )
     parser.add_argument(
         "--binary",
@@ -171,7 +175,7 @@ def main() -> int:
             f"rm -f {trap_file}; "
             "printf '\\033[2J\\033[H'; "
             f"sh -c \"trap 'printf INT > {trap_file}' INT; "
-            f"printf '{MARKER}'; sleep 5\"\r"
+            f"printf '{MARKER}'; sleep 2\"\r"
         )
         client.write(command.encode())
         if not client.wait_contains(MARKER, args.timeout):
@@ -200,8 +204,23 @@ def main() -> int:
             )
             return 1
 
+        time.sleep(2.0)
+        paste_payload = (
+            "printf '\\033[2J\\033[H'; "
+            f"printf 'PASTE_RAN:%s\\n' {PASTE_MARKER}"
+        )
+        bracketed_paste = f"\x1b[200~{paste_payload}\x1b[201~"
+        client.write(bracketed_paste.encode())
+        client.read_for(0.2)
+        client.write(b"\r")
+        if not client.wait_contains(PASTE_OUTPUT, args.timeout):
+            print("pasted command output did not appear in tuimux output", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
         print("OK macOS UI selection smoke")
         print(f"copied: {copied}")
+        print(f"pasted command output: {PASTE_OUTPUT}")
         print("foreground child SIGINT: not observed")
         return 0
     finally:
