@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 2.9
-- **대상 릴리스**: v0.2.0-alpha.24
+- **문서 버전**: 3.0
+- **대상 릴리스**: v0.2.0-alpha.25
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.24 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.25 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
 
 핵심 목표는 다음과 같다.
 
@@ -425,7 +425,7 @@ F12, q, Esc, or Detach button
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
 - macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal click forwarding, Shift-drag tuimux selection override, selection Ctrl-C child 누수 방지를 확인.
-- macOS scrollback smoke script: 실제 TUI client에서 긴 shell output을 만든 뒤 mouse wheel, `PageUp`, `Home`, `End`가 active terminal history viewport를 이동하고 bottom으로 돌아오는지 확인.
+- macOS scrollback smoke script: 실제 TUI client에서 긴 shell output을 만든 뒤 mouse wheel, `PageUp`, `Home`, `End`가 active terminal history viewport를 이동하고 bottom으로 돌아오는지 확인하며, scrollback 중 host paste가 live bottom으로 복귀해 active shell에서 실행되는지 확인.
 - macOS truecolor smoke script: parent `NO_COLOR=1` 환경에서 child가 출력한 `38;2` foreground, `48;2` background, default color reset이 실제 TUI output에 남는지 확인.
 - macOS resize smoke script: 실제 TUI client의 host PTY를 resize한 뒤 active child process가 `SIGWINCH`와 새 `32x120` terminal size를 관측하는지 확인.
 - macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, split hotkey deprecated status, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
@@ -458,15 +458,16 @@ F12, q, Esc, or Detach button
 - parent `NO_COLOR=1` 상태에서도 child truecolor foreground/background SGR과 default reset이 tuimux TUI output에 보존되는지 확인
 - host resize 후 active child PTY가 새 rows/cols와 `SIGWINCH`를 관측하는지 확인
 - mouse wheel/PageUp/PageDown/Home/End scrollback 확인
+- scrollback 중 host paste가 live bottom으로 돌아와 active shell에서 실행되는지 확인
 - navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
 - navigation mode에서 split hotkey가 새 pane을 만들지 않고 deprecated status를 표시하는지 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.24 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.25 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.24-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.25-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -474,8 +475,8 @@ v0.2.0-alpha.24 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.24/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.24 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.25/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.25 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

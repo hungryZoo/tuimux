@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 2.8
-- **대상 릴리스**: v0.2.0-alpha.24
+- **문서 버전**: 2.9
+- **대상 릴리스**: v0.2.0-alpha.25
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.24의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.25의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -66,7 +66,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - macOS no-tmux smoke에서 tmux 없는 PATH의 default TUI/doctor 성공과 `--native-client` 실패가 통과한다.
 - `--layout-preview`가 split-pane/resize 샘플이 아닌 single full-size terminal + window-list preview를 출력한다.
 - macOS mouse-protocol smoke에서 child SGR mouse tracking 중 normal mouse forwarding과 Shift-drag selection override가 통과한다.
-- macOS scrollback smoke에서 실제 TUI의 mouse wheel, `PageUp`, `Home`, `End` active terminal history navigation이 통과한다.
+- macOS scrollback smoke에서 실제 TUI의 mouse wheel, `PageUp`, `Home`, `End` active terminal history navigation과 scrollback 중 paste bottom 복귀가 통과한다.
 - macOS truecolor smoke에서 `NO_COLOR=1` 부모 환경에서도 child `38;2`/`48;2` SGR과 default reset이 실제 TUI output에 보존된다.
 - macOS resize smoke에서 host PTY resize 후 child가 `SIGWINCH`와 새 `32x120` terminal size를 관측한다.
 - GitHub prerelease에 macOS Apple Silicon tarball과 `SHA256SUMS`가 게시된다.

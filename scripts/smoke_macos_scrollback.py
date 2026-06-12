@@ -4,6 +4,7 @@
 The test starts the real tuimux TUI in a pseudo terminal, creates enough shell
 output to fill vt100 scrollback, then verifies that mouse wheel, PageUp, Home,
 and End navigate the active terminal history instead of behaving like dead UI.
+It also verifies that paste input while scrolled back jumps to the live bottom.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ END = b"\x1b[F"
 MOUSE_SCROLL_UP_AT_10_10 = b"\x1b[<64;10;10M"
 LAST_LINE_SUFFIX = "LINE_160"
 EARLY_LINE_SUFFIX = "LINE_001"
+PASTE_BOTTOM_MARKER = "SCROLLBACK_PASTE_BOTTOM"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -296,6 +298,18 @@ def verify_mouse_wheel_scrollback(client: PtyClient, timeout: float) -> str:
     )
 
 
+def verify_paste_returns_to_bottom(client: PtyClient, timeout: float) -> None:
+    command = f"printf '\\033[2J\\033[H{PASTE_BOTTOM_MARKER}\\n'"
+    client.clear_buffer()
+    paste_shell(client, command)
+    wait_screen_or_fail(
+        client,
+        PASTE_BOTTOM_MARKER,
+        timeout,
+        "paste while scrolled back did not return to the live bottom",
+    )
+
+
 def verify_page_home_end(client: PtyClient, timeout: float) -> None:
     enter_navigation(client, timeout)
 
@@ -337,10 +351,13 @@ def main() -> int:
         client.read_for(1.5)
         generate_scrollback(client, args.timeout)
         wheel_line = verify_mouse_wheel_scrollback(client, args.timeout)
+        verify_paste_returns_to_bottom(client, args.timeout)
+        generate_scrollback(client, args.timeout)
         verify_page_home_end(client, args.timeout)
 
         print("OK macOS scrollback smoke")
         print(f"mouse wheel scrollback: observed {wheel_line}")
+        print("paste while scrolled back: returned to live bottom")
         print("PageUp/Home/End scrollback navigation: observed")
         print("bottom restore: observed")
         return 0
