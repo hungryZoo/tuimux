@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 1.7
-- **대상 릴리스**: v0.2.0-alpha.13
+- **문서 버전**: 1.8
+- **대상 릴리스**: v0.2.0-alpha.14
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.13의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.14의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -31,7 +31,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - split pane hotkey는 새 pane을 만들지 않고 deprecated status를 보여주며 core state를 바꾸지 않는다.
 - terminal mode는 full-screen으로 동작해 `btop`, `htop`, `nano` 같은 앱에 충분한 PTY 크기를 준다.
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
-- mouse selection은 mouse-up 이후 유지된다.
+- mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
 - selection이 있을 때 Ctrl-C는 system clipboard copy로 동작한다.
 - host paste는 bracketed paste event로 받아 active PTY에 전달한다.
 - child가 mouse tracking을 켠 경우 normal mouse는 child로 보내고 Shift-drag를 tuimux selection override로 쓴다.
@@ -58,6 +58,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - 열린 client가 있는 상태에서 두 번째 client가 snapshot/window/scrollback command를 수행하고 세 번째 client가 shutdown할 수 있다.
 - `btop`, `htop`, `nano`, `llmfit --help`가 native terminal surface에서 실행된다.
 - drag selection + Ctrl-C + `pbpaste` smoke test가 통과한다.
+- UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - GitHub prerelease에 macOS Apple Silicon tarball과 `SHA256SUMS`가 게시된다.
 
 ## 6. 다음 단계

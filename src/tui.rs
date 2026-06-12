@@ -189,6 +189,8 @@ impl UiState {
         self.update_selection(row, col);
         if self.selection_range().is_none() {
             self.selection = None;
+        } else if let Some(selection) = &mut self.selection {
+            selection.dragging = false;
         }
     }
 
@@ -1475,6 +1477,32 @@ fn split_lengths(total: u16, count: usize) -> Vec<u16> {
 mod tests {
     use super::*;
 
+    fn test_state() -> UiState {
+        let mux = crate::native_mux::NativeMux::new("ui-test", PathBuf::from("."), 20, 5).unwrap();
+        UiState {
+            session_modal_open: false,
+            hover: None,
+            regions: Regions::default(),
+            mux: MuxBackend::Local(mux),
+            sessions: Vec::new(),
+            windows: Vec::new(),
+            panes: Vec::new(),
+            current_session: String::new(),
+            status: None,
+            terminal_error: None,
+            terminal_mode: true,
+            selection: None,
+            terminal_axis: PaneAxis::default(),
+            terminal_separators: Vec::new(),
+            terminal_panes: Vec::new(),
+            terminal_rows: Vec::new(),
+            terminal_cursor: None,
+            terminal_hide_cursor: true,
+            terminal_mouse_protocol_active: false,
+            terminal_scrollback: 0,
+        }
+    }
+
     #[test]
     fn hit_test_prefers_window_close_x_over_window_row() {
         let mut regions = Regions::default();
@@ -1563,6 +1591,44 @@ mod tests {
         regions.terminal_panes[1] = Rect::new(6, 0, 5, 5);
 
         assert_eq!(terminal_cell_for_pane(9, 6, &regions, 0), Some((4, 4)));
+    }
+
+    #[test]
+    fn mouse_up_keeps_non_empty_selection_but_ends_dragging() {
+        let mut state = test_state();
+
+        state.begin_selection(0, 1, 2);
+        state.update_selection(1, 5);
+        state.finish_selection(1, 6);
+
+        assert_eq!(
+            state.selection_range(),
+            Some(SelectionRange::new(1, 2, 1, 6))
+        );
+        let selection = state.selection.expect("selection persists after mouse-up");
+        assert_eq!(selection.pane, 0);
+        assert!(!selection.dragging);
+    }
+
+    #[test]
+    fn mouse_up_clears_zero_width_selection() {
+        let mut state = test_state();
+
+        state.begin_selection(0, 2, 3);
+        state.finish_selection(2, 3);
+
+        assert!(state.selection.is_none());
+    }
+
+    #[test]
+    fn terminal_key_input_clears_existing_selection() {
+        let mut state = test_state();
+        state.begin_selection(0, 0, 0);
+        state.finish_selection(0, 4);
+
+        state.send_terminal_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        assert!(state.selection.is_none());
     }
 
     #[test]

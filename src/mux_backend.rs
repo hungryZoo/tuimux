@@ -1056,6 +1056,90 @@ mod unix_remote {
         }
 
         #[test]
+        fn daemon_returns_selected_text_and_highlighted_snapshot() {
+            let socket = std::env::temp_dir().join(format!(
+                "tuimux-selection-test-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            let daemon_socket = socket.clone();
+            let daemon = thread::spawn(move || {
+                run_daemon_inner(daemon_socket, "selection-test", PathBuf::from("."))
+            });
+            wait_for_socket(&socket);
+
+            let mut client = UnixStream::connect(&socket).expect("client connects");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+
+            let needle = "TUIMUX_COPY_TARGET";
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::SendPaste {
+                        text: format!("printf '{needle}\\n'")
+                    },
+                ),
+                Response::Ok
+            ));
+            let enter = KeyInput::from_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("enter key input");
+            assert!(matches!(
+                request_response(&mut client, Request::SendKey { key: enter }),
+                Response::Ok
+            ));
+
+            let captured = wait_for_snapshot_text(&mut client, 80, 10, needle);
+            let (row, col) = find_text_cell(&captured, needle)
+                .unwrap_or_else(|| panic!("snapshot did not locate {needle:?}"));
+            let end_col = col + needle.chars().count() as u16 - 1;
+            let selection = SelectionRange::new(row, col, row, end_col);
+
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::SelectedText {
+                        selection
+                    },
+                ),
+                Response::Text(text) if text == needle
+            ));
+
+            let highlighted = match request_response(
+                &mut client,
+                Request::Snapshot {
+                    width: 80,
+                    height: 10,
+                    selection: Some(selection),
+                },
+            ) {
+                Response::Snapshot(snapshot) => snapshot,
+                other => panic!("expected snapshot response, got {other:?}"),
+            };
+            assert!(
+                row_has_inverse_span(&highlighted, row, col, end_col),
+                "selection snapshot did not invert the selected text"
+            );
+
+            let mut shutdown = UnixStream::connect(&socket).expect("shutdown client connects");
+            shutdown
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            assert!(matches!(
+                request_response(&mut shutdown, Request::Shutdown),
+                Response::Ok
+            ));
+            daemon
+                .join()
+                .expect("daemon thread joins")
+                .expect("daemon exits cleanly");
+        }
+
+        #[test]
         fn daemon_manages_windows_without_split_commands() {
             let socket = std::env::temp_dir().join(format!(
                 "tuimux-window-test-{}-{}.sock",
@@ -1193,6 +1277,44 @@ mod unix_remote {
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
+        }
+
+        fn find_text_cell(snapshot: &MuxSnapshot, needle: &str) -> Option<(u16, u16)> {
+            for (row, spans) in snapshot.terminal.rows.iter().enumerate() {
+                let line = spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>();
+                if let Some(col) = line.find(needle) {
+                    return Some((row as u16, col as u16));
+                }
+            }
+            None
+        }
+
+        fn row_has_inverse_span(
+            snapshot: &MuxSnapshot,
+            row: u16,
+            start_col: u16,
+            end_col: u16,
+        ) -> bool {
+            let Some(spans) = snapshot.terminal.rows.get(row as usize) else {
+                return false;
+            };
+            let mut col = 0_u16;
+            for span in spans {
+                let width = span.text.chars().count() as u16;
+                if width == 0 {
+                    continue;
+                }
+                let span_start = col;
+                let span_end = col.saturating_add(width).saturating_sub(1);
+                if span.style.inverse && span_start <= end_col && span_end >= start_col {
+                    return true;
+                }
+                col = col.saturating_add(width);
+            }
+            false
         }
 
         fn write_request(stream: &mut UnixStream, request: Request) {
