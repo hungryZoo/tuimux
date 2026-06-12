@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 2.5
-- **대상 릴리스**: v0.2.0-alpha.20
+- **문서 버전**: 2.6
+- **대상 릴리스**: v0.2.0-alpha.21
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.20은 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.21은 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
 
 핵심 목표는 다음과 같다.
 
@@ -420,6 +420,7 @@ F12, q, Esc, or Detach button
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
+- macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal click forwarding, Shift-drag tuimux selection override, selection Ctrl-C child 누수 방지를 확인.
 - macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, split hotkey deprecated status, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
 - macOS no-tmux smoke script: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `SHELL=/bin/sh` 환경에서 `--doctor`, default TUI PTY shell, `--native-client` failure boundary를 확인.
 
@@ -434,6 +435,7 @@ F12, q, Esc, or Detach button
 - `cargo build --release --locked --target aarch64-apple-darwin`
 - `python3 scripts/smoke_macos_ui_selection.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_apps.py --binary target/debug/tuimux`
+- `python3 scripts/smoke_macos_mouse_protocol.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux`
 - `tuimux --session persist-smoke`에서 `export TUIMUX_PERSIST_MARK=alive`
@@ -442,16 +444,17 @@ F12, q, Esc, or Detach button
 - `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
 - mouse drag selection, Ctrl-C, `pbpaste`가 선택 텍스트 반환 확인
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
+- child mouse tracking 중 normal click은 child로 전달되고 Shift-drag는 tuimux selection으로 처리되는지 확인
 - mouse wheel/PageUp/PageDown scrollback 확인
 - navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
 - navigation mode에서 split hotkey가 새 pane을 만들지 않고 deprecated status를 표시하는지 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.20은 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.21은 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.20-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.21-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -459,8 +462,8 @@ v0.2.0-alpha.20은 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.20/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.20 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.21/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.21 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

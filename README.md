@@ -2,7 +2,7 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.20 keeps the default runtime on the Rust-native path and focuses
+v0.2.0-alpha.21 keeps the default runtime on the Rust-native path and focuses
 the product on a single full-size terminal surface selected from a window list.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
 which owns sessions, windows, and PTY-backed shell processes. `tmux` is
@@ -32,7 +32,7 @@ This is still a 0.x prerelease. Current behavior:
 - Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen; macOS PTY smoke covers reverse-video selection highlight, drag + Ctrl-C + `pbpaste`, host bracketed paste, and child bracketed paste wrappers.
 - Ctrl-C copies the selected text to the system clipboard instead of sending SIGINT.
 - Host paste is captured as a paste event and forwarded to the active PTY with child bracketed paste respected.
-- If the child program enables mouse tracking, normal mouse events go to the child; Shift-drag starts tuimux text selection.
+- If the child program enables mouse tracking, normal mouse events go to the child; Shift-drag starts tuimux text selection, covered by the macOS mouse-protocol smoke.
 - `tuimux --native-client` is a fallback that opens a plain tmux client when tmux is installed.
 - `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
 
@@ -44,8 +44,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.20/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.20 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.21/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.21 bash
 ```
 
 Verify:
@@ -71,11 +71,12 @@ cargo test
 cargo run -- --layout-preview
 python3 scripts/smoke_macos_ui_selection.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_apps.py --binary target/debug/tuimux
+python3 scripts/smoke_macos_mouse_protocol.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 ```
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.20` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.21` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

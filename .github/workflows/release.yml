@@ -1,6 +1,6 @@
 name: release
 
-# Build the current prerelease asset. v0.2.0-alpha.20 publishes macOS Apple
+# Build the current prerelease asset. v0.2.0-alpha.21 publishes macOS Apple
 # Silicon first while the Rust-native daemon-backed multiplexer is still being validated.
 
 on:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.2.0-alpha.20). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.21). Used for manual runs."
         required: true
 
 permissions:
@@ -376,7 +376,7 @@ jobs:
             macOS Apple Silicon prerelease asset is attached:
             - `tuimux-${{ steps.ver.outputs.version }}-aarch64-apple-darwin.tar.gz`
 
-            This prerelease keeps the default runtime on tuimux's Rust-native daemon-backed multiplexer. It runs shell windows in real PTYs owned by a tuimux daemon, renders through `vt100` + ratatui, keeps terminal mode fullscreen, focuses navigation on the right-side window list with keyboard window create/close shortcuts, removes legacy split layout state from the native mux core while keeping split hotkeys deprecated in the UI, removes stale split-pane/resize examples from the static layout preview, adds active-terminal scrollback navigation, preserves drag selection after mouse-up with explicit selection lifecycle regressions, copies selected text with Ctrl-C through the system clipboard instead of interrupting the child process, verifies daemon-side selected-text extraction/highlighting, adds a macOS PTY UI smoke for reverse-video selection highlight after mouse-up + drag + Ctrl-C + `pbpaste` + no foreground SIGINT + host bracketed paste + child bracketed paste wrapper preservation, adds a local app smoke for `llmfit --help`, `btop`, `htop`, and `nano`, adds a session-flow smoke for right-side window workflow + split deprecation + detach/reattach shell persistence, adds a no-tmux smoke proving the default TUI and doctor work without `tmux` in PATH while `--native-client` fails clearly, and keeps PTYs alive across UI detach/reattach.
+            This prerelease keeps the default runtime on tuimux's Rust-native daemon-backed multiplexer. It runs shell windows in real PTYs owned by a tuimux daemon, renders through `vt100` + ratatui, keeps terminal mode fullscreen, focuses navigation on the right-side window list with keyboard window create/close shortcuts, removes legacy split layout state from the native mux core while keeping split hotkeys deprecated in the UI, removes stale split-pane/resize examples from the static layout preview, adds active-terminal scrollback navigation, preserves drag selection after mouse-up with explicit selection lifecycle regressions, copies selected text with Ctrl-C through the system clipboard instead of interrupting the child process, verifies daemon-side selected-text extraction/highlighting, adds a macOS PTY UI smoke for reverse-video selection highlight after mouse-up + drag + Ctrl-C + `pbpaste` + no foreground SIGINT + host bracketed paste + child bracketed paste wrapper preservation, adds a macOS mouse-protocol smoke for child SGR mouse forwarding + Shift-drag selection override, adds a local app smoke for `llmfit --help`, `btop`, `htop`, and `nano`, adds a session-flow smoke for right-side window workflow + split deprecation + detach/reattach shell persistence, adds a no-tmux smoke proving the default TUI and doctor work without `tmux` in PATH while `--native-client` fails clearly, and keeps PTYs alive across UI detach/reattach.
 
             ### macOS Apple Silicon installer
             ```sh
