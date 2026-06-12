@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end macOS smoke test for tuimux session and window workflow."""
+"""End-to-end macOS smoke test for OSC window title propagation."""
 
 from __future__ import annotations
 
@@ -19,12 +19,13 @@ from pathlib import Path
 ROWS = 24
 COLS = 100
 F12 = b"\x1b[24~"
+TITLE = "OSC_TITLE"
 
 
 def build_parser() -> argparse.ArgumentParser:
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
-        description="Smoke-test tuimux detach/reattach and window-list workflow."
+        description="Smoke-test child OSC title updates in the window list."
     )
     parser.add_argument(
         "--binary",
@@ -34,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--session",
-        default=f"session-flow-smoke-{os.getpid()}",
+        default=f"window-title-smoke-{os.getpid()}",
         help="temporary tuimux session name",
     )
     parser.add_argument(
@@ -136,62 +137,10 @@ def wait_or_fail(client: PtyClient, text: str, timeout: float, label: str) -> No
         raise RuntimeError(f"{label} did not appear; tail:\n{client.tail()}")
 
 
-def shell(client: PtyClient, command: str) -> None:
-    client.write((command + "\r").encode())
-
-
 def paste_shell(client: PtyClient, command: str) -> None:
     client.write(f"\x1b[200~{command}\x1b[201~".encode())
     client.read_for(0.2)
     client.write(b"\r")
-
-
-def enter_navigation(client: PtyClient, timeout: float) -> None:
-    client.clear_buffer()
-    client.write(F12)
-    wait_or_fail(client, "navigation mode", timeout, "navigation status")
-    wait_or_fail(client, "WINDOWS", timeout, "window list")
-    wait_or_fail(client, "+ new", timeout, "new-window row")
-
-
-def run_window_flow(client: PtyClient, timeout: float) -> None:
-    enter_navigation(client, timeout)
-
-    client.clear_buffer()
-    client.write(b"n")
-    wait_or_fail(client, "created", timeout, "new window status")
-    wait_or_fail(client, "2:", timeout, "second window row")
-
-    client.clear_buffer()
-    client.write(b"|")
-    wait_or_fail(
-        client,
-        "deprecated",
-        timeout,
-        "split deprecated status",
-    )
-
-    client.clear_buffer()
-    client.write(b"x")
-    wait_or_fail(client, "window 2", timeout, "kill active window status")
-    wait_or_fail(client, "1:", timeout, "remaining first window row")
-
-
-def detach(client: PtyClient, timeout: float) -> None:
-    client.clear_buffer()
-    client.write(b"d")
-    wait_or_fail(
-        client,
-        "tuimux: closed native multiplexer UI.",
-        timeout,
-        "detach message",
-    )
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if client.process.poll() is not None:
-            return
-        time.sleep(0.1)
-    raise RuntimeError("client process did not exit after detach")
 
 
 def main() -> int:
@@ -203,52 +152,31 @@ def main() -> int:
     if sys.platform != "darwin":
         raise SystemExit("this smoke test currently targets macOS")
 
+    client = PtyClient(binary, args.session)
     try:
-        first = PtyClient(binary, args.session)
-        try:
-            first.read_for(1.5)
-            shell(
-                first,
-                "printf '\\033[2J\\033[H'; "
-                "export TUIMUX_PERSIST_MARK=alive; "
-                "printf 'TUIMUX_PERSIST_SET\\n'",
-            )
-            wait_or_fail(first, "TUIMUX_PERSIST_SET", args.timeout, "persist setup")
-            run_window_flow(first, args.timeout)
-            detach(first, args.timeout)
-        finally:
-            first.close()
+        client.read_for(1.5)
+        paste_shell(
+            client,
+            "python3 -c 'import sys,time; "
+            f"sys.stdout.write(\"\\033]2;{TITLE}\\007\"); "
+            "sys.stdout.flush(); time.sleep(3.0)'",
+        )
 
-        second = PtyClient(binary, args.session)
-        try:
-            second.read_for(1.5)
-            wait_or_fail(second, "TUIMUX_PERSIST_SET", args.timeout, "reattached screen")
-            second.clear_buffer()
-            paste_shell(
-                second,
-                "printf '\\033[2J\\033[H'; "
-                "printf 'PERSIST:%s\\n' \"$TUIMUX_PERSIST_MARK\"",
-            )
-            wait_or_fail(
-                second,
-                "PERSIST:alive",
-                args.timeout,
-                "reattached shell state",
-            )
-            enter_navigation(second, args.timeout)
-            wait_or_fail(second, "1:", args.timeout, "reattached window list")
-            detach(second, args.timeout)
-        finally:
-            second.close()
+        client.read_for(0.5)
+        client.clear_buffer()
+        client.write(F12)
+        wait_or_fail(client, "navigation mode", args.timeout, "navigation status")
+        wait_or_fail(client, "WINDOWS", args.timeout, "window list")
+        wait_or_fail(client, f"1: {TITLE}", args.timeout, "OSC title row")
 
-        print("OK macOS session flow smoke")
-        print("window workflow: new, split-deprecated, kill")
-        print("detach/reattach: shell state persisted")
+        print("OK macOS window title smoke")
+        print(f"window list title: {TITLE}")
         return 0
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 1
     finally:
+        client.close()
         if not args.keep_daemon:
             stop_daemon(binary, args.session)
 

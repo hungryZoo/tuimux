@@ -1,9 +1,9 @@
 name: release
 
-# Build the current prerelease asset. v0.2.0-alpha.27 publishes macOS Apple
-# Silicon first after the Rust-native daemon path gained alternate-screen
-# restoration coverage, child-exit cleanup, truecolor, resize, and scrollback
-# navigation/input-bottom coverage.
+# Build the current prerelease asset. v0.2.0-alpha.28 publishes macOS Apple
+# Silicon first after the Rust-native daemon path gained OSC window-title
+# propagation, OSC 52 clipboard copy, alternate-screen restoration,
+# child-exit cleanup, truecolor, resize, and scrollback coverage.
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build (e.g. v0.2.0-alpha.27). Used for manual runs."
+        description: "Tag to build (e.g. v0.2.0-alpha.28). Used for manual runs."
         required: true
 
 permissions:

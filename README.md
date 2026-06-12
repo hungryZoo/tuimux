@@ -2,13 +2,11 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.27 keeps the default runtime on the Rust-native path and focuses
-the product on a single full-size terminal surface selected from a window list,
-with child truecolor output preserved even when the parent environment sets
-`NO_COLOR`, plus host resize propagation to the active child PTY covered by
-smoke tests, end-to-end scrollback navigation/input-bottom coverage,
-alternate-screen restoration checks, and child shell exit cleanup so stale
-terminal windows do not linger.
+v0.2.0-alpha.28 keeps the default runtime on the Rust-native path and focuses
+the product on a single full-size terminal surface selected from a window list.
+This prerelease adds child OSC window title propagation into the right-side
+window list and best-effort OSC 52 clipboard copy, while preserving the recent
+scrollback, alternate-screen, resize, color, selection, and child-exit checks.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
 which owns sessions, windows, and PTY-backed shell processes. `tmux` is
 no longer required for the default UI; the old plain tmux client remains
@@ -29,6 +27,7 @@ This is still a 0.x prerelease. Current behavior:
 - Press `F12` to switch between terminal mode and navigation/sidebar mode.
 - Sessions, windows, and each active PTY-backed shell are managed by the tuimux daemon, not by tmux.
 - Navigation mode shows a right-side window list; `Tab` and arrow keys move between windows, `n` creates a window, and `x` closes the active window.
+- Child OSC 0/1/2 terminal titles are shown in the right-side window list, with static `shell` names kept as fallback.
 - Split-pane UI, daemon protocol commands, and native mux split layout state are removed from the default product path. Use separate windows instead.
 - Closing/detaching the UI keeps the daemon-owned PTYs alive for later reattach.
 - Multiple clients can connect to the same daemon concurrently; they currently share active session/window state.
@@ -36,6 +35,7 @@ This is still a 0.x prerelease. Current behavior:
 - Mouse wheel scrolls shell history when the child program is not using mouse tracking; `PageUp`/`PageDown`, `Home`, and `End` work in navigation mode, and paste while scrolled back returns to the live bottom, covered by the macOS scrollback smoke.
 - Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen; macOS PTY smoke covers reverse-video selection highlight, drag + Ctrl-C + `pbpaste`, host bracketed paste, and child bracketed paste wrappers.
 - Ctrl-C copies the selected text to the system clipboard instead of sending SIGINT.
+- Child OSC 52 clipboard copy requests are decoded and sent to the system clipboard on macOS.
 - Host paste is captured as a paste event and forwarded to the active PTY with child bracketed paste respected.
 - If the child program enables mouse tracking, normal mouse events go to the child; Shift-drag starts tuimux text selection, covered by the macOS mouse-protocol smoke.
 - Child truecolor foreground/background and default-color reset are preserved by the real TUI renderer, covered by the macOS color smoke.
@@ -53,8 +53,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.27/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.27 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.28/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.28 bash
 ```
 
 Verify:
@@ -85,6 +85,8 @@ python3 scripts/smoke_macos_scrollback.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_color.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_resize.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_altscreen.py --binary target/debug/tuimux
+python3 scripts/smoke_macos_window_title.py --binary target/debug/tuimux
+python3 scripts/smoke_macos_osc52_clipboard.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_child_exit.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
@@ -92,5 +94,5 @@ python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.27` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.28` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

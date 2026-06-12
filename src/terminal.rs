@@ -10,6 +10,8 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
@@ -18,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use vt100::{Color as VtColor, MouseProtocolEncoding, MouseProtocolMode};
 
 const SCROLLBACK: usize = 10_000;
+const MAX_WINDOW_TITLE_CHARS: usize = 120;
+const MAX_OSC52_BASE64_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TerminalColor {
@@ -141,8 +145,51 @@ impl SelectionRange {
     }
 }
 
+#[derive(Debug, Default)]
+struct TerminalCallbacks {
+    window_icon_name: Option<String>,
+    window_title: Option<String>,
+    pending_clipboard_copy: Option<String>,
+}
+
+impl TerminalCallbacks {
+    fn title(&self) -> Option<&str> {
+        self.window_title
+            .as_deref()
+            .or(self.window_icon_name.as_deref())
+    }
+
+    fn take_clipboard_copy(&mut self) -> Option<String> {
+        self.pending_clipboard_copy.take()
+    }
+}
+
+impl vt100::Callbacks for TerminalCallbacks {
+    fn set_window_icon_name(&mut self, _: &mut vt100::Screen, icon_name: &[u8]) {
+        self.window_icon_name = sanitize_window_title(icon_name);
+    }
+
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.window_title = sanitize_window_title(title);
+    }
+
+    fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, selector: &[u8], data: &[u8]) {
+        if !selector_targets_system_clipboard(selector) || data.len() > MAX_OSC52_BASE64_BYTES {
+            return;
+        }
+
+        let Ok(decoded) = BASE64_STANDARD.decode(data) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&decoded).to_string();
+        if !text.is_empty() {
+            self.pending_clipboard_copy = Some(text);
+        }
+    }
+}
+
 pub struct PtyTerminal {
-    parser: vt100::Parser,
+    parser: vt100::Parser<TerminalCallbacks>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -197,7 +244,12 @@ impl PtyTerminal {
         });
 
         Ok(Self {
-            parser: vt100::Parser::new(rows, cols, SCROLLBACK),
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                SCROLLBACK,
+                TerminalCallbacks::default(),
+            ),
             master,
             writer,
             child,
@@ -214,6 +266,7 @@ impl PtyTerminal {
             match self.rx.try_recv() {
                 Ok(bytes) => {
                     self.parser.process(&bytes);
+                    self.copy_pending_clipboard();
                     changed = true;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -225,6 +278,10 @@ impl PtyTerminal {
         }
         self.poll_finished();
         changed
+    }
+
+    pub fn title(&self) -> Option<&str> {
+        self.parser.callbacks().title()
     }
 
     pub fn is_finished(&mut self) -> bool {
@@ -498,6 +555,13 @@ impl PtyTerminal {
         self.writer.flush()?;
         Ok(true)
     }
+
+    fn copy_pending_clipboard(&mut self) {
+        let Some(text) = self.parser.callbacks_mut().take_clipboard_copy() else {
+            return;
+        };
+        let _ = crate::clipboard::copy_text(&text);
+    }
 }
 
 impl Drop for PtyTerminal {
@@ -522,6 +586,20 @@ fn shell_command(cwd: &Path) -> CommandBuilder {
     let mut command = CommandBuilder::new(shell);
     command.cwd(cwd.as_os_str());
     command
+}
+
+fn sanitize_window_title(raw: &[u8]) -> Option<String> {
+    let title = String::from_utf8_lossy(raw)
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_WINDOW_TITLE_CHARS)
+        .collect::<String>();
+    let title = title.trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+fn selector_targets_system_clipboard(selector: &[u8]) -> bool {
+    selector.is_empty() || selector.contains(&b'c')
 }
 
 fn key_to_bytes(key: KeyEvent, application_cursor: bool) -> Option<Vec<u8>> {
@@ -915,6 +993,29 @@ mod tests {
         assert_eq!(
             TerminalStyle::from_cell(bg).bg,
             TerminalColor::Rgb(78, 90, 123)
+        );
+    }
+
+    #[test]
+    fn terminal_callbacks_track_osc_window_titles() {
+        let mut parser = vt100::Parser::new_with_callbacks(4, 40, 0, TerminalCallbacks::default());
+        parser.process(b"\x1b]2;BUILD WATCH\x07");
+        assert_eq!(parser.callbacks().title(), Some("BUILD WATCH"));
+
+        let mut icon_parser =
+            vt100::Parser::new_with_callbacks(4, 40, 0, TerminalCallbacks::default());
+        icon_parser.process(b"\x1b]1;ICON NAME\x07");
+        assert_eq!(icon_parser.callbacks().title(), Some("ICON NAME"));
+    }
+
+    #[test]
+    fn terminal_callbacks_accept_osc52_clipboard_copy() {
+        let mut parser = vt100::Parser::new_with_callbacks(4, 40, 0, TerminalCallbacks::default());
+        parser.process(b"\x1b]52;c;Q09QWSBUQVJHRVQ=\x07");
+
+        assert_eq!(
+            parser.callbacks_mut().take_clipboard_copy(),
+            Some("COPY TARGET".to_string())
         );
     }
 }

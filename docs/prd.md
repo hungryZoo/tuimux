@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 3.1
-- **대상 릴리스**: v0.2.0-alpha.27
+- **문서 버전**: 3.2
+- **대상 릴리스**: v0.2.0-alpha.28
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.27의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.28의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -20,6 +20,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - UI를 닫을 때 shell/session까지 사라지면 multiplexer로 믿고 쓰기 어렵다.
 - shell이 `exit`로 종료됐는데 window가 stale 화면으로 남으면 실제 terminal이 아니라 frozen preview처럼 느껴진다.
 - alternate-screen 앱이 종료된 뒤 잔상이나 alternate-screen text가 primary scrollback에 남으면 native terminal과 다르게 느껴진다.
+- child 앱이 terminal title이나 OSC 52 clipboard를 쓰는데 UI가 무시하면 window list와 복사 흐름이 native terminal보다 둔하게 느껴진다.
 - 한 화면을 여러 pane으로 나누는 방식은 현재 목표가 아니며, window 목록 중심 UX가 더 단순하고 안정적이다.
 - tmux 설정이나 runtime 설치가 필수이면 tuimux 자체 제품 경험을 제어하기 어렵다.
 
@@ -30,12 +31,14 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - UI detach/종료 후 같은 session으로 재attach하면 shell state가 유지된다.
 - 같은 daemon에 여러 client가 동시에 연결될 수 있다.
 - navigation mode에서 오른쪽 window 목록을 보고 `Tab`/arrow key로 window를 전환하고, `n`/`x`로 window를 만들고 닫을 수 있다.
+- child가 OSC 0/1/2로 terminal title을 설정하면 오른쪽 window 목록에 해당 title을 표시한다.
 - child shell이 자체 종료되면 non-last window는 목록에서 제거하고, 마지막 window는 새 shell로 대체한다.
 - split pane hotkey는 새 pane을 만들지 않고 deprecated status를 보여주며 core state를 바꾸지 않는다.
 - terminal mode는 full-screen으로 동작해 `btop`, `htop`, `nano` 같은 앱에 충분한 PTY 크기를 준다.
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
 - selection이 있을 때 Ctrl-C는 system clipboard copy로 동작한다.
+- child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어진다.
 - host paste는 bracketed paste event로 받아 active PTY에 전달한다.
 - child가 mouse tracking을 켠 경우 normal mouse는 child로 보내고 Shift-drag를 tuimux selection override로 쓴다.
 - child가 명시적으로 출력한 truecolor foreground/background/default reset은 부모 환경의 `NO_COLOR`와 무관하게 native terminal color로 보존한다.
@@ -76,6 +79,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - macOS resize smoke에서 host PTY resize 후 child가 `SIGWINCH`와 새 `32x120` terminal size를 관측한다.
 - macOS alternate-screen smoke와 daemon regression에서 alternate-screen active/exit, primary screen 복귀, primary scrollback 격리가 통과한다.
 - macOS child-exit smoke에서 마지막 shell 종료 후 replacement shell이 명령을 받고, non-last shell 종료 후 window list에서 제거된다.
+- macOS window-title smoke에서 child OSC title이 오른쪽 window list에 표시된다.
+- macOS OSC 52 clipboard smoke에서 child copy 요청 후 `pbpaste`가 요청한 텍스트를 반환한다.
 - GitHub prerelease에 macOS Apple Silicon tarball과 `SHA256SUMS`가 게시된다.
 
 ## 6. 다음 단계

@@ -74,7 +74,7 @@ pub struct PaneSeparator {
 
 pub struct PaneRef<'a> {
     pub index: u32,
-    pub title: &'a str,
+    pub title: String,
     pub active: bool,
     pub rect: PaneRect,
     pub terminal: &'a PtyTerminal,
@@ -141,7 +141,7 @@ impl NativeMux {
                     .enumerate()
                     .map(|(idx, window)| Window {
                         index: window.index,
-                        name: window.name.clone(),
+                        name: window.display_name(),
                         active: idx == session.active_window,
                         panes: window.panes.len() as u32,
                     })
@@ -159,7 +159,7 @@ impl NativeMux {
                     .enumerate()
                     .map(|(idx, pane)| Pane {
                         index: pane.index,
-                        title: pane.title.clone(),
+                        title: pane.display_title(),
                         active: idx == window.active_pane,
                     })
                     .collect()
@@ -176,7 +176,7 @@ impl NativeMux {
                     .enumerate()
                     .map(|(idx, pane)| PaneRef {
                         index: pane.index,
-                        title: &pane.title,
+                        title: pane.display_title(),
                         active: idx == window.active_pane,
                         rect: PaneRect::new(0, 0, width, height),
                         terminal: &pane.terminal,
@@ -437,6 +437,25 @@ impl NativeMux {
     fn active_window_mut(&mut self) -> Option<&mut NativeWindow> {
         self.active_session_mut()
             .and_then(|session| session.windows.get_mut(session.active_window))
+    }
+}
+
+impl NativeWindow {
+    fn display_name(&self) -> String {
+        self.panes
+            .get(self.active_pane)
+            .and_then(|pane| pane.terminal.title())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.name.clone())
+    }
+}
+
+impl NativePane {
+    fn display_title(&self) -> String {
+        self.terminal
+            .title()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.title.clone())
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "tuimux"
-version = "0.2.0-alpha.27"
+version = "0.2.0-alpha.28"
 edition = "2021"
 rust-version = "1.74"
 description = "A prefix-free, mouse-first Rust-native terminal multiplexer"
@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.27"
 libc = "0.2"

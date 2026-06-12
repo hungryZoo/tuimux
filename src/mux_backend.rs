@@ -1303,6 +1303,73 @@ mod unix_remote {
         }
 
         #[test]
+        fn daemon_updates_window_names_from_child_osc_titles() {
+            let socket = std::env::temp_dir().join(format!(
+                "twt-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            let daemon_socket = socket.clone();
+            let daemon = thread::spawn(move || {
+                run_daemon_inner(daemon_socket, "window-title-test", PathBuf::from("."))
+            });
+            wait_for_socket(&socket);
+
+            let mut client = UnixStream::connect(&socket).expect("client connects");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+
+            let title = "TUIMUX_BUILD_WATCH";
+            let command = format!(
+                "python3 -c 'import sys,time; \
+                 sys.stdout.write(\"\\x1b]2;{title}\\x07\"); \
+                 sys.stdout.flush(); \
+                 time.sleep(1.0)'"
+            );
+            assert!(matches!(
+                request_response(&mut client, Request::SendPaste { text: command }),
+                Response::Ok
+            ));
+            let enter = KeyInput::from_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("enter key input");
+            assert!(matches!(
+                request_response(&mut client, Request::SendKey { key: enter }),
+                Response::Ok
+            ));
+
+            let titled = wait_for_snapshot_matching(
+                &mut client,
+                80,
+                12,
+                "window title update",
+                |snapshot| {
+                    snapshot.windows.len() == 1
+                        && snapshot.windows[0].name == title
+                        && snapshot.panes.len() == 1
+                        && snapshot.panes[0].title == title
+                },
+            );
+            assert!(titled.windows[0].active);
+
+            let mut shutdown = UnixStream::connect(&socket).expect("shutdown client connects");
+            shutdown
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            assert!(matches!(
+                request_response(&mut shutdown, Request::Shutdown),
+                Response::Ok
+            ));
+            daemon
+                .join()
+                .expect("daemon thread joins")
+                .expect("daemon exits cleanly");
+        }
+
+        #[test]
         fn daemon_reaps_exited_shell_windows() {
             let socket = std::env::temp_dir().join(format!(
                 "tuimux-child-exit-test-{}-{}.sock",
@@ -1409,7 +1476,7 @@ mod unix_remote {
                         && !snapshot_text(snapshot).contains(before_second_exit)
                 },
             );
-            assert_eq!(pruned.windows[0].name, "shell");
+            assert_eq!(pruned.windows[0].index, 1);
 
             let mut shutdown = UnixStream::connect(&socket).expect("shutdown client connects");
             shutdown
