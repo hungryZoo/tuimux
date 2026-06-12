@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 1.6
-- **대상 릴리스**: v0.2.0-alpha.11
+- **문서 버전**: 1.7
+- **대상 릴리스**: v0.2.0-alpha.12
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.11은 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.12는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
 
 핵심 목표는 다음과 같다.
 
@@ -219,10 +219,12 @@ Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x2
 Navigation mode 키:
 
 - `Tab`, arrow key: 이전/다음 window 선택.
+- `n`: active session에 새 shell window 생성.
+- `x`: active window 종료. 마지막 window이면 replacement shell window를 만든다.
 - `PageUp`, `PageDown`: active terminal scrollback을 한 화면 단위로 이동.
 - `Home`: 가능한 가장 위쪽 scrollback으로 이동.
 - `End`: scrollback bottom으로 이동.
-- `|`, `v`, `-`, `h`, `x`: split-pane deprecated status를 표시하고 새 pane을 만들지 않는다.
+- `|`, `v`, `-`, `h`: split-pane deprecated status를 표시하고 새 pane을 만들지 않는다.
 
 `setup()`은 raw mode, alternate screen, mouse capture와 함께 `EnableBracketedPaste`를 실행한다. `restore()`는 alternate screen/mouse capture를 해제하면서 `DisableBracketedPaste`도 실행해 host terminal 상태를 되돌린다.
 
@@ -321,6 +323,19 @@ navigation key Tab / arrow
 ```
 
 ```text
+navigation key n
+  -> Request::NewWindow { width, height }
+  -> daemon spawn_window()
+  -> created window becomes active
+```
+
+```text
+navigation key x
+  -> Request::KillWindowByRow { active_row, width, height }
+  -> daemon removes active window, or creates replacement when it was last
+```
+
+```text
 window row click
   -> Request::SelectWindowByRow { row }
 ```
@@ -399,6 +414,7 @@ F12, q, Esc, or Detach button
 - layout preview deterministic output tests.
 - terminal key/mouse encoder unit tests.
 - daemon multi-client regression test.
+- daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 
 ### 5.2 macOS Apple Silicon smoke
@@ -406,7 +422,7 @@ F12, q, Esc, or Detach button
 검증할 항목:
 
 - `cargo fmt -- --check`
-- `cargo test --quiet` 37개 통과
+- `cargo test --quiet` 38개 통과
 - `TERM=xterm-256color COLORTERM=truecolor cargo run --quiet -- --doctor`
 - `TERM=dumb cargo run --quiet -- --doctor` non-zero 확인
 - `cargo build --release --locked --target aarch64-apple-darwin`
@@ -416,14 +432,15 @@ F12, q, Esc, or Detach button
 - `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
 - mouse drag selection, Ctrl-C, `pbpaste`가 선택 텍스트 반환 확인
 - mouse wheel/PageUp/PageDown scrollback 확인
+- navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
 - navigation mode에서 split hotkey가 새 pane을 만들지 않고 deprecated status를 표시하는지 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.11은 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.12는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.11-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.12-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -431,8 +448,8 @@ v0.2.0-alpha.11은 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.11/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.11 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.12/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.12 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

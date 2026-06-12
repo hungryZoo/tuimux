@@ -2,7 +2,7 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.11 keeps the default runtime on the Rust-native path and focuses
+v0.2.0-alpha.12 keeps the default runtime on the Rust-native path and focuses
 the product on a single full-size terminal surface selected from a window list.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
 which owns sessions, windows, panes, and PTY-backed shell processes. `tmux` is
@@ -23,7 +23,7 @@ This is still a 0.x prerelease. Current behavior:
 - Terminal mode is full-screen so full-screen tools receive the real host size.
 - Press `F12` to switch between terminal mode and navigation/sidebar mode.
 - Sessions, windows, and the active PTY are managed by the tuimux daemon, not by tmux.
-- Navigation mode shows a right-side window list; `Tab` and arrow keys move between windows.
+- Navigation mode shows a right-side window list; `Tab` and arrow keys move between windows, `n` creates a window, and `x` closes the active window.
 - Split-pane UI and daemon protocol commands are deprecated in the default product path. Use separate windows instead.
 - Closing/detaching the UI keeps the daemon-owned PTYs alive for later reattach.
 - Multiple clients can connect to the same daemon concurrently; they currently share active session/window/pane state.
@@ -44,8 +44,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.11/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.11 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.12/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.12 bash
 ```
 
 Verify:
@@ -73,5 +73,5 @@ cargo run -- --layout-preview
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.11` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.12` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

@@ -371,6 +371,9 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     (KeyCode::Char('s'), KeyModifiers::ALT) => {
                         state.session_modal_open = !state.session_modal_open;
                     }
+                    (KeyCode::Char('n'), _) => {
+                        new_window(state);
+                    }
                     (KeyCode::Char('|'), _)
                     | (KeyCode::Char('v'), _)
                     | (KeyCode::Char('-'), _)
@@ -405,7 +408,7 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                         select_adjacent_window(state, 1);
                     }
                     (KeyCode::Char('x'), _) => {
-                        deprecated_split_pane(state);
+                        kill_active_window(state);
                     }
                     (KeyCode::Char('d'), _) => {
                         return Ok(Exit::Detach);
@@ -607,6 +610,14 @@ fn kill_window(state: &mut UiState, idx: usize) {
         }
         Err(e) => state.status = Some(format!("kill-window failed: {e}")),
     }
+}
+
+fn kill_active_window(state: &mut UiState) {
+    let Some(active) = state.windows.iter().position(|window| window.active) else {
+        state.status = Some("no active window".to_string());
+        return;
+    };
+    kill_window(state, active);
 }
 
 fn select_pane(state: &mut UiState, idx: usize) {

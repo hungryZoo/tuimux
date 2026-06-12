@@ -1055,6 +1055,83 @@ mod unix_remote {
                 .expect("daemon exits cleanly");
         }
 
+        #[test]
+        fn daemon_manages_windows_without_split_commands() {
+            let socket = std::env::temp_dir().join(format!(
+                "tuimux-window-test-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            let daemon_socket = socket.clone();
+            let daemon = thread::spawn(move || {
+                run_daemon_inner(daemon_socket, "window-test", PathBuf::from("."))
+            });
+            wait_for_socket(&socket);
+
+            let mut client = UnixStream::connect(&socket).expect("client connects");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+
+            let initial = snapshot(&mut client, 80, 24);
+            assert_eq!(initial.windows.len(), 1);
+            assert!(initial.windows[0].active);
+
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::NewWindow {
+                        width: 80,
+                        height: 24
+                    },
+                ),
+                Response::Index(2)
+            ));
+            let created = snapshot(&mut client, 80, 24);
+            assert_eq!(created.windows.len(), 2);
+            assert!(created.windows[1].active);
+
+            assert!(matches!(
+                request_response(&mut client, Request::SelectWindowByRow { row: 0 }),
+                Response::Ok
+            ));
+            let selected = snapshot(&mut client, 80, 24);
+            assert!(selected.windows[0].active);
+            assert!(!selected.windows[1].active);
+
+            assert!(matches!(
+                request_response(
+                    &mut client,
+                    Request::KillWindowByRow {
+                        row: 0,
+                        width: 80,
+                        height: 24
+                    },
+                ),
+                Response::Index(1)
+            ));
+            let killed = snapshot(&mut client, 80, 24);
+            assert_eq!(killed.windows.len(), 1);
+            assert_eq!(killed.windows[0].index, 2);
+            assert!(killed.windows[0].active);
+
+            let mut shutdown = UnixStream::connect(&socket).expect("shutdown client connects");
+            shutdown
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            assert!(matches!(
+                request_response(&mut shutdown, Request::Shutdown),
+                Response::Ok
+            ));
+            daemon
+                .join()
+                .expect("daemon thread joins")
+                .expect("daemon exits cleanly");
+        }
+
         fn wait_for_socket(socket: &Path) {
             let deadline = Instant::now() + Duration::from_secs(3);
             while Instant::now() < deadline {
