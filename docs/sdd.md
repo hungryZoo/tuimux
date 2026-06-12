@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 1.9
-- **대상 릴리스**: v0.2.0-alpha.14
+- **문서 버전**: 2.0
+- **대상 릴리스**: v0.2.0-alpha.15
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.14는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.15는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다.
 
 핵심 목표는 다음과 같다.
 
@@ -418,6 +418,7 @@ F12, q, Esc, or Detach button
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
+- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생을 확인.
 
 ### 5.2 macOS Apple Silicon smoke
 
@@ -428,6 +429,7 @@ F12, q, Esc, or Detach button
 - `TERM=xterm-256color COLORTERM=truecolor cargo run --quiet -- --doctor`
 - `TERM=dumb cargo run --quiet -- --doctor` non-zero 확인
 - `cargo build --release --locked --target aarch64-apple-darwin`
+- `python3 scripts/smoke_macos_ui_selection.py --binary target/debug/tuimux`
 - `tuimux --session persist-smoke`에서 `export TUIMUX_PERSIST_MARK=alive`
 - UI 종료 후 daemon `PPID=1`과 `/tmp/tuimux-$USER/*.sock` 유지 확인
 - 같은 session reattach 후 `echo $TUIMUX_PERSIST_MARK`가 `alive` 출력
@@ -439,10 +441,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.14는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.15는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.14-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.15-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -450,8 +452,8 @@ v0.2.0-alpha.14는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.14/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.14 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.15/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.15 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계
