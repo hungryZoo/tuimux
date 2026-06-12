@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 3.1
-- **대상 릴리스**: v0.2.0-alpha.26
+- **문서 버전**: 3.2
+- **대상 릴리스**: v0.2.0-alpha.27
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.26 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다. 또한 child shell이 `exit`로 종료된 뒤 화면만 남는 stale terminal 상태를 막기 위해 PTY child 종료를 daemon snapshot 주기에서 회수한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.27 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 full-size terminal workflow로 정리한다. 또한 child shell이 `exit`로 종료된 뒤 화면만 남는 stale terminal 상태를 막고, alternate-screen 앱이 종료된 뒤 primary screen으로 자연스럽게 복귀하도록 terminal fidelity 검증을 강화한다.
 
 핵심 목표는 다음과 같다.
 
@@ -19,6 +19,7 @@
 - 기존 client가 연결된 상태에서도 새 attach, snapshot, command, shutdown request를 처리한다.
 - host terminal의 bracketed paste mode를 UI 생명주기에 맞춰 켜고 끈다.
 - scrollback, selection, clipboard는 host terminal에 가까운 감각으로 동작한다.
+- renderer는 이전 frame의 긴 줄이 다음 frame의 짧은 줄 뒤에 남지 않도록 row를 viewport 폭까지 지운다.
 - tmux C 코드는 구조 참고로만 삼고 Rust 모듈로 직접 구현한다.
 - tmux fallback은 hidden `--native-client` 옵션에만 남긴다.
 
@@ -227,6 +228,8 @@ struct UiState {
 
 Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x24 host에서 sidebar 때문에 52x22 같은 작은 PTY를 받지 않도록 하기 위해서다. Navigation mode의 오른쪽 sidebar는 session, detach, status, windows 목록만 노출한다.
 
+terminal row 렌더링은 `terminal_row_spans_for_width(row, width)`를 통해 각 row 끝을 default-style 공백으로 채운다. ratatui backend가 짧은 `Line`만 받으면 이전 frame의 더 긴 glyph가 host terminal에 남을 수 있으므로, 모든 terminal row는 현재 viewport width만큼 명시적으로 덮어쓴다. default-style 공백은 foreground/background를 강제로 칠하지 않아 host terminal color policy를 유지한다.
+
 Navigation mode 키:
 
 - `Tab`, arrow key: 이전/다음 window 선택.
@@ -427,10 +430,12 @@ F12, q, Esc, or Detach button
 - terminal parser truecolor preservation tests.
 - ratatui paragraph truecolor buffer preservation tests.
 - crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
+- terminal row padding regression test: 긴 row 이후 짧은 row를 그렸을 때 stale glyph가 남지 않는지 확인.
 - UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
 - daemon child-exit regression test: 마지막 shell `exit` 후 replacement shell이 명령을 받을 수 있고, non-last shell `exit` 후 window list에서 제거되는지 확인.
+- daemon alternate-screen regression test: alternate-screen marker가 primary screen 복귀 후 primary scrollback snapshot에 섞이지 않는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
@@ -439,6 +444,7 @@ F12, q, Esc, or Detach button
 - macOS scrollback smoke script: 실제 TUI client에서 긴 shell output을 만든 뒤 mouse wheel, `PageUp`, `Home`, `End`가 active terminal history viewport를 이동하고 bottom으로 돌아오는지 확인하며, scrollback 중 host paste가 live bottom으로 복귀해 active shell에서 실행되는지 확인.
 - macOS truecolor smoke script: parent `NO_COLOR=1` 환경에서 child가 출력한 `38;2` foreground, `48;2` background, default color reset이 실제 TUI output에 남는지 확인.
 - macOS resize smoke script: 실제 TUI client의 host PTY를 resize한 뒤 active child process가 `SIGWINCH`와 새 `32x120` terminal size를 관측하는지 확인.
+- macOS alternate-screen smoke script: 실제 TUI client에서 raw alternate-screen sequence가 active일 때 보이고 종료 후 primary screen으로 복귀하는지 확인.
 - macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, split hotkey deprecated status, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
 - macOS child-exit smoke script: 실제 TUI client에서 마지막 shell `exit` 후 replacement shell 명령 실행, non-last shell `exit` 후 오른쪽 window list 제거를 확인.
 - macOS no-tmux smoke script: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `SHELL=/bin/sh` 환경에서 `--doctor`, default TUI PTY shell, `--native-client` failure boundary를 확인.
@@ -458,6 +464,7 @@ F12, q, Esc, or Detach button
 - `python3 scripts/smoke_macos_scrollback.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_color.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_resize.py --binary target/debug/tuimux`
+- `python3 scripts/smoke_macos_altscreen.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_child_exit.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux`
@@ -470,6 +477,7 @@ F12, q, Esc, or Detach button
 - child mouse tracking 중 normal click은 child로 전달되고 Shift-drag는 tuimux selection으로 처리되는지 확인
 - parent `NO_COLOR=1` 상태에서도 child truecolor foreground/background SGR과 default reset이 tuimux TUI output에 보존되는지 확인
 - host resize 후 active child PTY가 새 rows/cols와 `SIGWINCH`를 관측하는지 확인
+- alternate-screen active/exit 후 primary screen 복귀와 primary scrollback 격리 확인
 - mouse wheel/PageUp/PageDown/Home/End scrollback 확인
 - scrollback 중 host paste가 live bottom으로 돌아와 active shell에서 실행되는지 확인
 - navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
@@ -478,10 +486,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.26 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.27 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.26-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.27-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -489,8 +497,8 @@ v0.2.0-alpha.26 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.26/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.26 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.27/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.27 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계
@@ -500,6 +508,6 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.26/sc
 - split-pane UX는 deprecated이며 native mux core에는 split layout state가 없다. window-list workflow를 우선한다.
 - Windows named-pipe daemon backend가 없다.
 - tmux command/plugin/config 호환성은 없다.
-- scrollback reflow와 alternate screen edge case는 실제 앱 확대 테스트가 더 필요하다.
+- scrollback reflow와 더 다양한 alternate-screen 앱 edge case는 실제 앱 확대 테스트가 더 필요하다.
 
 다음 큰 단계는 daemon persistence metadata, Linux/Windows backend, client별 독립 viewport/cursor 정책, 더 긴 full-screen app compatibility suite다.

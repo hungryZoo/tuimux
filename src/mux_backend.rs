@@ -1060,6 +1060,88 @@ mod unix_remote {
         }
 
         #[test]
+        fn daemon_keeps_alternate_screen_out_of_primary_scrollback() {
+            let socket = std::env::temp_dir().join(format!(
+                "tuimux-altscreen-test-{}-{}.sock",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time")
+                    .as_nanos()
+            ));
+            let daemon_socket = socket.clone();
+            let daemon = thread::spawn(move || {
+                run_daemon_inner(daemon_socket, "altscreen-test", PathBuf::from("."))
+            });
+            wait_for_socket(&socket);
+
+            let mut client = UnixStream::connect(&socket).expect("client connects");
+            client
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+
+            let alt_marker = "ALT_SCREEN_DAEMON_TRANSIENT";
+            let command = format!(
+                "python3 -c 'import sys,time; \
+                 sys.stdout.write(\"\\x1b[2J\\x1b[H\"); \
+                 [sys.stdout.write(f\"PRIMARY_LINE_{{i:03d}}\\n\") for i in range(1, 45)]; \
+                 sys.stdout.flush(); \
+                 sys.stdout.write(\"\\x1b[?1049h\\x1b[2J\\x1b[H{alt_marker}\\n\"); \
+                 sys.stdout.flush(); \
+                 time.sleep(0.5); \
+                 sys.stdout.write(\"\\x1b[?1049l\\x1b[2J\\x1b[H\"); \
+                 [sys.stdout.write(f\"PRIMARY_LINE_{{i:03d}}\\n\") for i in range(45, 90)]; \
+                 sys.stdout.flush()'"
+            );
+            assert!(matches!(
+                request_response(&mut client, Request::SendPaste { text: command },),
+                Response::Ok
+            ));
+            let enter = KeyInput::from_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .expect("enter key input");
+            assert!(matches!(
+                request_response(&mut client, Request::SendKey { key: enter }),
+                Response::Ok
+            ));
+
+            wait_for_snapshot_text(&mut client, 80, 12, alt_marker);
+            let bottom = wait_for_snapshot_text(&mut client, 80, 12, "PRIMARY_LINE_089");
+            assert!(
+                !snapshot_text(&bottom).contains(alt_marker),
+                "alternate screen marker leaked after alt-screen exit"
+            );
+
+            let scrolled = request_response(&mut client, Request::ScrollPane { lines: 1_000_000 });
+            let Response::Scrollback(scrollback) = scrolled else {
+                panic!("expected scrollback response");
+            };
+            assert!(scrollback > 0);
+            let history = snapshot(&mut client, 80, 12);
+            let history_text = snapshot_text(&history);
+            assert!(
+                history_text.contains("PRIMARY_LINE_"),
+                "primary scrollback lines were not visible after scrolling: {history_text:?}"
+            );
+            assert!(
+                !history_text.contains(alt_marker),
+                "alternate screen marker leaked into primary scrollback: {history_text:?}"
+            );
+
+            let mut shutdown = UnixStream::connect(&socket).expect("shutdown client connects");
+            shutdown
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set timeout");
+            assert!(matches!(
+                request_response(&mut shutdown, Request::Shutdown),
+                Response::Ok
+            ));
+            daemon
+                .join()
+                .expect("daemon thread joins")
+                .expect("daemon exits cleanly");
+        }
+
+        #[test]
         fn daemon_returns_selected_text_and_highlighted_snapshot() {
             let socket = std::env::temp_dir().join(format!(
                 "tuimux-selection-test-{}-{}.sock",

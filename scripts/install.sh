@@ -3,11 +3,11 @@
 # tuimux installer — macOS arm64 prerelease.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.26/scripts/install.sh | \
-#     TUIMUX_VERSION=v0.2.0-alpha.26 bash
+#   curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.27/scripts/install.sh | \
+#     TUIMUX_VERSION=v0.2.0-alpha.27 bash
 #
 # Environment variables:
-#   TUIMUX_VERSION       Tag to install (e.g. v0.2.0-alpha.26). Default: latest prerelease/release.
+#   TUIMUX_VERSION       Tag to install (e.g. v0.2.0-alpha.27). Default: latest prerelease/release.
 #   TUIMUX_INSTALL_DIR   Where to put the binary. Default: ~/.local/bin, falling
 #                        back to /usr/local/bin if the former isn't writable.
 #

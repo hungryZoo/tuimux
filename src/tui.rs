@@ -22,6 +22,7 @@ use crossterm::terminal::{
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::clipboard;
 use crate::mux_backend::{KeyInput, MouseInput, MuxBackend, MuxSnapshot, PaneSnapshot};
@@ -862,7 +863,7 @@ fn render_main(
     } else {
         terminal_rows
             .into_iter()
-            .map(|row| Line::from(terminal_row_spans(row)))
+            .map(|row| Line::from(terminal_row_spans_for_width(row, inner.width)))
             .collect()
     };
 
@@ -916,7 +917,7 @@ fn render_terminal_panes(
         } else {
             pane.rows
                 .into_iter()
-                .map(|row| Line::from(terminal_row_spans(row)))
+                .map(|row| Line::from(terminal_row_spans_for_width(row, rect.width)))
                 .collect()
         };
         f.render_widget(Paragraph::new(lines).style(Style::default()), rect);
@@ -1010,6 +1011,19 @@ fn terminal_row_spans(row: Vec<TerminalSpan>) -> Vec<Span<'static>> {
     row.into_iter()
         .map(|span| Span::styled(span.text, terminal_style(span.style)))
         .collect()
+}
+
+fn terminal_row_spans_for_width(row: Vec<TerminalSpan>, width: u16) -> Vec<Span<'static>> {
+    let mut spans = terminal_row_spans(row);
+    let used = spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum::<usize>();
+    let width = width as usize;
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    spans
 }
 
 fn terminal_style(style: TerminalStyle) -> Style {
@@ -1624,6 +1638,52 @@ mod tests {
         assert_eq!(buffer.get(0, 1).bg, Color::Rgb(78, 90, 123));
         assert_eq!(buffer.get(0, 2).fg, Color::Reset);
         assert_eq!(buffer.get(0, 2).bg, Color::Reset);
+    }
+
+    #[test]
+    fn terminal_row_padding_clears_stale_glyphs() {
+        let backend = TestBackend::new(20, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new(Line::from("PRIMARY_BEFORE_067")),
+                    frame.size(),
+                );
+            })
+            .unwrap();
+        terminal
+            .draw(|frame| {
+                let line = Line::from(terminal_row_spans_for_width(
+                    vec![TerminalSpan {
+                        text: "PRIMARY_AFTER_067".to_string(),
+                        style: TerminalStyle::default(),
+                    }],
+                    20,
+                ));
+                frame.render_widget(Paragraph::new(line), frame.size());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..20)
+            .map(|x| buffer.get(x, 0).symbol())
+            .collect::<String>();
+        assert_eq!(rendered, "PRIMARY_AFTER_067   ");
+    }
+
+    #[test]
+    fn terminal_row_padding_uses_display_width() {
+        let spans = terminal_row_spans_for_width(
+            vec![TerminalSpan {
+                text: "한".to_string(),
+                style: TerminalStyle::default(),
+            }],
+            4,
+        );
+
+        assert_eq!(spans.last().expect("padding span").content.as_ref(), "  ");
     }
 
     #[test]

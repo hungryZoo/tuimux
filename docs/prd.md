@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 3.0
-- **대상 릴리스**: v0.2.0-alpha.26
+- **문서 버전**: 3.1
+- **대상 릴리스**: v0.2.0-alpha.27
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.26의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.27의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -19,6 +19,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - Ctrl-C가 항상 child program으로 전달되면 선택 텍스트 복사와 process interrupt가 충돌한다.
 - UI를 닫을 때 shell/session까지 사라지면 multiplexer로 믿고 쓰기 어렵다.
 - shell이 `exit`로 종료됐는데 window가 stale 화면으로 남으면 실제 terminal이 아니라 frozen preview처럼 느껴진다.
+- alternate-screen 앱이 종료된 뒤 잔상이나 alternate-screen text가 primary scrollback에 남으면 native terminal과 다르게 느껴진다.
 - 한 화면을 여러 pane으로 나누는 방식은 현재 목표가 아니며, window 목록 중심 UX가 더 단순하고 안정적이다.
 - tmux 설정이나 runtime 설치가 필수이면 tuimux 자체 제품 경험을 제어하기 어렵다.
 
@@ -39,6 +40,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - child가 mouse tracking을 켠 경우 normal mouse는 child로 보내고 Shift-drag를 tuimux selection override로 쓴다.
 - child가 명시적으로 출력한 truecolor foreground/background/default reset은 부모 환경의 `NO_COLOR`와 무관하게 native terminal color로 보존한다.
 - host terminal resize는 active child PTY까지 전달되어 full-screen 앱과 shell이 새 rows/cols를 관측한다.
+- terminal row는 viewport 폭까지 명시적으로 렌더해 이전 frame의 긴 줄 glyph가 다음 frame에 남지 않게 한다.
+- alternate-screen output은 active 상태에서만 보이고 종료 후 primary screen/scrollback으로 누수되지 않는다.
 - macOS Apple Silicon 프리릴리즈를 먼저 배포한다.
 
 ## 4. 비목표
@@ -71,6 +74,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - macOS scrollback smoke에서 실제 TUI의 mouse wheel, `PageUp`, `Home`, `End` active terminal history navigation과 scrollback 중 paste bottom 복귀가 통과한다.
 - macOS truecolor smoke에서 `NO_COLOR=1` 부모 환경에서도 child `38;2`/`48;2` SGR과 default reset이 실제 TUI output에 보존된다.
 - macOS resize smoke에서 host PTY resize 후 child가 `SIGWINCH`와 새 `32x120` terminal size를 관측한다.
+- macOS alternate-screen smoke와 daemon regression에서 alternate-screen active/exit, primary screen 복귀, primary scrollback 격리가 통과한다.
 - macOS child-exit smoke에서 마지막 shell 종료 후 replacement shell이 명령을 받고, non-last shell 종료 후 window list에서 제거된다.
 - GitHub prerelease에 macOS Apple Silicon tarball과 `SHA256SUMS`가 게시된다.
 
