@@ -158,6 +158,15 @@ class PtyClient:
     def tail(self) -> str:
         return bytes(self.buffer[-4000:]).decode("utf-8", "replace")
 
+    def excerpt_around(self, text: str, radius: int = 700) -> str:
+        needle = text.encode()
+        idx = self.buffer.rfind(needle)
+        if idx < 0:
+            return self.tail()
+        start = max(0, idx - radius)
+        end = min(len(self.buffer), idx + len(needle) + radius)
+        return bytes(self.buffer[start:end]).decode("utf-8", "replace")
+
 
 def require_macos() -> None:
     if sys.platform != "darwin":
@@ -255,12 +264,12 @@ try:
     if data != expected:
         os.write(sys.stdout.fileno(), b"PASTE_CLICK_BAD_PASTE:" + data.hex().encode() + b"\\r\\n")
     else:
-        os.write(sys.stdout.fileno(), b"\\x1b[47;30m" + {payload.encode()!r} + b"\\x1b[0m\\r\\n{waiting_marker}\\r\\n")
+        os.write(sys.stdout.fileno(), b"\\x1b[47;30m" + {payload.encode()!r} + b"\\x1b[0m\\r\\n{waiting_marker}")
         click_data = b""
         deadline = time.time() + 5.0
         while (
             time.time() < deadline
-            and b"\\x1b[D\\x1b[C" not in click_data
+            and click_data.count(b"\\x1b[D") < 2
         ):
             ready, _, _ = select.select([fd], [], [], 0.1)
             if ready:
@@ -268,10 +277,24 @@ try:
                 if not chunk:
                     break
                 click_data += chunk
-        if b"\\x1b[D\\x1b[C" in click_data:
-            os.write(sys.stdout.fileno(), b"\\x1b[?1l\\x1b[?1000l\\x1b[?2004l{ok_marker}\\r\\n")
+        stop_draining = time.time() + 2.0
+        quiet_deadline = time.time() + 0.3
+        while time.time() < stop_draining and time.time() < quiet_deadline:
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if not ready:
+                continue
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            click_data += chunk
+            quiet_deadline = time.time() + 0.3
+        left_moves = click_data.count(b"\\x1b[D")
+        right_moves = click_data.count(b"\\x1b[C")
+        mouse_leaked = b"\\x1b[<" in click_data
+        if left_moves >= 2 and right_moves == 0 and not mouse_leaked:
+            os.write(sys.stdout.fileno(), b"\\x1b[?1l\\x1b[?1000l\\x1b[?2004l\\r\\n{ok_marker}\\r\\n")
         else:
-            os.write(sys.stdout.fileno(), b"\\x1b[?1l\\x1b[?1000l\\x1b[?2004lPASTE_CLICK_BAD_CLEAR:" + click_data.hex().encode() + b"\\r\\n")
+            os.write(sys.stdout.fileno(), b"\\x1b[?1l\\x1b[?1000l\\x1b[?2004l\\r\\nPASTE_CLICK_BAD_CLEAR:" + click_data.hex().encode() + b"\\r\\n")
 finally:
     termios.tcsetattr(fd, termios.TCSADRAIN, old)
 """
@@ -548,7 +571,7 @@ def main() -> int:
             print("paste click clear probe did not receive bracketed paste", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
-        client.write(b"\x1b[<0;1;1M\x1b[<0;1;1m")
+        client.write(b"\x1b[<0;1;3M\x1b[<0;1;3m")
         if not client.wait_contains(PASTE_CLICK_OK, args.timeout):
             print("terminal click did not clear paste highlight state", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
@@ -575,7 +598,7 @@ def main() -> int:
             print("mouse-mode paste click clear probe did not receive bracketed paste", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
-        client.write(b"\x1b[<0;1;1M\x1b[<0;1;1m")
+        client.write(b"\x1b[<0;1;3M\x1b[<0;1;3m")
         if not client.wait_contains(MOUSE_MODE_PASTE_CLICK_OK, args.timeout):
             print("mouse-mode click did not send CSI paste highlight clear", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
@@ -638,7 +661,7 @@ def main() -> int:
             print("copied clipboard context paste did not reach child", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
-        client.write(b"\x1b[<0;1;1M\x1b[<0;1;1m")
+        client.write(b"\x1b[<0;1;3M\x1b[<0;1;3m")
         if not client.wait_contains(COPY_PASTE_CLICK_OK, args.timeout):
             print("left-click did not clear copied clipboard paste highlight", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
@@ -667,12 +690,11 @@ def main() -> int:
             print("cut clipboard context paste did not reach child", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
-        client.write(b"\x1b[<2;1;1M\x1b[<2;1;1m")
+        client.write(b"\x1b[<0;1;3M\x1b[<0;1;3m")
         if not client.wait_contains(CUT_PASTE_CLICK_OK, args.timeout):
-            print("right-click did not clear cut clipboard paste highlight", file=sys.stderr)
+            print("left-click did not move cursor to clear cut clipboard paste highlight", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
-        client.write(b"\x1b")
         client.read_for(0.2)
 
         edit_prefix = "PRE"
@@ -701,7 +723,7 @@ def main() -> int:
         client.write(b"\x7f")
         if not client.wait_contains(BACKSPACE_DELETE_OK, args.timeout):
             print("Backspace did not delete the editable selection", file=sys.stderr)
-            print(client.tail(), file=sys.stderr)
+            print(client.excerpt_around("EDIT_DELETE_BAD"), file=sys.stderr)
             return 1
 
         delete_target = "DELETEKEY"

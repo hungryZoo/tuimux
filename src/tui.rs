@@ -145,7 +145,8 @@ const CONTEXT_MENU_ACTIONS: [ContextMenuAction; 4] = [
     ContextMenuAction::Cancel,
 ];
 const RAW_BRACKETED_PASTE_END: &str = "\x1b[201~";
-const PASTE_HIGHLIGHT_CLEAR_BYTES: &[u8] = b"\x1b[D\x1b[C";
+const CURSOR_LEFT_BYTES: &[u8] = b"\x1b[D";
+const CURSOR_RIGHT_BYTES: &[u8] = b"\x1b[C";
 
 fn andromeda_starlight() -> Color {
     Color::Rgb(0xF3, 0xD5, 0x6E)
@@ -561,14 +562,73 @@ impl UiState {
         }
     }
 
-    fn clear_paste_highlight_on_click(&mut self) {
+    fn clear_paste_highlight_with_cursor_bounce(&mut self) {
         if !self.paste_highlight_pending {
             return;
         }
 
         self.paste_highlight_pending = false;
-        if let Err(e) = self.mux.send_raw_bytes(PASTE_HIGHLIGHT_CLEAR_BYTES) {
+        let Some(bytes) = cursor_move_bytes(0, true) else {
+            return;
+        };
+        if let Err(e) = self.mux.send_raw_bytes(&bytes) {
             self.status = Some(format!("paste highlight clear failed: {e}"));
+        }
+    }
+
+    fn clear_paste_highlight_by_moving_cursor(&mut self, pane_row: usize, row: u16, col: u16) {
+        if !self.paste_highlight_pending {
+            return;
+        }
+
+        self.paste_highlight_pending = false;
+        if !self.move_input_cursor_to_cell(pane_row, row, col, true) {
+            let Some(bytes) = cursor_move_bytes(0, true) else {
+                return;
+            };
+            if let Err(e) = self.mux.send_raw_bytes(&bytes) {
+                self.status = Some(format!("paste highlight clear failed: {e}"));
+            }
+        }
+    }
+
+    fn move_input_cursor_to_cell(
+        &mut self,
+        pane_row: usize,
+        row: u16,
+        col: u16,
+        force_movement: bool,
+    ) -> bool {
+        let Some((cursor_row, cursor_col)) = self.terminal_cursor else {
+            return false;
+        };
+        if self.terminal_hide_cursor
+            || !self
+                .panes
+                .get(pane_row)
+                .map(|pane| pane.active)
+                .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let width = self
+            .terminal_panes
+            .get(pane_row)
+            .map(|pane| pane.rect.width)
+            .unwrap_or_else(|| self.regions.terminal_body.width)
+            .max(1) as i32;
+        let current = cursor_row as i32 * width + cursor_col as i32;
+        let target = row as i32 * width + col as i32;
+        let Some(bytes) = cursor_move_bytes(target - current, force_movement) else {
+            return false;
+        };
+        match self.mux.send_raw_bytes(&bytes) {
+            Ok(()) => true,
+            Err(e) => {
+                self.status = Some(format!("cursor move failed: {e}"));
+                false
+            }
         }
     }
 
@@ -826,20 +886,16 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 }
             }
             Event::Mouse(mouse) => {
-                if should_clear_paste_highlight_for_click(state, &mouse) {
-                    state.clear_paste_highlight_on_click();
-                    if should_consume_paste_clear_click(state, &mouse) {
-                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                            state.suppress_paste_clear_left_up = true;
-                        }
-                        continue;
-                    }
-                }
-
                 if state.suppress_paste_clear_left_up
                     && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
                 {
                     state.suppress_paste_clear_left_up = false;
+                    continue;
+                } else if state.suppress_paste_clear_left_up {
+                    state.suppress_paste_clear_left_up = false;
+                }
+
+                if handle_paste_highlight_mouse(state, &mouse) {
                     continue;
                 }
 
@@ -901,7 +957,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     let child_wants_mouse = state.pane_mouse_protocol_active(pane_row);
                     let selection_gesture =
                         mouse.modifiers.contains(KeyModifiers::SHIFT) || !child_wants_mouse;
-
                     if !child_wants_mouse {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
@@ -1021,6 +1076,9 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
         }
         MouseEventKind::Up(MouseButton::Left) => {
             state.pending_left_down = None;
+            let (row, col) =
+                terminal_cell_for_pane(mouse.column, mouse.row, &state.regions, pending.pane)
+                    .unwrap_or((pending.row, pending.col));
             if pending.child_wants_mouse && state.terminal_mode {
                 state.send_terminal_mouse(
                     MouseEventKind::Down(MouseButton::Left),
@@ -1028,15 +1086,14 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
                     pending.col,
                     pending.modifiers,
                 );
-                let (row, col) =
-                    terminal_cell_for_pane(mouse.column, mouse.row, &state.regions, pending.pane)
-                        .unwrap_or((pending.row, pending.col));
                 state.send_terminal_mouse(
                     MouseEventKind::Up(MouseButton::Left),
                     row,
                     col,
                     mouse.modifiers,
                 );
+            } else if state.terminal_mode {
+                state.move_input_cursor_to_cell(pending.pane, row, col, false);
             }
             true
         }
@@ -1047,16 +1104,52 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
     }
 }
 
-fn should_clear_paste_highlight_for_click(state: &UiState, mouse: &MouseEvent) -> bool {
-    state.paste_highlight_pending
-        && matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_))
+fn cursor_move_bytes(delta: i32, force_movement: bool) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    match delta.cmp(&0) {
+        std::cmp::Ordering::Less => {
+            for _ in 0..delta.unsigned_abs() {
+                bytes.extend_from_slice(CURSOR_LEFT_BYTES);
+            }
+        }
+        std::cmp::Ordering::Greater => {
+            for _ in 0..delta.unsigned_abs() {
+                bytes.extend_from_slice(CURSOR_RIGHT_BYTES);
+            }
+        }
+        std::cmp::Ordering::Equal if force_movement => {
+            bytes.extend_from_slice(CURSOR_LEFT_BYTES);
+            bytes.extend_from_slice(CURSOR_RIGHT_BYTES);
+        }
+        std::cmp::Ordering::Equal => return None,
+    }
+    Some(bytes)
 }
 
-fn should_consume_paste_clear_click(state: &UiState, mouse: &MouseEvent) -> bool {
-    matches!(
+fn handle_paste_highlight_mouse(state: &mut UiState, mouse: &MouseEvent) -> bool {
+    if !state.paste_highlight_pending
+        || !matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_))
+    {
+        return false;
+    }
+
+    if matches!(
         mouse.kind,
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-    ) && terminal_cell_at_pane(mouse.column, mouse.row, &state.regions).is_some()
+    ) {
+        if let Some((pane_row, row, col)) =
+            terminal_cell_at_pane(mouse.column, mouse.row, &state.regions)
+        {
+            state.clear_paste_highlight_by_moving_cursor(pane_row, row, col);
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                state.suppress_paste_clear_left_up = true;
+            }
+            return true;
+        }
+    }
+
+    state.clear_paste_highlight_with_cursor_bounce();
+    false
 }
 
 fn handle_context_menu_key(state: &mut UiState, key: KeyEvent) -> bool {
@@ -2963,13 +3056,24 @@ mod tests {
 
         assert!(state.paste_highlight_pending);
 
-        state.clear_paste_highlight_on_click();
+        state.clear_paste_highlight_with_cursor_bounce();
 
         assert!(!state.paste_highlight_pending);
     }
 
     #[test]
-    fn paste_highlight_click_clear_includes_ui_chrome_and_mouse_apps() {
+    fn cursor_move_bytes_target_clicked_cell() {
+        assert_eq!(
+            cursor_move_bytes(-3, false),
+            Some(b"\x1b[D\x1b[D\x1b[D".to_vec())
+        );
+        assert_eq!(cursor_move_bytes(2, false), Some(b"\x1b[C\x1b[C".to_vec()));
+        assert_eq!(cursor_move_bytes(0, false), None);
+        assert_eq!(cursor_move_bytes(0, true), Some(b"\x1b[D\x1b[C".to_vec()));
+    }
+
+    #[test]
+    fn paste_highlight_left_click_moves_cursor_and_consumes_terminal_click() {
         let mut state = test_state();
         state.paste_highlight_pending = true;
         state.regions.terminal_pane_count = 1;
@@ -2981,27 +3085,20 @@ mod tests {
             row: 1,
             modifiers: KeyModifiers::NONE,
         };
-        assert!(should_clear_paste_highlight_for_click(
-            &state,
-            &chrome_click
-        ));
+        assert!(!handle_paste_highlight_mouse(&mut state, &chrome_click));
+        assert!(!state.paste_highlight_pending);
 
+        state.paste_highlight_pending = true;
         let right_click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Right),
             column: 15,
             row: 1,
             modifiers: KeyModifiers::NONE,
         };
-        assert!(should_clear_paste_highlight_for_click(&state, &right_click));
+        assert!(!handle_paste_highlight_mouse(&mut state, &right_click));
+        assert!(!state.paste_highlight_pending);
 
-        let left_up = MouseEvent {
-            kind: MouseEventKind::Up(MouseButton::Left),
-            column: 15,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert!(should_clear_paste_highlight_for_click(&state, &left_up));
-
+        state.paste_highlight_pending = true;
         state.terminal_mouse_protocol_active = true;
         let terminal_click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -3009,13 +3106,9 @@ mod tests {
             row: 1,
             modifiers: KeyModifiers::NONE,
         };
-        assert!(should_clear_paste_highlight_for_click(
-            &state,
-            &terminal_click
-        ));
-        assert!(should_consume_paste_clear_click(&state, &terminal_click));
-        assert!(!should_consume_paste_clear_click(&state, &right_click));
-        assert!(!should_consume_paste_clear_click(&state, &chrome_click));
+        assert!(handle_paste_highlight_mouse(&mut state, &terminal_click));
+        assert!(!state.paste_highlight_pending);
+        assert!(state.suppress_paste_clear_left_up);
     }
 
     #[test]
