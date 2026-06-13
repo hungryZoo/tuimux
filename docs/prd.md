@@ -1,6 +1,6 @@
 # tuimux PRD
 
-- **문서 버전**: 3.6
+- **문서 버전**: 3.7
 - **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 
@@ -16,6 +16,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 
 - terminal pane이 “진짜 터미널”처럼 느껴지지 않으면 full-screen 앱이 깨진다.
 - mouse drag 후 선택이 사라지면 복사 흐름이 macOS Terminal과 다르게 느껴진다.
+- 우클릭 복사/붙여넣기가 TUI 안에서 끊기면 shell 사용 중 복붙 흐름이 계속 마찰을 만든다.
 - Ctrl-C가 항상 child program으로 전달되면 선택 텍스트 복사와 process interrupt가 충돌한다.
 - UI를 닫을 때 shell/window state까지 사라지면 multiplexer로 믿고 쓰기 어렵다.
 - shell이 `exit`로 종료됐는데 window가 stale 화면으로 남으면 실제 terminal이 아니라 frozen preview처럼 느껴진다.
@@ -41,9 +42,10 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
 - selection이 있을 때 Ctrl-C는 system clipboard copy로 동작한다.
+- terminal body 우클릭은 selection이 있으면 system clipboard copy, selection이 없으면 clipboard paste로 동작한다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
 - host paste는 bracketed paste event로 받아 active PTY에 전달한다.
-- child가 mouse tracking을 켠 경우 normal mouse는 child로 보내고 Shift-drag를 tuimux selection override로 쓴다.
+- child가 mouse tracking을 켠 경우 simple left click과 wheel은 child로 보내고 normal drag는 tuimux selection으로 쓴다.
 - child가 명시적으로 출력한 truecolor foreground/background/default reset은 부모 환경의 `NO_COLOR`와 무관하게 native terminal color로 보존한다.
 - host terminal resize는 active child PTY까지 전달되어 full-screen 앱과 shell이 새 rows/cols를 관측한다.
 - terminal row는 viewport 폭까지 명시적으로 렌더해 이전 frame의 긴 줄 glyph가 다음 frame에 남지 않게 한다.
@@ -74,11 +76,11 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - daemon snapshot에서 btop의 cpu/proc panel과 mouse protocol state가 정상으로 관측된다.
 - drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C + `pbpaste` smoke test가 통과한다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
-- macOS PTY UI smoke에서 drag selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, host bracketed paste 전달, child bracketed paste wrapper 보존이 통과한다.
+- macOS PTY UI smoke에서 drag selection, right-click copy, Ctrl-C clipboard copy, foreground child SIGINT 미전달, right-click paste, child bracketed paste wrapper 보존이 통과한다.
 - macOS window-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.
 - macOS no-tmux smoke에서 tmux 없는 PATH의 default TUI/doctor 성공과 `--native-client` 실패가 통과한다.
 - `--layout-preview`가 split-pane/resize 샘플이 아닌 terminal body + window-list preview를 출력한다.
-- macOS mouse-protocol smoke에서 child SGR mouse tracking 중 normal mouse forwarding과 Shift-drag selection override가 통과한다.
+- macOS mouse-protocol smoke에서 child SGR mouse tracking 중 normal left click forwarding과 normal drag selection이 통과한다.
 - macOS scrollback smoke에서 실제 TUI의 mouse wheel, `PageUp`, `Home`, `End` active terminal history navigation과 scrollback 중 paste bottom 복귀가 통과한다.
 - macOS truecolor smoke에서 `NO_COLOR=1` 부모 환경에서도 child `38;2`/`48;2` SGR과 default reset이 실제 TUI output에 보존된다.
 - macOS resize smoke에서 host PTY resize 후 child가 `SIGWINCH`와 integrated rail을 제외한 새 `32x100` terminal body size를 관측한다.

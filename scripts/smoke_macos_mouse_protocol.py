@@ -3,9 +3,9 @@
 
 The test starts the real tuimux TUI in a pseudo terminal and runs a raw child
 program that enables SGR mouse tracking. A normal mouse click must be forwarded
-to that child. A Shift-drag over visible text must instead stay in tuimux as a
-selection override, and Ctrl-C must copy the selected text to the macOS system
-clipboard without leaking Ctrl-C to the child process.
+to that child, while a normal drag over visible text must stay in tuimux as a
+selection. Ctrl-C must copy the selected text to the macOS system clipboard
+without leaking Ctrl-C to the child process.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 
-TARGET = "TUIMUX_SHIFT_MOUSE_SELECT_TARGET"
+TARGET = "TUIMUX_MOUSE_SELECT_TARGET"
 READY = "MOUSE_PROTOCOL_READY"
 FORWARD_OK = "MOUSE_FORWARD_OK"
 SHIFT_LEAK = "MOUSE_SHIFT_LEAK"
@@ -172,7 +172,7 @@ import tty
 fd = sys.stdin.fileno()
 old = termios.tcgetattr(fd)
 mouse_re = re.compile(rb"\\x1b\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])")
-target = "TUIMUX_" + "SHIFT_MOUSE_" + "SELECT_TARGET"
+target = "TUIMUX_" + "MOUSE_" + "SELECT_TARGET"
 ready_marker = "MOUSE_" + "PROTOCOL_" + "READY"
 forward_ok = "MOUSE_" + "FORWARD_" + "OK"
 shift_leak = "MOUSE_" + "SHIFT_" + "LEAK"
@@ -206,9 +206,12 @@ try:
             code = int(match.group(1))
             encoded = match.group(0).decode("ascii", "replace")
             data = data[match.end():]
+            final = match.group(4)
             if not forwarded:
                 os.write(sys.stdout.fileno(), forward_ok.encode() + b":" + encoded.encode() + b"\\r\\n")
                 forwarded = True
+            elif code == 0 and final == b"m":
+                pass
             else:
                 os.write(sys.stdout.fileno(), shift_leak.encode() + b":" + encoded.encode() + b"\\r\\n")
             if code & 4:
@@ -245,28 +248,24 @@ def main() -> int:
 
         # Normal click: with child mouse tracking active, this must be forwarded
         # to the child process rather than starting tuimux text selection.
-        client.write(b"\x1b[<0;10;4M")
+        client.write(b"\x1b[<0;10;4M\x1b[<0;10;4m")
         if not client.wait_contains(FORWARD_OK, args.timeout):
             print("normal mouse event did not reach mouse-tracking child", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
 
-        # Shift-drag: crossterm reports modifier bit 4. tuimux should treat this
-        # as a selection override even while the child owns normal mouse events.
+        # Normal drag should become tuimux text selection even while the child
+        # owns simple mouse clicks.
         y = 1
         x1 = 1
         x2 = len(TARGET)
-        shifted_drag = (
-            f"\x1b[<4;{x1};{y}M"
-            f"\x1b[<36;{x2};{y}M"
-            f"\x1b[<4;{x2};{y}m"
-        )
-        before_shift = len(client.buffer)
-        client.write(shifted_drag.encode())
+        normal_drag = f"\x1b[<0;{x1};{y}M\x1b[<32;{x2};{y}M\x1b[<0;{x2};{y}m"
+        before_drag = len(client.buffer)
+        client.write(normal_drag.encode())
         client.read_for(0.7)
-        shift_frame = bytes(client.buffer[before_shift:])
-        if SHIFT_LEAK.encode() in shift_frame or SHIFT_LEAK.encode() in client.buffer:
-            print("Shift-drag leaked to mouse-tracking child", file=sys.stderr)
+        drag_frame = bytes(client.buffer[before_drag:])
+        if SHIFT_LEAK.encode() in drag_frame:
+            print("normal drag leaked to mouse-tracking child", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
 
@@ -291,7 +290,7 @@ def main() -> int:
 
         print("OK macOS mouse protocol smoke")
         print("normal mouse forwarding: observed")
-        print("Shift-drag selection override: copied through system clipboard")
+        print("normal drag selection: copied through system clipboard")
         print("Ctrl-C with selection: not leaked to child")
         return 0
     finally:

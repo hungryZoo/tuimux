@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::style::force_color_output;
@@ -72,6 +72,7 @@ struct UiState {
     terminal_error: Option<String>,
     terminal_mode: bool,
     selection: Option<SelectionState>,
+    pending_left_down: Option<PendingMouseDown>,
     terminal_axis: PaneAxis,
     terminal_separators: Vec<PaneSeparator>,
     terminal_panes: Vec<PaneSnapshot>,
@@ -88,6 +89,15 @@ struct SelectionState {
     anchor: (u16, u16),
     focus: (u16, u16),
     dragging: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingMouseDown {
+    pane: usize,
+    row: u16,
+    col: u16,
+    modifiers: KeyModifiers,
+    child_wants_mouse: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,6 +142,7 @@ impl UiState {
             terminal_error: None,
             terminal_mode: true,
             selection: None,
+            pending_left_down: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
             terminal_panes: Vec::new(),
@@ -183,6 +194,7 @@ impl UiState {
     }
 
     fn begin_selection(&mut self, pane: usize, row: u16, col: u16) {
+        self.pending_left_down = None;
         self.selection = Some(SelectionState {
             pane,
             anchor: (row, col),
@@ -209,6 +221,7 @@ impl UiState {
 
     fn clear_selection(&mut self) {
         self.selection = None;
+        self.pending_left_down = None;
     }
 
     fn copy_selection(&mut self) -> bool {
@@ -268,6 +281,33 @@ impl UiState {
         self.clear_selection();
         if let Err(e) = self.mux.send_paste(text) {
             self.status = Some(format!("terminal paste failed: {e}"));
+        }
+    }
+
+    fn paste_clipboard(&mut self) -> bool {
+        match clipboard::read_text() {
+            Ok(text) if text.is_empty() => {
+                self.status = Some("clipboard is empty".to_string());
+                false
+            }
+            Ok(text) => {
+                let chars = text.chars().count();
+                self.clear_selection();
+                match self.mux.send_paste(&text) {
+                    Ok(()) => {
+                        self.status = Some(format!("pasted {chars} chars"));
+                        true
+                    }
+                    Err(e) => {
+                        self.status = Some(format!("terminal paste failed: {e}"));
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                self.status = Some(format!("paste failed: {e}"));
+                false
+            }
         }
     }
 
@@ -437,6 +477,10 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 }
             }
             Event::Mouse(mouse) => {
+                if handle_pending_left_down(state, &mouse) {
+                    continue;
+                }
+
                 if let Some(selection) = state.selection {
                     match mouse.kind {
                         MouseEventKind::Drag(MouseButton::Left) => {
@@ -468,6 +512,10 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 if let Some((pane_row, row, col)) =
                     terminal_cell_at_pane(mouse.column, mouse.row, &state.regions)
                 {
+                    if handle_terminal_right_click(state, mouse.kind) {
+                        continue;
+                    }
+
                     let clicked_left =
                         matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
                     if clicked_left
@@ -515,9 +563,19 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     }
 
                     match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) if selection_gesture => {
+                        MouseEventKind::Down(MouseButton::Left) => {
                             state.terminal_mode = true;
-                            state.begin_selection(pane_row, row, col);
+                            if selection_gesture {
+                                state.begin_selection(pane_row, row, col);
+                            } else {
+                                state.pending_left_down = Some(PendingMouseDown {
+                                    pane: pane_row,
+                                    row,
+                                    col,
+                                    modifiers: mouse.modifiers,
+                                    child_wants_mouse,
+                                });
+                            }
                             continue;
                         }
                         _ if state.terminal_mode => {
@@ -570,6 +628,67 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
             Event::Resize(_, _) => {}
             _ => {}
         }
+    }
+}
+
+fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
+    let Some(pending) = state.pending_left_down else {
+        return false;
+    };
+
+    match mouse.kind {
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some((row, col)) =
+                terminal_cell_for_pane(mouse.column, mouse.row, &state.regions, pending.pane)
+            else {
+                state.pending_left_down = None;
+                return true;
+            };
+            state.terminal_mode = true;
+            state.begin_selection(pending.pane, pending.row, pending.col);
+            state.update_selection(row, col);
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            state.pending_left_down = None;
+            if pending.child_wants_mouse && state.terminal_mode {
+                state.send_terminal_mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    pending.row,
+                    pending.col,
+                    pending.modifiers,
+                );
+                let (row, col) =
+                    terminal_cell_for_pane(mouse.column, mouse.row, &state.regions, pending.pane)
+                        .unwrap_or((pending.row, pending.col));
+                state.send_terminal_mouse(
+                    MouseEventKind::Up(MouseButton::Left),
+                    row,
+                    col,
+                    mouse.modifiers,
+                );
+            }
+            true
+        }
+        _ => {
+            state.pending_left_down = None;
+            false
+        }
+    }
+}
+
+fn handle_terminal_right_click(state: &mut UiState, kind: MouseEventKind) -> bool {
+    match kind {
+        MouseEventKind::Down(MouseButton::Right) => {
+            if state.selection_range().is_some() {
+                state.copy_selection();
+            } else {
+                state.paste_clipboard();
+            }
+            true
+        }
+        MouseEventKind::Up(MouseButton::Right) | MouseEventKind::Drag(MouseButton::Right) => true,
+        _ => false,
     }
 }
 
@@ -1563,6 +1682,7 @@ mod tests {
             terminal_error: None,
             terminal_mode: true,
             selection: None,
+            pending_left_down: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
             terminal_panes: Vec::new(),
@@ -2031,6 +2151,36 @@ mod tests {
         state.finish_selection(2, 3);
 
         assert!(state.selection.is_none());
+    }
+
+    #[test]
+    fn pending_mouse_tracking_click_becomes_selection_when_dragged() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 20, 5);
+        state.pending_left_down = Some(PendingMouseDown {
+            pane: 0,
+            row: 1,
+            col: 2,
+            modifiers: KeyModifiers::NONE,
+            child_wants_mouse: true,
+        });
+
+        let handled = handle_pending_left_down(
+            &mut state,
+            &MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 8,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert!(handled);
+        assert!(state.pending_left_down.is_none());
+        assert_eq!(
+            state.selection_range(),
+            Some(SelectionRange::new(1, 2, 1, 8))
+        );
     }
 
     #[test]

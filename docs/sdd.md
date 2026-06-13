@@ -1,6 +1,6 @@
 # tuimux SDD
 
-- **문서 버전**: 3.9
+- **문서 버전**: 4.0
 - **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
@@ -251,7 +251,7 @@ Navigation mode 키:
 
 `setup()`은 raw mode, alternate screen, mouse capture와 함께 `EnableBracketedPaste`를 실행한다. 또한 tuimux가 일반 CLI가 아니라 child terminal renderer라는 점 때문에 `force_color_output(true)`를 호출해 parent-side `NO_COLOR`가 child output color를 지우지 않게 한다. `restore()`는 alternate screen/mouse capture를 해제하면서 `DisableBracketedPaste`도 실행해 host terminal 상태를 되돌린다.
 
-### 3.6 Selection과 Ctrl-C
+### 3.6 Selection, Ctrl-C, Right-Click
 
 선택 state는 UI client가 갖고, 선택 텍스트 추출은 daemon snapshot screen에서 수행한다.
 
@@ -267,11 +267,14 @@ struct SelectionState {
 동작:
 
 - child mouse protocol이 꺼져 있으면 left down/drag/up이 tuimux selection을 만든다.
-- child mouse protocol이 켜져 있으면 normal mouse는 child로 전달한다.
-- child mouse protocol이 켜져 있어도 Shift-left-drag는 tuimux selection을 만든다.
+- child mouse protocol이 켜져 있으면 simple left click은 child로 전달한다.
+- child mouse protocol이 켜져 있어도 normal left drag는 tuimux selection을 만든다.
+- child mouse protocol 상태와 무관하게 wheel 동작은 기존 정책을 유지한다. child mouse protocol이 켜져 있으면 child로 전달하고, 꺼져 있으면 tuimux scrollback으로 처리한다.
 - mouse-up은 drag-in-progress 상태를 종료하지만 selection 자체를 지우지 않는다.
 - selection이 zero-width이면 지운다.
 - 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C copy는 selection을 유지한다.
+- terminal body 우클릭은 host terminal context menu를 직접 열 수 없으므로, TUI 안에서 native에 가까운 copy/paste 동작으로 에뮬레이션한다.
+- 우클릭 시 selection이 있으면 `copy_selection()`으로 system clipboard에 복사하고, selection이 없으면 `clipboard::read_text()` 결과를 active PTY에 paste한다.
 
 terminal mode에서 Ctrl-C는 다음 순서로 처리된다.
 
@@ -281,7 +284,7 @@ terminal mode에서 Ctrl-C는 다음 순서로 처리된다.
 4. 복사 성공 시 Ctrl-C byte를 PTY로 보내지 않는다.
 5. selection이 없으면 일반 Ctrl-C byte를 daemon의 active PTY로 보낸다.
 
-이 설계는 macOS 기본 Terminal처럼 “텍스트를 선택한 상태의 Ctrl-C는 복사”라는 동작을 우선한다.
+이 설계는 macOS 기본 Terminal처럼 “텍스트를 선택한 상태의 Ctrl-C는 복사”라는 동작을 우선한다. 우클릭은 crossterm mouse capture 때문에 host terminal 메뉴를 그대로 띄우지는 못하지만, 선택 복사와 clipboard paste를 terminal body 안에서 직접 수행해 복붙 흐름을 줄인다.
 
 ### 3.7 Clipboard
 
@@ -425,8 +428,11 @@ crossterm KeyEvent
 ```text
 crossterm MouseEvent
   -> terminal cell 좌표 계산
+  -> pending left down이 drag로 바뀌면 tuimux selection 시작
   -> child mouse protocol 상태 확인
   -> mouse wheel + child mouse off이면 scrollback 처리
+  -> right-click + selection이면 clipboard copy
+  -> right-click + selection 없음이면 clipboard paste
   -> selection gesture이면 selection state 갱신
   -> terminal mode이면 Request::SendMouse
   -> navigation mode이면 hit_test로 sidebar action 처리
@@ -466,7 +472,7 @@ F12, q, Esc, or Detach button
 - ratatui paragraph truecolor buffer preservation tests.
 - crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
 - terminal row padding regression test: 긴 row 이후 짧은 row를 그렸을 때 stale glyph가 남지 않는지 확인.
-- UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거.
+- UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거, child mouse tracking click 대기 상태가 drag로 바뀌면 selection으로 전환되는지 확인.
 - terminal-mode rail regression tests: 넓은 기본 terminal mode render buffer에 Detach/WINDOWS rail, 3-cell ` X ` close button, STATUS panel, `scroll:<count>`가 찍히고, Session panel이 없으며, rail과 STATUS click이 terminal cell hit-test에서 제외되는지 확인. 좁은 화면에서는 compact top tab fallback 없이 전체 root가 terminal body가 되는지 확인.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
@@ -475,10 +481,10 @@ F12, q, Esc, or Detach button
 - daemon window-title regression test: child OSC 2 title이 snapshot window/pane metadata에 반영되는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
-- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
+- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click copy, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, right-click paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
 - macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 boxed right rail과 scrollback/hint rows가 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
-- macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal click forwarding, Shift-drag tuimux selection override, selection Ctrl-C child 누수 방지를 확인.
+- macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal left click forwarding, normal drag tuimux selection, selection Ctrl-C child 누수 방지를 확인.
 - macOS scrollback smoke script: 실제 TUI client에서 긴 shell output을 만든 뒤 mouse wheel, `PageUp`, `Home`, `End`가 active terminal history viewport를 이동하고 bottom으로 돌아오는지 확인하며, scrollback 중 host paste가 live bottom으로 복귀해 active shell에서 실행되는지 확인.
 - macOS truecolor smoke script: parent `NO_COLOR=1` 환경에서 child가 출력한 `38;2` foreground, `48;2` background, default color reset이 실제 TUI output에 남는지 확인.
 - macOS resize smoke script: 실제 TUI client의 host PTY를 resize한 뒤 active child process가 `SIGWINCH`와 오른쪽 rail을 제외한 새 `32x100` terminal body size를 관측하는지 확인.
@@ -519,7 +525,8 @@ F12, q, Esc, or Detach button
 - `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
 - mouse drag selection, Ctrl-C, `pbpaste`가 선택 텍스트 반환 확인
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
-- child mouse tracking 중 normal click은 child로 전달되고 Shift-drag는 tuimux selection으로 처리되는지 확인
+- child mouse tracking 중 normal left click은 child로 전달되고 normal drag는 tuimux selection으로 처리되는지 확인
+- terminal body 우클릭으로 selection copy와 clipboard paste가 되는지 확인
 - parent `NO_COLOR=1` 상태에서도 child truecolor foreground/background SGR과 default reset이 tuimux TUI output에 보존되는지 확인
 - host resize 후 active child PTY가 새 rows/cols와 `SIGWINCH`를 관측하는지 확인
 - alternate-screen active/exit 후 primary screen 복귀와 primary scrollback 격리 확인

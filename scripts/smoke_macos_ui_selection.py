@@ -3,13 +3,13 @@
 
 The test starts the real tuimux TUI in a pseudo terminal, prints a stable target
 string in the child shell, selects it with SGR mouse escape sequences, presses
-Ctrl-C, and verifies that macOS `pbpaste` contains the selected text. Before
-copying, it also checks that the mouse-up frame renders the selected text with
-reverse-video highlighting so the selection visibly persists. A shell trap also
-confirms that Ctrl-C was not forwarded to the foreground child. It then sends a
-host bracketed-paste sequence and verifies that the pasted command executes in
-the child PTY. Finally, a raw child process enables bracketed paste mode and
-verifies that tuimux preserves the child-side paste wrapper.
+right-click and Ctrl-C, and verifies that macOS `pbpaste` contains the selected
+text. Before copying, it also checks that the mouse-up frame renders the
+selected text with reverse-video highlighting so the selection visibly persists.
+A shell trap also confirms that Ctrl-C was not forwarded to the foreground
+child. It then verifies right-click paste from the system clipboard. Finally, a
+raw child process enables bracketed paste mode and verifies that tuimux
+preserves the child-side paste wrapper.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from pathlib import Path
 
 
 MARKER = "TUIMUX_UI_COPY_TARGET"
-PASTE_MARKER = "TUIMUX_UI_PASTE_TARGET"
-PASTE_OUTPUT = f"PASTE_RAN:{PASTE_MARKER}"
+RIGHT_PASTE_MARKER = "TUIMUX_UI_RIGHT_PASTE_TARGET"
+RIGHT_PASTE_OUTPUT = f"RIGHT_PASTE_RAN:{RIGHT_PASTE_MARKER}"
 CHILD_PASTE_MARKER = "TUIMUX_CHILD_BRACKETED_TARGET"
 CHILD_PASTE_READY = "CHILD_BRACKETED_READY"
 CHILD_PASTE_OK = "CHILD_BRACKETED_OK"
@@ -248,6 +248,19 @@ def main() -> int:
             print("selection did not remain visibly highlighted after mouse-up", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
+
+        right_click_copy = f"\x1b[<2;{x2};{y}M\x1b[<2;{x2};{y}m"
+        client.write(right_click_copy.encode())
+        time.sleep(0.5)
+
+        right_copied = get_clipboard()
+        if right_copied != MARKER:
+            print(
+                f"right-click clipboard mismatch: expected {MARKER!r}, got {right_copied!r}",
+                file=sys.stderr,
+            )
+            return 1
+
         client.write(b"\x03")
         time.sleep(0.5)
 
@@ -263,16 +276,21 @@ def main() -> int:
             return 1
 
         time.sleep(3.0)
-        paste_payload = (
+        clear_selection_click = "\x1b[<0;1;1M\x1b[<0;1;1m"
+        client.write(clear_selection_click.encode())
+        client.read_for(0.2)
+
+        right_paste_payload = (
             "printf '\\033[2J\\033[H'; "
-            f"printf 'PASTE_RAN:%s\\n' {PASTE_MARKER}"
+            f"printf 'RIGHT_PASTE_RAN:%s\\n' {RIGHT_PASTE_MARKER}"
+            "\n"
         )
-        bracketed_paste = f"\x1b[200~{paste_payload}\x1b[201~"
-        client.write(bracketed_paste.encode())
+        set_clipboard(right_paste_payload)
+        client.write(b"\x1b[<2;1;1M\x1b[<2;1;1m")
         client.read_for(0.2)
         client.write(b"\r")
-        if not client.wait_contains(PASTE_OUTPUT, args.timeout):
-            print("pasted command output did not appear in tuimux output", file=sys.stderr)
+        if not client.wait_contains(RIGHT_PASTE_OUTPUT, args.timeout):
+            print("right-click pasted command output did not appear", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
 
@@ -292,8 +310,9 @@ def main() -> int:
 
         print("OK macOS UI selection smoke")
         print("selection highlight: reverse video observed after mouse-up")
-        print(f"copied: {copied}")
-        print(f"pasted command output: {PASTE_OUTPUT}")
+        print(f"right-click copied: {right_copied}")
+        print(f"Ctrl-C copied: {copied}")
+        print(f"right-click pasted command output: {RIGHT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
         print("foreground child SIGINT: not observed")
         return 0
