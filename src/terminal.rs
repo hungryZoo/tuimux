@@ -543,6 +543,13 @@ impl PtyTerminal {
         Ok(())
     }
 
+    pub fn send_raw_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        self.scrollback_bottom();
+        self.writer.write_all(bytes)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
     pub fn send_mouse_event(
         &mut self,
         kind: MouseEventKind,

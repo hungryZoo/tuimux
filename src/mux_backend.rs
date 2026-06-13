@@ -185,6 +185,20 @@ impl MuxBackend {
         }
     }
 
+    pub fn send_raw_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        match self {
+            #[cfg(unix)]
+            MuxBackend::Remote(client) => client.send_raw_bytes(bytes),
+            MuxBackend::Local(mux) => {
+                let Some(terminal) = mux.active_terminal_mut() else {
+                    bail!("terminal is not ready");
+                };
+                terminal.send_raw_bytes(bytes)?;
+                Ok(())
+            }
+        }
+    }
+
     pub fn send_mouse(&mut self, mouse: MouseInput) -> Result<()> {
         match self {
             #[cfg(unix)]
@@ -516,6 +530,9 @@ enum Request {
     SendPaste {
         text: String,
     },
+    SendRawBytes {
+        bytes: Vec<u8>,
+    },
     SendMouse {
         mouse: MouseInput,
     },
@@ -693,6 +710,12 @@ mod unix_remote {
             })?)
         }
 
+        pub fn send_raw_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+            expect_ok(self.request(Request::SendRawBytes {
+                bytes: bytes.to_vec(),
+            })?)
+        }
+
         pub fn send_mouse(&mut self, mouse: MouseInput) -> Result<()> {
             expect_ok(self.request(Request::SendMouse { mouse })?)
         }
@@ -845,6 +868,13 @@ mod unix_remote {
                     .active_terminal_mut()
                     .ok_or_else(|| anyhow!("terminal is not ready"))
                     .and_then(|terminal| terminal.send_paste(&text).map_err(Into::into));
+                into_response(result, |_| Response::Ok)
+            }
+            Request::SendRawBytes { bytes } => {
+                let result = mux
+                    .active_terminal_mut()
+                    .ok_or_else(|| anyhow!("terminal is not ready"))
+                    .and_then(|terminal| terminal.send_raw_bytes(&bytes).map_err(Into::into));
                 into_response(result, |_| Response::Ok)
             }
             Request::SendMouse { mouse } => {

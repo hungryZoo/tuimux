@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "tuimux"
-version = "0.2.0-alpha.34"
+version = "0.2.0-alpha.35"
 dependencies = [
  "anyhow",
  "base64",

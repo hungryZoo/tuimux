@@ -78,6 +78,7 @@ struct UiState {
     selection: Option<SelectionState>,
     pending_left_down: Option<PendingMouseDown>,
     paste_highlight_pending: bool,
+    suppress_paste_clear_left_up: bool,
     raw_key_tail: String,
     context_menu: Option<ContextMenuState>,
     terminal_axis: PaneAxis,
@@ -144,6 +145,7 @@ const CONTEXT_MENU_ACTIONS: [ContextMenuAction; 4] = [
     ContextMenuAction::Cancel,
 ];
 const RAW_BRACKETED_PASTE_END: &str = "\x1b[201~";
+const PASTE_HIGHLIGHT_CLEAR_BYTES: &[u8] = b"\x1b[D\x1b[C";
 
 fn andromeda_starlight() -> Color {
     Color::Rgb(0xF3, 0xD5, 0x6E)
@@ -181,6 +183,7 @@ impl UiState {
             selection: None,
             pending_left_down: None,
             paste_highlight_pending: false,
+            suppress_paste_clear_left_up: false,
             raw_key_tail: String::new(),
             context_menu: None,
             terminal_axis: PaneAxis::default(),
@@ -263,6 +266,7 @@ impl UiState {
         self.selection = None;
         self.pending_left_down = None;
         self.paste_highlight_pending = false;
+        self.suppress_paste_clear_left_up = false;
     }
 
     fn open_context_menu(&mut self, x: u16, y: u16) {
@@ -563,8 +567,9 @@ impl UiState {
         }
 
         self.paste_highlight_pending = false;
-        self.send_terminal_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        self.send_terminal_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        if let Err(e) = self.mux.send_raw_bytes(PASTE_HIGHLIGHT_CLEAR_BYTES) {
+            self.status = Some(format!("paste highlight clear failed: {e}"));
+        }
     }
 
     fn send_terminal_mouse(
@@ -823,6 +828,19 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
             Event::Mouse(mouse) => {
                 if should_clear_paste_highlight_for_click(state, &mouse) {
                     state.clear_paste_highlight_on_click();
+                    if should_consume_paste_clear_click(state, &mouse) {
+                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                            state.suppress_paste_clear_left_up = true;
+                        }
+                        continue;
+                    }
+                }
+
+                if state.suppress_paste_clear_left_up
+                    && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                {
+                    state.suppress_paste_clear_left_up = false;
+                    continue;
                 }
 
                 if handle_context_menu_mouse(state, &mouse) {
@@ -1030,15 +1048,15 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
 }
 
 fn should_clear_paste_highlight_for_click(state: &UiState, mouse: &MouseEvent) -> bool {
-    if !state.paste_highlight_pending
-        || !matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_))
-    {
-        return false;
-    }
+    state.paste_highlight_pending
+        && matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_))
+}
 
-    terminal_cell_at_pane(mouse.column, mouse.row, &state.regions)
-        .map(|(pane_row, _, _)| !state.pane_mouse_protocol_active(pane_row))
-        .unwrap_or(true)
+fn should_consume_paste_clear_click(state: &UiState, mouse: &MouseEvent) -> bool {
+    matches!(
+        mouse.kind,
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+    ) && terminal_cell_at_pane(mouse.column, mouse.row, &state.regions).is_some()
 }
 
 fn handle_context_menu_key(state: &mut UiState, key: KeyEvent) -> bool {
@@ -2267,6 +2285,7 @@ mod tests {
             selection: None,
             pending_left_down: None,
             paste_highlight_pending: false,
+            suppress_paste_clear_left_up: false,
             raw_key_tail: String::new(),
             context_menu: None,
             terminal_axis: PaneAxis::default(),
@@ -2950,7 +2969,7 @@ mod tests {
     }
 
     #[test]
-    fn paste_highlight_click_clear_includes_ui_chrome_but_skips_mouse_apps() {
+    fn paste_highlight_click_clear_includes_ui_chrome_and_mouse_apps() {
         let mut state = test_state();
         state.paste_highlight_pending = true;
         state.regions.terminal_pane_count = 1;
@@ -2990,10 +3009,13 @@ mod tests {
             row: 1,
             modifiers: KeyModifiers::NONE,
         };
-        assert!(!should_clear_paste_highlight_for_click(
+        assert!(should_clear_paste_highlight_for_click(
             &state,
             &terminal_click
         ));
+        assert!(should_consume_paste_clear_click(&state, &terminal_click));
+        assert!(!should_consume_paste_clear_click(&state, &right_click));
+        assert!(!should_consume_paste_clear_click(&state, &chrome_click));
     }
 
     #[test]

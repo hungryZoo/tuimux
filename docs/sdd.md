@@ -1,13 +1,13 @@
 # tuimux SDD
 
 - **문서 버전**: 4.3
-- **대상 릴리스**: v0.2.0-alpha.34
+- **대상 릴리스**: v0.2.0-alpha.35
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.34 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 넓은 화면에는 오른쪽 boxed rail을 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다. 위/아래 status bar와 compact top-tab fallback은 btop 같은 full-screen 앱의 PTY 크기를 보존하기 위해 비활성화한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.35 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 넓은 화면에는 오른쪽 boxed rail을 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다. 위/아래 status bar와 compact top-tab fallback은 btop 같은 full-screen 앱의 PTY 크기를 보존하기 위해 비활성화한다.
 
 핵심 목표는 다음과 같다.
 
@@ -195,9 +195,10 @@ pub struct PtyTerminal {
 - `send_key()`는 crossterm `KeyEvent`를 xterm-compatible byte sequence로 변환한다.
 - Ctrl 문자, Alt prefix, arrow/application cursor, function key, delete/page key를 처리한다.
 - `send_paste()`는 child bracketed paste mode를 감지해 paste wrapper를 적용한다.
+- `send_raw_bytes()`는 paste highlight clear처럼 key translation을 거치면 안 되는 좁은 내부 입력에만 사용한다.
 - `send_mouse_event()`는 child가 mouse protocol을 활성화한 경우에만 SGR/normal mouse sequence를 전달한다.
 - key/paste/child mouse event는 scrollback viewport를 bottom으로 되돌린다.
-- shell line editor가 bracketed paste 뒤에 남긴 paste highlight는 UI가 paste 성공 상태를 기억한 뒤 child mouse protocol이 꺼진 상태의 다음 일반 mouse down/up에서 Left/Right cursor 왕복 입력을 보내 해제한다. 이 처리는 context menu mouse/request보다 먼저 실행한다.
+- shell line editor가 bracketed paste 뒤에 남긴 paste highlight는 UI가 paste 성공 상태를 기억한 뒤 다음 일반 mouse down/up에서 raw `ESC[D ESC[C`를 active PTY에 직접 써서 해제한다. 이 처리는 child mouse protocol/application cursor 상태에 의존하지 않고 context menu mouse/request보다 먼저 실행한다.
 - host paste가 crossterm `PasteEvent`가 아니라 raw `ESC [ 200 ~` / `ESC [ 201 ~` key sequence로 들어오면 UI는 `ESC [ 201 ~` 종료 tail을 관측해 같은 paste highlight pending 상태를 세운다.
 
 스크롤백:
@@ -281,7 +282,7 @@ struct SelectionState {
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Super-Shift-V는 `clipboard::read_text()` 결과를 active PTY에 paste한다. Linux host마다 shortcut 전달 방식이 다를 수 있어 Control, Control-Shift, Super-Shift 계열을 모두 허용한다.
 - Ctrl-Shift-X/Cmd-Shift-X/Super-Shift-X는 selection이 있을 때 선택 텍스트를 clipboard에 복사한다. selection이 현재 cursor row에 있고 cursor가 숨겨져 있지 않으면 active PTY에 Left/Right를 보내 cursor를 selection 끝으로 이동한 뒤 선택 글자 수만큼 Backspace를 보내 현재 입력줄 선택을 삭제한다. 이 조건이 아니면 출력 화면처럼 편집할 수 없는 selection으로 보고 복사 후 tuimux selection만 해제한다.
 - Home/End는 active PTY에 line start/end key로 전달한다. macOS에서는 Cmd-Shift-Left/Cmd-Shift-Right를 UI client에서 Home/End key로 정규화해 active PTY에 전달한다.
-- paste 성공 후 `paste_highlight_pending`을 세운다. 또한 raw key 입력 tail이 `ESC [ 201 ~`와 일치하면 raw bracketed paste가 끝난 것으로 보고 같은 pending 상태를 세운다. child mouse protocol이 꺼진 상태에서 다음 mouse down/up이 발생하면 UI는 context menu 처리보다 먼저 pending 상태를 내리고 Left/Right cursor key를 active PTY로 보내 shell-side paste highlight를 지운 뒤 기존 click/selection/context menu 처리를 계속한다.
+- paste 성공 후 `paste_highlight_pending`을 세운다. 또한 raw key 입력 tail이 `ESC [ 201 ~`와 일치하면 raw bracketed paste가 끝난 것으로 보고 같은 pending 상태를 세운다. 다음 mouse down/up이 발생하면 UI는 context menu 처리보다 먼저 pending 상태를 내리고 raw `ESC[D ESC[C`를 active PTY로 보내 shell-side paste highlight를 지운다. terminal body left click은 clear 전용으로 소비해 같은 click의 mouse event가 child로 누수되지 않게 하고, right click/context menu와 UI chrome click은 기존 동작을 이어간다.
 - 우클릭은 host terminal context menu를 직접 열 수 없으므로, TUI 안에 context menu를 띄워 native에 가까운 cut/copy/paste 동작으로 에뮬레이션한다.
 - context menu는 Cut, Copy, Paste, Cancel 항목을 갖는다. Cut은 selection이 있을 때 `cut_selection()`으로 system clipboard에 복사하고, 현재 입력줄 selection이면 cursor 이동 후 Backspace를 보내 삭제한다. 삭제할 수 없는 화면 selection은 복사 후 tuimux selection만 해제한다. Copy는 selection이 있을 때 `copy_selection()`으로 system clipboard에 복사하고, Paste는 `clipboard::read_text()` 결과를 active PTY에 paste한다.
 
@@ -459,14 +460,14 @@ crossterm PasteEvent
   -> daemon active terminal PtyTerminal::send_paste()
   -> child bracketed paste mode이면 ESC [ 200 ~ / ESC [ 201 ~ wrapper 적용
   -> UI paste_highlight_pending = true
-  -> 다음 일반 mouse down/up에서 context menu보다 먼저 Left/Right cursor 왕복 입력으로 paste highlight 해제
+  -> 다음 일반 mouse down/up에서 context menu보다 먼저 raw ESC [ D / ESC [ C 입력으로 paste highlight 해제
 ```
 
 ```text
 raw host bracketed paste key sequence
   -> UiState::send_terminal_key()로 child PTY에 그대로 전달
   -> raw key tail이 ESC [ 201 ~와 일치하면 paste_highlight_pending = true
-  -> 다음 일반 mouse down/up에서 context menu보다 먼저 Left/Right cursor 왕복 입력으로 paste highlight 해제
+  -> 다음 일반 mouse down/up에서 context menu보다 먼저 raw ESC [ D / ESC [ C 입력으로 paste highlight 해제
 ```
 
 ### 4.7 Detach와 Reattach
@@ -553,7 +554,8 @@ F12, q, Esc, or Detach button
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
 - child mouse tracking 중 normal left click은 child로 전달되고 normal drag는 tuimux selection으로 처리되는지 확인
 - 우클릭 context menu에서 Cut, Copy, Paste, Cancel이 표시되고 Cut/Copy/Paste가 동작하는지 확인
-- Cut clipboard를 context menu Paste로 붙인 뒤 우클릭이 paste highlight clear 입력을 보내는지 확인
+- Copy/Cut clipboard를 context menu Paste로 붙인 뒤 click이 raw `ESC[D ESC[C` paste highlight clear 입력을 보내는지 확인
+- child mouse protocol/application cursor mode가 켜진 상태에서도 paste 뒤 terminal body left click이 highlight를 지우고 mouse escape를 입력줄에 남기지 않는지 확인
 - Cut이 현재 입력줄 selection에서 system clipboard copy 후 cursor 이동과 Backspace를 child PTY에 보내 삭제 시도를 하는지 확인
 - Backspace/Delete/일반 문자 입력이 현재 입력줄 selection을 삭제하거나 대체하는지 확인
 - parent `NO_COLOR=1` 상태에서도 child truecolor foreground/background SGR과 default reset이 tuimux TUI output에 보존되는지 확인
@@ -570,10 +572,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.34 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.35 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.34-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.35-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -581,8 +583,8 @@ v0.2.0-alpha.34 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.34/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.34 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.35/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.35 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

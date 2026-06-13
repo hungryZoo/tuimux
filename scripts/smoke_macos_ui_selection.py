@@ -40,6 +40,10 @@ PASTE_CLICK_MARKER = "TUIMUX_PASTE_CLICK_CLEAR_TARGET"
 PASTE_CLICK_READY = "PASTE_CLICK_CLEAR_READY"
 PASTE_CLICK_WAITING = "PASTE_CLICK_CLEAR_WAITING"
 PASTE_CLICK_OK = "PASTE_CLICK_CLEAR_OK"
+MOUSE_MODE_PASTE_CLICK_MARKER = "TUIMUX_MOUSE_MODE_PASTE_CLEAR_TARGET"
+MOUSE_MODE_PASTE_CLICK_READY = "MOUSE_MODE_PASTE_CLICK_CLEAR_READY"
+MOUSE_MODE_PASTE_CLICK_WAITING = "MOUSE_MODE_PASTE_CLICK_CLEAR_WAITING"
+MOUSE_MODE_PASTE_CLICK_OK = "MOUSE_MODE_PASTE_CLICK_CLEAR_OK"
 COPY_PASTE_CLICK_READY = "COPY_PASTE_CLICK_CLEAR_READY"
 COPY_PASTE_CLICK_WAITING = "COPY_PASTE_CLICK_CLEAR_WAITING"
 COPY_PASTE_CLICK_OK = "COPY_PASTE_CLICK_CLEAR_OK"
@@ -223,6 +227,7 @@ def paste_click_clear_probe_command(
     ready_marker: str = PASTE_CLICK_READY,
     waiting_marker: str = PASTE_CLICK_WAITING,
     ok_marker: str = PASTE_CLICK_OK,
+    terminal_mode_prefix: bytes = b"",
 ) -> str:
     probe = f"""
 import os
@@ -237,7 +242,7 @@ fd = sys.stdin.fileno()
 old = termios.tcgetattr(fd)
 try:
     tty.setraw(fd)
-    os.write(sys.stdout.fileno(), b"\\x1b[?2004h{ready_marker}\\r\\n")
+    os.write(sys.stdout.fileno(), b"\\x1b[?2004h" + {terminal_mode_prefix!r} + b"{ready_marker}\\r\\n")
     data = b""
     deadline = time.time() + 5.0
     while time.time() < deadline and b"\\x1b[201~" not in data:
@@ -256,7 +261,6 @@ try:
         while (
             time.time() < deadline
             and b"\\x1b[D\\x1b[C" not in click_data
-            and b"\\x1bOD\\x1bOC" not in click_data
         ):
             ready, _, _ = select.select([fd], [], [], 0.1)
             if ready:
@@ -264,10 +268,10 @@ try:
                 if not chunk:
                     break
                 click_data += chunk
-        if b"\\x1b[D\\x1b[C" in click_data or b"\\x1bOD\\x1bOC" in click_data:
-            os.write(sys.stdout.fileno(), b"\\x1b[?2004l{ok_marker}\\r\\n")
+        if b"\\x1b[D\\x1b[C" in click_data:
+            os.write(sys.stdout.fileno(), b"\\x1b[?1l\\x1b[?1000l\\x1b[?2004l{ok_marker}\\r\\n")
         else:
-            os.write(sys.stdout.fileno(), b"\\x1b[?2004lPASTE_CLICK_BAD_CLEAR:" + click_data.hex().encode() + b"\\r\\n")
+            os.write(sys.stdout.fileno(), b"\\x1b[?1l\\x1b[?1000l\\x1b[?2004lPASTE_CLICK_BAD_CLEAR:" + click_data.hex().encode() + b"\\r\\n")
 finally:
     termios.tcsetattr(fd, termios.TCSADRAIN, old)
 """
@@ -550,6 +554,33 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
+        mouse_mode_paste_click_command = paste_click_clear_probe_command(
+            MOUSE_MODE_PASTE_CLICK_MARKER,
+            paste_click_script,
+            MOUSE_MODE_PASTE_CLICK_READY,
+            MOUSE_MODE_PASTE_CLICK_WAITING,
+            MOUSE_MODE_PASTE_CLICK_OK,
+            b"\x1b[?1000h\x1b[?1h",
+        )
+        client.write((mouse_mode_paste_click_command + "\r").encode())
+        if not client.wait_contains(MOUSE_MODE_PASTE_CLICK_READY, args.timeout):
+            print("mouse-mode paste click clear probe did not become ready", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        mouse_mode_paste_click_payload = (
+            f"\x1b[200~{MOUSE_MODE_PASTE_CLICK_MARKER}\x1b[201~"
+        )
+        client.write(mouse_mode_paste_click_payload.encode())
+        if not client.wait_contains(MOUSE_MODE_PASTE_CLICK_WAITING, args.timeout):
+            print("mouse-mode paste click clear probe did not receive bracketed paste", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<0;1;1M\x1b[<0;1;1m")
+        if not client.wait_contains(MOUSE_MODE_PASTE_CLICK_OK, args.timeout):
+            print("mouse-mode click did not send CSI paste highlight clear", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
         cut_delete_command = cut_delete_probe_command(CUT_DELETE_MARKER, cut_delete_script)
         client.write((cut_delete_command + "\r").encode())
         client.read_for(0.8)
@@ -738,6 +769,7 @@ def main() -> int:
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
         print("paste highlight click clear: observed")
+        print("mouse-mode paste highlight click clear: observed")
         print("foreground child SIGINT: not observed")
         return 0
     finally:
