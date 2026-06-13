@@ -1,6 +1,6 @@
 # tuimux PRD
 
-- **문서 버전**: 3.7
+- **문서 버전**: 3.8
 - **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 
@@ -42,7 +42,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
 - selection이 있을 때 Ctrl-C는 system clipboard copy로 동작한다.
-- terminal body 우클릭은 selection이 있으면 system clipboard copy, selection이 없으면 clipboard paste로 동작한다.
+- 우클릭은 TUI context menu를 열고 Copy, Paste, Cancel을 제공한다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
 - host paste는 bracketed paste event로 받아 active PTY에 전달한다.
 - child가 mouse tracking을 켠 경우 simple left click과 wheel은 child로 보내고 normal drag는 tuimux selection으로 쓴다.
@@ -76,7 +76,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - daemon snapshot에서 btop의 cpu/proc panel과 mouse protocol state가 정상으로 관측된다.
 - drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C + `pbpaste` smoke test가 통과한다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
-- macOS PTY UI smoke에서 drag selection, right-click copy, Ctrl-C clipboard copy, foreground child SIGINT 미전달, right-click paste, child bracketed paste wrapper 보존이 통과한다.
+- macOS PTY UI smoke에서 drag selection, right-click context menu Copy, Ctrl-C clipboard copy, foreground child SIGINT 미전달, context menu Paste, child bracketed paste wrapper 보존이 통과한다.
 - macOS window-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.
 - macOS no-tmux smoke에서 tmux 없는 PATH의 default TUI/doctor 성공과 `--native-client` 실패가 통과한다.
 - `--layout-preview`가 split-pane/resize 샘플이 아닌 terminal body + window-list preview를 출력한다.

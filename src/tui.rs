@@ -43,6 +43,7 @@ enum Hotspot {
     Window(usize),
     WindowClose(usize),
     NewWindow,
+    ContextMenu(ContextMenuAction),
 }
 
 #[derive(Default, Clone, Copy)]
@@ -57,6 +58,9 @@ struct Regions {
     window_count: usize,
     terminal_panes: [Rect; 8],
     terminal_pane_count: usize,
+    context_menu: Rect,
+    context_menu_items: [Rect; 3],
+    context_menu_count: usize,
 }
 
 struct UiState {
@@ -73,6 +77,7 @@ struct UiState {
     terminal_mode: bool,
     selection: Option<SelectionState>,
     pending_left_down: Option<PendingMouseDown>,
+    context_menu: Option<ContextMenuState>,
     terminal_axis: PaneAxis,
     terminal_separators: Vec<PaneSeparator>,
     terminal_panes: Vec<PaneSnapshot>,
@@ -101,12 +106,32 @@ struct PendingMouseDown {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct ContextMenuState {
+    anchor: (u16, u16),
+    selected: ContextMenuAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextMenuAction {
+    Copy,
+    Paste,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct TerminalModeLayout {
     terminal_body: Rect,
     side_rail: Option<Rect>,
 }
 
 const WINDOW_CLOSE_WIDTH: u16 = 3;
+const CONTEXT_MENU_WIDTH: u16 = 14;
+const CONTEXT_MENU_HEIGHT: u16 = 5;
+const CONTEXT_MENU_ACTIONS: [ContextMenuAction; 3] = [
+    ContextMenuAction::Copy,
+    ContextMenuAction::Paste,
+    ContextMenuAction::Cancel,
+];
 
 fn andromeda_starlight() -> Color {
     Color::Rgb(0xF3, 0xD5, 0x6E)
@@ -143,6 +168,7 @@ impl UiState {
             terminal_mode: true,
             selection: None,
             pending_left_down: None,
+            context_menu: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
             terminal_panes: Vec::new(),
@@ -222,6 +248,29 @@ impl UiState {
     fn clear_selection(&mut self) {
         self.selection = None;
         self.pending_left_down = None;
+    }
+
+    fn open_context_menu(&mut self, x: u16, y: u16) {
+        self.pending_left_down = None;
+        self.context_menu = Some(ContextMenuState {
+            anchor: (x, y),
+            selected: ContextMenuAction::Copy,
+        });
+        self.hover = Some(Hotspot::ContextMenu(ContextMenuAction::Copy));
+    }
+
+    fn close_context_menu(&mut self) {
+        self.context_menu = None;
+        if matches!(self.hover, Some(Hotspot::ContextMenu(_))) {
+            self.hover = None;
+        }
+    }
+
+    fn select_context_menu_action(&mut self, action: ContextMenuAction) {
+        if let Some(menu) = &mut self.context_menu {
+            menu.selected = action;
+        }
+        self.hover = Some(Hotspot::ContextMenu(action));
     }
 
     fn copy_selection(&mut self) -> bool {
@@ -404,6 +453,10 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
 
         match event::read()? {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
+                if handle_context_menu_key(state, key) {
+                    continue;
+                }
+
                 match (key.code, key.modifiers) {
                     (KeyCode::F(12), _) => {
                         state.terminal_mode = !state.terminal_mode;
@@ -477,6 +530,14 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 }
             }
             Event::Mouse(mouse) => {
+                if handle_context_menu_mouse(state, &mouse) {
+                    continue;
+                }
+
+                if handle_context_menu_request(state, mouse.kind, mouse.column, mouse.row) {
+                    continue;
+                }
+
                 if handle_pending_left_down(state, &mouse) {
                     continue;
                 }
@@ -512,10 +573,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 if let Some((pane_row, row, col)) =
                     terminal_cell_at_pane(mouse.column, mouse.row, &state.regions)
                 {
-                    if handle_terminal_right_click(state, mouse.kind) {
-                        continue;
-                    }
-
                     let clicked_left =
                         matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
                     if clicked_left
@@ -677,19 +734,123 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
     }
 }
 
-fn handle_terminal_right_click(state: &mut UiState, kind: MouseEventKind) -> bool {
+fn handle_context_menu_key(state: &mut UiState, key: KeyEvent) -> bool {
+    let Some(menu) = state.context_menu else {
+        return false;
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            state.close_context_menu();
+            true
+        }
+        KeyCode::Up => {
+            let index = context_menu_action_index(menu.selected);
+            let next = (index + CONTEXT_MENU_ACTIONS.len() - 1) % CONTEXT_MENU_ACTIONS.len();
+            state.select_context_menu_action(CONTEXT_MENU_ACTIONS[next]);
+            true
+        }
+        KeyCode::Down => {
+            let index = context_menu_action_index(menu.selected);
+            let next = (index + 1) % CONTEXT_MENU_ACTIONS.len();
+            state.select_context_menu_action(CONTEXT_MENU_ACTIONS[next]);
+            true
+        }
+        KeyCode::Enter => {
+            perform_context_menu_action(state, menu.selected);
+            true
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            perform_context_menu_action(state, ContextMenuAction::Copy);
+            true
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            perform_context_menu_action(state, ContextMenuAction::Paste);
+            true
+        }
+        _ => true,
+    }
+}
+
+fn handle_context_menu_mouse(state: &mut UiState, mouse: &MouseEvent) -> bool {
+    if state.context_menu.is_none() {
+        return false;
+    }
+
+    match mouse.kind {
+        MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(action) = context_menu_action_at(mouse.column, mouse.row, &state.regions) {
+                state.select_context_menu_action(action);
+            }
+            true
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(action) = context_menu_action_at(mouse.column, mouse.row, &state.regions) {
+                state.select_context_menu_action(action);
+            } else {
+                state.close_context_menu();
+            }
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(action) = context_menu_action_at(mouse.column, mouse.row, &state.regions) {
+                perform_context_menu_action(state, action);
+            } else {
+                state.close_context_menu();
+            }
+            true
+        }
+        MouseEventKind::Down(MouseButton::Right) => {
+            state.open_context_menu(mouse.column, mouse.row);
+            true
+        }
+        MouseEventKind::Up(MouseButton::Right) | MouseEventKind::Drag(MouseButton::Right) => true,
+        _ => true,
+    }
+}
+
+fn perform_context_menu_action(state: &mut UiState, action: ContextMenuAction) {
+    state.close_context_menu();
+    match action {
+        ContextMenuAction::Copy => {
+            if !state.copy_selection() {
+                state.status = Some("nothing selected".to_string());
+            }
+        }
+        ContextMenuAction::Paste => {
+            state.paste_clipboard();
+        }
+        ContextMenuAction::Cancel => {
+            state.status = Some("context menu cancelled".to_string());
+        }
+    }
+}
+
+fn handle_context_menu_request(state: &mut UiState, kind: MouseEventKind, x: u16, y: u16) -> bool {
     match kind {
         MouseEventKind::Down(MouseButton::Right) => {
-            if state.selection_range().is_some() {
-                state.copy_selection();
-            } else {
-                state.paste_clipboard();
-            }
+            state.open_context_menu(x, y);
             true
         }
         MouseEventKind::Up(MouseButton::Right) | MouseEventKind::Drag(MouseButton::Right) => true,
         _ => false,
     }
+}
+
+fn context_menu_action_index(action: ContextMenuAction) -> usize {
+    CONTEXT_MENU_ACTIONS
+        .iter()
+        .position(|candidate| *candidate == action)
+        .unwrap_or(0)
+}
+
+fn context_menu_action_at(x: u16, y: u16, regions: &Regions) -> Option<ContextMenuAction> {
+    for idx in 0..regions.context_menu_count {
+        if contains(regions.context_menu_items[idx], x, y) {
+            return Some(CONTEXT_MENU_ACTIONS[idx]);
+        }
+    }
+    None
 }
 
 fn active_terminal_size(state: &UiState) -> (u16, u16) {
@@ -837,6 +998,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
                 &mut state.regions,
             );
         }
+        render_context_menu(f, root, state.context_menu, state.hover, &mut state.regions);
         return;
     }
 
@@ -867,6 +1029,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         state.hover,
         &mut state.regions,
     );
+    render_context_menu(f, root, state.context_menu, state.hover, &mut state.regions);
 }
 
 fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a> {
@@ -1060,6 +1223,103 @@ fn render_terminal_status(
     .alignment(Alignment::Center)
     .block(block);
     f.render_widget(status, area);
+}
+
+fn render_context_menu(
+    f: &mut Frame,
+    root: Rect,
+    menu: Option<ContextMenuState>,
+    hover: Option<Hotspot>,
+    regions: &mut Regions,
+) {
+    regions.context_menu = Rect::default();
+    regions.context_menu_items = [Rect::default(); 3];
+    regions.context_menu_count = 0;
+
+    let Some(menu) = menu else {
+        return;
+    };
+    if root.width == 0 || root.height == 0 {
+        return;
+    }
+
+    let area = context_menu_rect(root, menu.anchor);
+    regions.context_menu = area;
+    f.render_widget(Clear, area);
+
+    let menu_style = Style::default()
+        .fg(andromeda_starlight())
+        .add_modifier(Modifier::BOLD);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(menu_style)
+        .title(Span::styled(" MENU ", menu_style));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let rows = CONTEXT_MENU_ACTIONS.len().min(inner.height as usize);
+    regions.context_menu_count = rows;
+    let items = CONTEXT_MENU_ACTIONS
+        .iter()
+        .take(rows)
+        .enumerate()
+        .map(|(idx, action)| {
+            let rect = Rect::new(inner.x, inner.y.saturating_add(idx as u16), inner.width, 1);
+            regions.context_menu_items[idx] = rect;
+            ListItem::new(context_menu_line(
+                *action,
+                inner.width,
+                menu.selected == *action || hover == Some(Hotspot::ContextMenu(*action)),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    f.render_widget(List::new(items), inner);
+}
+
+fn context_menu_rect(root: Rect, anchor: (u16, u16)) -> Rect {
+    let width = CONTEXT_MENU_WIDTH.min(root.width);
+    let height = CONTEXT_MENU_HEIGHT.min(root.height);
+    let max_x = root.right().saturating_sub(width);
+    let max_y = root.bottom().saturating_sub(height);
+    Rect::new(
+        anchor.0.clamp(root.x, max_x),
+        anchor.1.clamp(root.y, max_y),
+        width,
+        height,
+    )
+}
+
+fn context_menu_line(action: ContextMenuAction, width: u16, hot: bool) -> Line<'static> {
+    let label = match action {
+        ContextMenuAction::Copy => "Copy",
+        ContextMenuAction::Paste => "Paste",
+        ContextMenuAction::Cancel => "Cancel",
+    };
+    let prefix = match action {
+        ContextMenuAction::Copy => "C",
+        ContextMenuAction::Paste => "P",
+        ContextMenuAction::Cancel => "Esc",
+    };
+    let text = fit_and_pad_text(&format!(" {prefix}  {label}"), width as usize);
+    let color = match action {
+        ContextMenuAction::Copy => andromeda_starlight(),
+        ContextMenuAction::Paste => andromeda_aurora(),
+        ContextMenuAction::Cancel => andromeda_comet(),
+    };
+    let style = if hot {
+        Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color)
+    };
+    Line::from(Span::styled(text, style))
 }
 
 fn fit_bar_text(text: &str, width: usize) -> String {
@@ -1530,6 +1790,10 @@ fn close_style(hot: bool) -> Style {
 }
 
 fn hit_test(x: u16, y: u16, regions: &Regions) -> Option<Hotspot> {
+    if let Some(action) = context_menu_action_at(x, y, regions) {
+        return Some(Hotspot::ContextMenu(action));
+    }
+
     if contains(regions.main_pane, x, y) {
         return Some(Hotspot::MainPane);
     }
@@ -1683,6 +1947,7 @@ mod tests {
             terminal_mode: true,
             selection: None,
             pending_left_down: None,
+            context_menu: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
             terminal_panes: Vec::new(),
@@ -1877,6 +2142,62 @@ mod tests {
 
         assert_eq!(hit_test(27, 5, &regions), Some(Hotspot::WindowClose(0)));
         assert_eq!(hit_test(12, 5, &regions), Some(Hotspot::Window(0)));
+    }
+
+    #[test]
+    fn right_click_context_menu_renders_copy_paste_cancel() {
+        let mut state = test_state();
+        state.context_menu = Some(ContextMenuState {
+            anchor: (2, 2),
+            selected: ContextMenuAction::Copy,
+        });
+        state.terminal_rows = vec![vec![TerminalSpan {
+            text: "BODY_LINE".to_string(),
+            style: TerminalStyle::default(),
+        }]];
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| ui(frame, &mut state)).unwrap();
+
+        let full_screen = (0..10)
+            .map(|y| rendered_line(&terminal, y, 40))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(full_screen.contains("MENU"), "{full_screen}");
+        assert!(full_screen.contains("Copy"), "{full_screen}");
+        assert!(full_screen.contains("Paste"), "{full_screen}");
+        assert!(full_screen.contains("Cancel"), "{full_screen}");
+        assert_eq!(state.regions.context_menu_count, 3);
+        assert_eq!(
+            hit_test(
+                state.regions.context_menu_items[0].x,
+                state.regions.context_menu_items[0].y,
+                &state.regions
+            ),
+            Some(Hotspot::ContextMenu(ContextMenuAction::Copy))
+        );
+    }
+
+    #[test]
+    fn context_menu_rect_clamps_to_root() {
+        let rect = context_menu_rect(Rect::new(0, 0, 20, 8), (19, 7));
+
+        assert_eq!(
+            rect,
+            Rect::new(6, 3, CONTEXT_MENU_WIDTH, CONTEXT_MENU_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn right_click_request_opens_context_menu() {
+        let mut state = test_state();
+
+        let handled =
+            handle_context_menu_request(&mut state, MouseEventKind::Down(MouseButton::Right), 7, 3);
+
+        assert!(handled);
+        assert_eq!(state.context_menu.map(|menu| menu.anchor), Some((7, 3)));
     }
 
     #[test]

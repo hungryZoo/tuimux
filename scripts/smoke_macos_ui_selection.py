@@ -7,9 +7,9 @@ right-click and Ctrl-C, and verifies that macOS `pbpaste` contains the selected
 text. Before copying, it also checks that the mouse-up frame renders the
 selected text with reverse-video highlighting so the selection visibly persists.
 A shell trap also confirms that Ctrl-C was not forwarded to the foreground
-child. It then verifies right-click paste from the system clipboard. Finally, a
-raw child process enables bracketed paste mode and verifies that tuimux
-preserves the child-side paste wrapper.
+child. It then verifies the right-click context menu's Copy and Paste actions
+against the system clipboard. Finally, a raw child process enables bracketed
+paste mode and verifies that tuimux preserves the child-side paste wrapper.
 """
 
 from __future__ import annotations
@@ -249,8 +249,15 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
-        right_click_copy = f"\x1b[<2;{x2};{y}M\x1b[<2;{x2};{y}m"
-        client.write(right_click_copy.encode())
+        right_click_menu = f"\x1b[<2;{x2};{y}M\x1b[<2;{x2};{y}m"
+        client.write(right_click_menu.encode())
+        if not client.wait_contains("Copy", args.timeout):
+            print("right-click context menu did not appear", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
+        copy_item_click = f"\x1b[<0;{x2 + 2};{y + 1}M\x1b[<0;{x2 + 2};{y + 1}m"
+        client.write(copy_item_click.encode())
         time.sleep(0.5)
 
         right_copied = get_clipboard()
@@ -287,6 +294,11 @@ def main() -> int:
         )
         set_clipboard(right_paste_payload)
         client.write(b"\x1b[<2;1;1M\x1b[<2;1;1m")
+        if not client.wait_contains("Paste", args.timeout):
+            print("right-click paste menu did not appear", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<0;3;3M\x1b[<0;3;3m")
         client.read_for(0.2)
         client.write(b"\r")
         if not client.wait_contains(RIGHT_PASTE_OUTPUT, args.timeout):
@@ -310,9 +322,9 @@ def main() -> int:
 
         print("OK macOS UI selection smoke")
         print("selection highlight: reverse video observed after mouse-up")
-        print(f"right-click copied: {right_copied}")
+        print(f"right-click menu copied: {right_copied}")
         print(f"Ctrl-C copied: {copied}")
-        print(f"right-click pasted command output: {RIGHT_PASTE_OUTPUT}")
+        print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
         print("foreground child SIGINT: not observed")
         return 0

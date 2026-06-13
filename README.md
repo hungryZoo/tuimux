@@ -39,8 +39,8 @@ This is still a 0.x prerelease. Current behavior:
 - Multiple clients can connect to the same daemon concurrently; they currently share active window state.
 - Each window runs a real shell in a PTY, parsed with `vt100` and rendered with ratatui.
 - Mouse wheel scrolls shell history when the child program is not using mouse tracking; `PageUp`/`PageDown`, `Home`, and `End` work in navigation mode, and paste while scrolled back returns to the live bottom, covered by the macOS scrollback smoke.
-- Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen; macOS PTY smoke covers reverse-video selection highlight, drag + right-click copy, drag + Ctrl-C + `pbpaste`, right-click paste, and child bracketed paste wrappers.
-- Ctrl-C copies the selected text to the system clipboard instead of sending SIGINT, and right-click copies the selection when one exists.
+- Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen; macOS PTY smoke covers reverse-video selection highlight, drag + right-click context-menu Copy, drag + Ctrl-C + `pbpaste`, context-menu Paste, and child bracketed paste wrappers.
+- Ctrl-C copies the selected text to the system clipboard instead of sending SIGINT, and right-click opens a TUI context menu with Copy, Paste, and Cancel.
 - Child OSC 52 clipboard copy requests are decoded into the macOS system clipboard, and OSC 52 paste queries receive a base64 clipboard response.
 - Host paste is captured as a paste event and forwarded to the active PTY with child bracketed paste respected.
 - If the child program enables mouse tracking, simple left clicks and wheel events still go to the child, while a normal drag starts tuimux text selection, covered by the macOS mouse-protocol smoke.
