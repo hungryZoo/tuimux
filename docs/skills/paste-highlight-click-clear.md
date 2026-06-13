@@ -10,7 +10,7 @@
 
 - 붙여넣기 후 글자 배경이 흰색으로 남아 있다.
 - 방향키를 누르면 흰 배경이 사라지는데 마우스 클릭으로는 사라지지 않는다.
-- 특히 Cut으로 clipboard에 들어간 텍스트를 context menu Paste로 붙인 뒤 우클릭/클릭에서 highlight가 남는다.
+- 특히 Copy 또는 Cut으로 clipboard에 들어간 텍스트를 context menu Paste로 붙인 뒤 우클릭/클릭에서 highlight가 남는다.
 - raw bracketed paste smoke는 통과하는데 실제 context menu paste 후 클릭만 불안정하다.
 
 ## 핵심 원인
@@ -29,7 +29,7 @@ context menu mouse/request
 
 ## 수정 원칙
 
-mouse down은 먼저 paste highlight clear 후보로 처리한다.
+mouse down/up은 먼저 paste highlight clear 후보로 처리한다.
 
 ```text
 paste highlight click clear
@@ -40,7 +40,7 @@ paste highlight click clear
 구체적으로는 `src/tui.rs`에서 다음 정책을 유지한다.
 
 - `Event::Mouse`를 받으면 context menu 처리보다 먼저 `should_clear_paste_highlight_for_click()`를 호출한다.
-- clear 대상은 `MouseEventKind::Down(_)` 전체다. left click뿐 아니라 right click도 native terminal의 “다른 곳 클릭하면 highlight 해제” 감각에 맞게 clear해야 한다.
+- clear 대상은 `MouseEventKind::Down(_)`와 `MouseEventKind::Up(_)` 전체다. left click뿐 아니라 right click도 native terminal의 “다른 곳 클릭하면 highlight 해제” 감각에 맞게 clear해야 한다. 터미널/트랙패드 조합에 따라 down/up 중 한쪽만 관측되는 경우에도 clear가 살아야 한다.
 - terminal body 안에서 child mouse protocol이 켜진 pane은 기존처럼 clear를 건너뛴다. mouse app이 직접 mouse input을 쓰는 중이면 tuimux가 cursor key를 끼워 넣으면 안 된다.
 - terminal body 밖 UI chrome, rail, context menu 위 click은 clear 대상으로 본다.
 
@@ -51,8 +51,8 @@ paste highlight click clear
 검증 순서:
 
 1. editable text를 drag selection한다.
-2. context menu Cut으로 clipboard에 복사하고 Backspace 삭제가 child까지 가는지 확인한다.
-3. bracketed paste probe child를 실행한다.
+2. context menu Copy로 clipboard에 복사한 텍스트를 context menu Paste로 붙인 뒤 left click이 clear 입력을 보내는지 확인한다.
+3. context menu Cut으로 clipboard에 복사하고 Backspace 삭제가 child까지 가는지 확인한다.
 4. clipboard에 남은 Cut 텍스트를 context menu Paste로 붙인다.
 5. probe가 흰 배경 paste text를 표시하고 대기하게 한다.
 6. right click을 보낸다.
@@ -65,7 +65,7 @@ paste highlight click clear
 - paste 관련 변경 뒤에는 `paste_highlight_pending`이 어디서 켜지고 꺼지는지 먼저 추적한다.
 - `send_terminal_key_to_child()`나 synthetic cursor movement가 pending 상태를 불필요하게 끄지 않는지 본다.
 - mouse handler 순서를 바꿀 때 context menu, rail click, terminal body click 모두에서 click-clear가 먼저 실행되는지 확인한다.
-- `should_clear_paste_highlight_for_click()`를 left click에만 묶지 않는다.
+- `should_clear_paste_highlight_for_click()`를 left click이나 mouse down 한 종류에만 묶지 않는다.
 - child mouse protocol active pane에는 clear cursor key를 보내지 않는다.
 - smoke에는 raw paste path와 context menu paste path를 둘 다 둔다.
 
@@ -91,4 +91,4 @@ uv run python scripts/smoke_macos_scrollback.py
 
 ## 이번 수정의 결론
 
-Cut으로 복사한 텍스트를 붙인 뒤 흰 배경이 남은 것은 terminal emulator의 색 처리 문제가 아니라, paste highlight clear가 context menu mouse event보다 늦게 실행되는 입력 라우팅 문제였다. mouse down에서 먼저 clear를 시도하고 right click도 clear 대상으로 포함하자, Cut clipboard context paste 후 우클릭에서도 child가 cursor key clear sequence를 받게 됐다.
+Cut으로 복사한 텍스트를 붙인 뒤 흰 배경이 남은 것은 terminal emulator의 색 처리 문제가 아니라, paste highlight clear가 context menu mouse event보다 늦게 실행되거나 click 이벤트 종류를 너무 좁게 본 입력 라우팅 문제였다. mouse down/up에서 먼저 clear를 시도하고 right click도 clear 대상으로 포함하자, Copy/Cut clipboard context paste 후 클릭에서도 child가 cursor key clear sequence를 받게 됐다.

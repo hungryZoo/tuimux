@@ -40,6 +40,9 @@ PASTE_CLICK_MARKER = "TUIMUX_PASTE_CLICK_CLEAR_TARGET"
 PASTE_CLICK_READY = "PASTE_CLICK_CLEAR_READY"
 PASTE_CLICK_WAITING = "PASTE_CLICK_CLEAR_WAITING"
 PASTE_CLICK_OK = "PASTE_CLICK_CLEAR_OK"
+COPY_PASTE_CLICK_READY = "COPY_PASTE_CLICK_CLEAR_READY"
+COPY_PASTE_CLICK_WAITING = "COPY_PASTE_CLICK_CLEAR_WAITING"
+COPY_PASTE_CLICK_OK = "COPY_PASTE_CLICK_CLEAR_OK"
 CUT_PASTE_CLICK_READY = "CUT_PASTE_CLICK_CLEAR_READY"
 CUT_PASTE_CLICK_WAITING = "CUT_PASTE_CLICK_CLEAR_WAITING"
 CUT_PASTE_CLICK_OK = "CUT_PASTE_CLICK_CLEAR_OK"
@@ -581,6 +584,36 @@ def main() -> int:
             )
             return 1
 
+        set_clipboard(right_copied)
+        copy_paste_click_command = paste_click_clear_probe_command(
+            right_copied,
+            paste_click_script,
+            COPY_PASTE_CLICK_READY,
+            COPY_PASTE_CLICK_WAITING,
+            COPY_PASTE_CLICK_OK,
+        )
+        client.write((copy_paste_click_command + "\r").encode())
+        if not client.wait_contains(COPY_PASTE_CLICK_READY, args.timeout):
+            print("copy paste click clear probe did not become ready", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<2;1;1M\x1b[<2;1;1m")
+        if not client.wait_contains("Paste", args.timeout):
+            print("copied clipboard paste menu did not appear", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<0;3;4M\x1b[<0;3;4m")
+        if not client.wait_contains(COPY_PASTE_CLICK_WAITING, args.timeout):
+            print("copied clipboard context paste did not reach child", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<0;1;1M\x1b[<0;1;1m")
+        if not client.wait_contains(COPY_PASTE_CLICK_OK, args.timeout):
+            print("left-click did not clear copied clipboard paste highlight", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
+        set_clipboard(cut_deleted)
         cut_paste_click_command = paste_click_clear_probe_command(
             CUT_DELETE_MARKER,
             paste_click_script,
@@ -696,6 +729,7 @@ def main() -> int:
         print(f"right-click menu copied: {right_copied}")
         print(f"right-click menu cut: {cut_copied}")
         print(f"right-click menu cut deleted: {cut_deleted}")
+        print("copied clipboard context paste click clear: observed")
         print("cut clipboard context paste click clear: observed")
         print("Backspace deleted editable selection: observed")
         print("Delete deleted editable selection: observed")

@@ -1,12 +1,12 @@
 # tuimux PRD
 
 - **문서 버전**: 4.0
-- **대상 릴리스**: v0.2.0-alpha.33
+- **대상 릴리스**: v0.2.0-alpha.34
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.33의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 하나의 persistent mux 안에서 window list와 PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.34의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 하나의 persistent mux 안에서 window list와 PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -49,7 +49,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - 현재 입력줄 선택이 있을 때 Backspace/Delete는 선택 영역을 삭제하고, 일반 문자 입력은 선택 영역을 삭제한 뒤 해당 문자를 입력한다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
 - host paste는 paste event 또는 raw bracketed-paste key sequence로 처리한다.
-- 붙여넣기 직후 쉘이 표시한 paste highlight는 다음 일반 mouse down에서 드래그 선택 해제처럼 사라진다. 우클릭 context menu 요청도 이 clear 경로보다 먼저 paste highlight를 지워야 한다.
+- 붙여넣기 직후 쉘이 표시한 paste highlight는 다음 일반 mouse click에서 드래그 선택 해제처럼 사라진다. down/up 이벤트 종류와 무관해야 하며, 우클릭 context menu 요청도 이 clear 경로보다 먼저 paste highlight를 지워야 한다.
 - child가 mouse tracking을 켠 경우 simple left click과 wheel은 child로 보내고 normal drag는 tuimux selection으로 쓴다.
 - child가 명시적으로 출력한 truecolor foreground/background/default reset은 부모 환경의 `NO_COLOR`와 무관하게 native terminal color로 보존한다.
 - host terminal resize는 active child PTY까지 전달되어 full-screen 앱과 shell이 새 rows/cols를 관측한다.
@@ -81,7 +81,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - daemon snapshot에서 btop의 cpu/proc panel과 mouse protocol state가 정상으로 관측된다.
 - drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C copy shortcut 정책과 `pbpaste` smoke test가 통과한다.
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V paste shortcut과 Home/End/Cmd-Shift-Left/Cmd-Shift-Right line-boundary shortcut regression test가 통과한다.
-- 붙여넣기 뒤 일반 mouse down이 쉘의 paste highlight pending 상태를 해제하고 기존 drag selection/context menu 흐름을 깨지 않는다.
+- 붙여넣기 뒤 일반 mouse click이 쉘의 paste highlight pending 상태를 해제하고 기존 drag selection/context menu 흐름을 깨지 않는다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, right-click context menu Cut/Copy, Cut의 Backspace child 전달, Backspace/delete/text replacement editable selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, context menu Paste, child bracketed paste wrapper 보존이 통과한다.
 - macOS window-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.

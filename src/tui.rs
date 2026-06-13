@@ -1030,7 +1030,9 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
 }
 
 fn should_clear_paste_highlight_for_click(state: &UiState, mouse: &MouseEvent) -> bool {
-    if !state.paste_highlight_pending || !matches!(mouse.kind, MouseEventKind::Down(_)) {
+    if !state.paste_highlight_pending
+        || !matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_))
+    {
         return false;
     }
 
@@ -2972,6 +2974,14 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         assert!(should_clear_paste_highlight_for_click(&state, &right_click));
+
+        let left_up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 15,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(should_clear_paste_highlight_for_click(&state, &left_up));
 
         state.terminal_mouse_protocol_active = true;
         let terminal_click = MouseEvent {
