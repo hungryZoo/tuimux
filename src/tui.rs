@@ -350,6 +350,7 @@ impl UiState {
     }
 
     fn paste_clipboard(&mut self) -> bool {
+        self.clear_selection();
         match clipboard::read_text() {
             Ok(text) if text.is_empty() => {
                 self.status = Some("clipboard is empty".to_string());
@@ -357,7 +358,6 @@ impl UiState {
             }
             Ok(text) => {
                 let chars = text.chars().count();
-                self.clear_selection();
                 match self.mux.send_paste(&text) {
                     Ok(()) => {
                         self.status = Some(format!("pasted {chars} chars"));
@@ -393,8 +393,9 @@ impl UiState {
 
 fn is_copy_shortcut(key: KeyEvent) -> bool {
     shortcut_char(key, 'c')
-        && (key.modifiers.contains(KeyModifiers::CONTROL)
-            || key.modifiers.contains(KeyModifiers::SUPER))
+        && (is_plain_control_c(key)
+            || is_control_shift_shortcut(key.modifiers)
+            || is_macos_shift_command(key.modifiers))
 }
 
 fn is_plain_control_c(key: KeyEvent) -> bool {
@@ -403,8 +404,9 @@ fn is_plain_control_c(key: KeyEvent) -> bool {
 
 fn is_paste_shortcut(key: KeyEvent) -> bool {
     shortcut_char(key, 'v')
-        && (key.modifiers.contains(KeyModifiers::CONTROL)
-            || key.modifiers.contains(KeyModifiers::SUPER))
+        && (key.modifiers == KeyModifiers::CONTROL
+            || is_control_shift_shortcut(key.modifiers)
+            || is_macos_shift_command(key.modifiers))
 }
 
 fn shortcut_char(key: KeyEvent, expected: char) -> bool {
@@ -413,14 +415,28 @@ fn shortcut_char(key: KeyEvent, expected: char) -> bool {
 
 fn terminal_line_boundary_key(key: KeyEvent) -> Option<KeyEvent> {
     match (key.code, key.modifiers) {
-        (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+        (KeyCode::Left, modifiers) if is_macos_shift_command(modifiers) => {
             Some(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
         }
-        (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+        (KeyCode::Right, modifiers) if is_macos_shift_command(modifiers) => {
             Some(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
         }
         _ => None,
     }
+}
+
+fn is_macos_shift_command(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::SUPER)
+        && modifiers.contains(KeyModifiers::SHIFT)
+        && !modifiers.contains(KeyModifiers::CONTROL)
+        && !modifiers.contains(KeyModifiers::ALT)
+}
+
+fn is_control_shift_shortcut(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL)
+        && modifiers.contains(KeyModifiers::SHIFT)
+        && !modifiers.contains(KeyModifiers::SUPER)
+        && !modifiers.contains(KeyModifiers::ALT)
 }
 
 /// Entry point for the default run. Returns a process exit code.
@@ -2297,7 +2313,11 @@ mod tests {
         )));
         assert!(is_copy_shortcut(KeyEvent::new(
             KeyCode::Char('c'),
-            KeyModifiers::SUPER
+            KeyModifiers::SUPER | KeyModifiers::SHIFT
+        )));
+        assert!(is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
         )));
         assert!(is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
@@ -2305,11 +2325,23 @@ mod tests {
         )));
         assert!(is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
-            KeyModifiers::SUPER
+            KeyModifiers::SUPER | KeyModifiers::SHIFT
+        )));
+        assert!(is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
         )));
         assert!(!is_copy_shortcut(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::NONE
+        )));
+        assert!(!is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::SUPER
+        )));
+        assert!(!is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::SUPER
         )));
     }
 
@@ -2332,18 +2364,27 @@ mod tests {
     #[test]
     fn macos_command_arrows_map_to_terminal_home_end() {
         assert_eq!(
-            terminal_line_boundary_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER))
-                .map(|key| (key.code, key.modifiers)),
+            terminal_line_boundary_key(KeyEvent::new(
+                KeyCode::Left,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT
+            ))
+            .map(|key| (key.code, key.modifiers)),
             Some((KeyCode::Home, KeyModifiers::NONE))
         );
         assert_eq!(
-            terminal_line_boundary_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER))
-                .map(|key| (key.code, key.modifiers)),
+            terminal_line_boundary_key(KeyEvent::new(
+                KeyCode::Right,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT
+            ))
+            .map(|key| (key.code, key.modifiers)),
             Some((KeyCode::End, KeyModifiers::NONE))
         );
         assert!(
             terminal_line_boundary_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL))
                 .is_none()
+        );
+        assert!(
+            terminal_line_boundary_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER)).is_none()
         );
     }
 
