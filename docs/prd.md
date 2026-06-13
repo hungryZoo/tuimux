@@ -46,8 +46,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - terminal mode의 Home/End와 macOS Cmd-Shift-Left/Cmd-Shift-Right는 input line start/end 이동으로 동작한다.
 - 우클릭은 TUI context menu를 열고 Copy, Paste, Cancel을 제공한다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
-- host paste는 bracketed paste event로 받아 active PTY에 전달한다.
-- 붙여넣기 직후 쉘이 표시한 paste highlight는 다음 일반 터미널 클릭에서 드래그 선택 해제처럼 사라진다.
+- host paste는 paste event 또는 raw bracketed-paste key sequence로 처리한다.
+- 붙여넣기 직후 쉘이 표시한 paste highlight는 다음 일반 left click에서 드래그 선택 해제처럼 사라진다.
 - child가 mouse tracking을 켠 경우 simple left click과 wheel은 child로 보내고 normal drag는 tuimux selection으로 쓴다.
 - child가 명시적으로 출력한 truecolor foreground/background/default reset은 부모 환경의 `NO_COLOR`와 무관하게 native terminal color로 보존한다.
 - host terminal resize는 active child PTY까지 전달되어 full-screen 앱과 shell이 새 rows/cols를 관측한다.
@@ -79,7 +79,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - daemon snapshot에서 btop의 cpu/proc panel과 mouse protocol state가 정상으로 관측된다.
 - drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C copy shortcut 정책과 `pbpaste` smoke test가 통과한다.
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V paste shortcut과 Home/End/Cmd-Shift-Left/Cmd-Shift-Right line-boundary shortcut regression test가 통과한다.
-- 붙여넣기 뒤 일반 터미널 클릭이 쉘의 paste highlight pending 상태를 해제하고 기존 drag selection 흐름을 깨지 않는다.
+- 붙여넣기 뒤 일반 left click이 쉘의 paste highlight pending 상태를 해제하고 기존 drag selection 흐름을 깨지 않는다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, right-click context menu Copy, Ctrl-C clipboard copy, foreground child SIGINT 미전달, context menu Paste, child bracketed paste wrapper 보존이 통과한다.
 - macOS window-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.

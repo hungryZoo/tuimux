@@ -234,14 +234,18 @@ try:
         os.write(sys.stdout.fileno(), b"\\x1b[47;30m" + {payload.encode()!r} + b"\\x1b[0m\\r\\n{PASTE_CLICK_WAITING}\\r\\n")
         click_data = b""
         deadline = time.time() + 5.0
-        while time.time() < deadline and b"\\x1b[D\\x1b[C" not in click_data:
+        while (
+            time.time() < deadline
+            and b"\\x1b[C" not in click_data
+            and b"\\x1bOC" not in click_data
+        ):
             ready, _, _ = select.select([fd], [], [], 0.1)
             if ready:
                 chunk = os.read(fd, 1024)
                 if not chunk:
                     break
                 click_data += chunk
-        if b"\\x1b[D\\x1b[C" in click_data:
+        if b"\\x1b[C" in click_data or b"\\x1bOC" in click_data:
             os.write(sys.stdout.fileno(), b"\\x1b[?2004l{PASTE_CLICK_OK}\\r\\n")
         else:
             os.write(sys.stdout.fileno(), b"\\x1b[?2004lPASTE_CLICK_BAD_CLEAR:" + click_data.hex().encode() + b"\\r\\n")

@@ -78,6 +78,7 @@ struct UiState {
     selection: Option<SelectionState>,
     pending_left_down: Option<PendingMouseDown>,
     paste_highlight_pending: bool,
+    raw_key_tail: String,
     context_menu: Option<ContextMenuState>,
     terminal_axis: PaneAxis,
     terminal_separators: Vec<PaneSeparator>,
@@ -133,6 +134,7 @@ const CONTEXT_MENU_ACTIONS: [ContextMenuAction; 3] = [
     ContextMenuAction::Paste,
     ContextMenuAction::Cancel,
 ];
+const RAW_BRACKETED_PASTE_END: &str = "\x1b[201~";
 
 fn andromeda_starlight() -> Color {
     Color::Rgb(0xF3, 0xD5, 0x6E)
@@ -170,6 +172,7 @@ impl UiState {
             selection: None,
             pending_left_down: None,
             paste_highlight_pending: false,
+            raw_key_tail: String::new(),
             context_menu: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
@@ -338,8 +341,32 @@ impl UiState {
             self.clear_selection();
         }
 
+        let completed_raw_paste = self.observe_raw_bracketed_paste_key(key);
         self.paste_highlight_pending = false;
         self.send_terminal_key_event(key);
+        if completed_raw_paste {
+            self.paste_highlight_pending = true;
+        }
+    }
+
+    fn observe_raw_bracketed_paste_key(&mut self, key: KeyEvent) -> bool {
+        let Some(ch) = raw_key_sequence_char(key) else {
+            self.raw_key_tail.clear();
+            return false;
+        };
+
+        if ch == '\x1b' {
+            self.raw_key_tail.clear();
+        }
+        self.raw_key_tail.push(ch);
+        if self.raw_key_tail.len() > RAW_BRACKETED_PASTE_END.len() {
+            let excess = self
+                .raw_key_tail
+                .len()
+                .saturating_sub(RAW_BRACKETED_PASTE_END.len());
+            self.raw_key_tail.drain(..excess);
+        }
+        self.raw_key_tail.ends_with(RAW_BRACKETED_PASTE_END)
     }
 
     fn send_terminal_key_event(&mut self, key: KeyEvent) {
@@ -398,7 +425,6 @@ impl UiState {
         }
 
         self.paste_highlight_pending = false;
-        self.send_terminal_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         self.send_terminal_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     }
 
@@ -448,6 +474,18 @@ fn terminal_line_boundary_key(key: KeyEvent) -> Option<KeyEvent> {
         (KeyCode::Right, modifiers) if is_macos_shift_command(modifiers) => {
             Some(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
         }
+        _ => None,
+    }
+}
+
+fn raw_key_sequence_char(key: KeyEvent) -> Option<char> {
+    if key.modifiers != KeyModifiers::NONE {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Esc => Some('\x1b'),
+        KeyCode::Char(ch) if ch.is_ascii() => Some(ch),
         _ => None,
     }
 }
@@ -629,6 +667,10 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     continue;
                 }
 
+                if should_clear_paste_highlight_for_click(state, &mouse) {
+                    state.clear_paste_highlight_on_click();
+                }
+
                 if handle_pending_left_down(state, &mouse) {
                     continue;
                 }
@@ -679,9 +721,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     let child_wants_mouse = state.pane_mouse_protocol_active(pane_row);
                     let selection_gesture =
                         mouse.modifiers.contains(KeyModifiers::SHIFT) || !child_wants_mouse;
-                    if clicked_left && !child_wants_mouse {
-                        state.clear_paste_highlight_on_click();
-                    }
 
                     if !child_wants_mouse {
                         match mouse.kind {
@@ -826,6 +865,18 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
             false
         }
     }
+}
+
+fn should_clear_paste_highlight_for_click(state: &UiState, mouse: &MouseEvent) -> bool {
+    if !state.paste_highlight_pending
+        || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+    {
+        return false;
+    }
+
+    terminal_cell_at_pane(mouse.column, mouse.row, &state.regions)
+        .map(|(pane_row, _, _)| !state.pane_mouse_protocol_active(pane_row))
+        .unwrap_or(true)
 }
 
 fn handle_context_menu_key(state: &mut UiState, key: KeyEvent) -> bool {
@@ -2042,6 +2093,7 @@ mod tests {
             selection: None,
             pending_left_down: None,
             paste_highlight_pending: false,
+            raw_key_tail: String::new(),
             context_menu: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
@@ -2704,6 +2756,53 @@ mod tests {
         state.clear_paste_highlight_on_click();
 
         assert!(!state.paste_highlight_pending);
+    }
+
+    #[test]
+    fn paste_highlight_click_clear_includes_ui_chrome_but_skips_mouse_apps() {
+        let mut state = test_state();
+        state.paste_highlight_pending = true;
+        state.regions.terminal_pane_count = 1;
+        state.regions.terminal_panes[0] = Rect::new(0, 0, 10, 5);
+
+        let chrome_click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(should_clear_paste_highlight_for_click(
+            &state,
+            &chrome_click
+        ));
+
+        state.terminal_mouse_protocol_active = true;
+        let terminal_click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!should_clear_paste_highlight_for_click(
+            &state,
+            &terminal_click
+        ));
+    }
+
+    #[test]
+    fn raw_bracketed_paste_end_marks_highlight_pending() {
+        let mut state = test_state();
+
+        for ch in "\x1b[200~raw text\x1b[201~".chars() {
+            let code = if ch == '\x1b' {
+                KeyCode::Esc
+            } else {
+                KeyCode::Char(ch)
+            };
+            state.send_terminal_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+
+        assert!(state.paste_highlight_pending);
     }
 
     #[test]
