@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use serde::{Deserialize, Serialize};
 
-use crate::native_mux::{NativeMux, Pane, PaneAxis, PaneRect, PaneSeparator, Session, Window};
+use crate::native_mux::{NativeMux, Pane, PaneAxis, PaneRect, PaneSeparator, Window};
 use crate::terminal::{SelectionRange, TerminalSpan};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,10 +55,8 @@ impl Default for TerminalSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MuxSnapshot {
-    pub sessions: Vec<Session>,
     pub windows: Vec<Window>,
     pub panes: Vec<Pane>,
-    pub current_session: String,
     pub terminal: TerminalSnapshot,
 }
 
@@ -70,16 +68,17 @@ pub enum MuxBackend {
 }
 
 impl MuxBackend {
-    pub fn new(initial_session: &str, cwd: PathBuf, width: u16, height: u16) -> Result<Self> {
+    pub fn new(socket_scope: &str, cwd: PathBuf, width: u16, height: u16) -> Result<Self> {
         #[cfg(unix)]
         {
             let _ = (width, height);
-            return RemoteMuxClient::connect_or_spawn(initial_session, cwd).map(MuxBackend::Remote);
+            return RemoteMuxClient::connect_or_spawn(socket_scope, cwd).map(MuxBackend::Remote);
         }
 
         #[cfg(not(unix))]
         {
-            NativeMux::new(initial_session, cwd, width, height).map(MuxBackend::Local)
+            let _ = socket_scope;
+            NativeMux::new(cwd, width, height).map(MuxBackend::Local)
         }
     }
 
@@ -99,22 +98,6 @@ impl MuxBackend {
                 mux.reap_finished_windows(width, height)?;
                 Ok(snapshot)
             }
-        }
-    }
-
-    pub fn create_next_session(&mut self, width: u16, height: u16) -> Result<String> {
-        match self {
-            #[cfg(unix)]
-            MuxBackend::Remote(client) => client.create_next_session(width, height),
-            MuxBackend::Local(mux) => mux.create_next_session(width, height),
-        }
-    }
-
-    pub fn switch_session_by_row(&mut self, row: usize) -> Result<()> {
-        match self {
-            #[cfg(unix)]
-            MuxBackend::Remote(client) => client.switch_session_by_row(row),
-            MuxBackend::Local(mux) => mux.switch_session_by_row(row),
         }
     }
 
@@ -231,10 +214,8 @@ fn local_snapshot(
     let terminal = terminal_snapshot(mux, width, height, selection);
 
     MuxSnapshot {
-        sessions: mux.session_infos(),
         windows: mux.window_infos(),
         panes: mux.pane_infos(),
-        current_session: mux.current_session_name().to_string(),
         terminal,
     }
 }
@@ -508,13 +489,6 @@ enum Request {
         height: u16,
         selection: Option<SelectionRange>,
     },
-    CreateNextSession {
-        width: u16,
-        height: u16,
-    },
-    SwitchSessionByRow {
-        row: usize,
-    },
     SelectWindowByRow {
         row: usize,
     },
@@ -552,7 +526,6 @@ enum Request {
 enum Response {
     Ok,
     Snapshot(MuxSnapshot),
-    Name(String),
     Index(u32),
     Scrollback(usize),
     Text(String),
@@ -580,8 +553,8 @@ mod unix_remote {
     }
 
     impl RemoteMuxClient {
-        pub fn connect_or_spawn(initial_session: &str, cwd: PathBuf) -> Result<Self> {
-            let socket = socket_path(initial_session);
+        pub fn connect_or_spawn(socket_scope: &str, cwd: PathBuf) -> Result<Self> {
+            let socket = socket_path(socket_scope);
             if let Ok(client) = Self::connect(&socket) {
                 return Ok(client);
             }
@@ -599,8 +572,6 @@ mod unix_remote {
                 .arg("--daemon")
                 .arg("--socket")
                 .arg(&socket)
-                .arg("--session")
-                .arg(initial_session)
                 .arg("--cwd")
                 .arg(&cwd)
                 .stdin(Stdio::null())
@@ -676,17 +647,6 @@ mod unix_remote {
             }
         }
 
-        pub fn create_next_session(&mut self, width: u16, height: u16) -> Result<String> {
-            match self.request(Request::CreateNextSession { width, height })? {
-                Response::Name(name) => Ok(name),
-                other => bail!("unexpected daemon response: {other:?}"),
-            }
-        }
-
-        pub fn switch_session_by_row(&mut self, row: usize) -> Result<()> {
-            expect_ok(self.request(Request::SwitchSessionByRow { row })?)
-        }
-
         pub fn select_window_by_row(&mut self, row: usize) -> Result<()> {
             expect_ok(self.request(Request::SelectWindowByRow { row })?)
         }
@@ -738,8 +698,8 @@ mod unix_remote {
         }
     }
 
-    pub fn run_daemon(socket: PathBuf, initial_session: &str, cwd: PathBuf) -> i32 {
-        match run_daemon_inner(socket, initial_session, cwd) {
+    pub fn run_daemon(socket: PathBuf, cwd: PathBuf) -> i32 {
+        match run_daemon_inner(socket, cwd) {
             Ok(()) => 0,
             Err(err) => {
                 eprintln!("tuimux daemon: {err:#}");
@@ -748,13 +708,13 @@ mod unix_remote {
         }
     }
 
-    pub fn stop_daemon(initial_session: &str) -> Result<()> {
-        let socket = socket_path(initial_session);
+    pub fn stop_daemon(socket_scope: &str) -> Result<()> {
+        let socket = socket_path(socket_scope);
         let mut client = RemoteMuxClient::connect(&socket)?;
         expect_ok(client.request(Request::Shutdown)?)
     }
 
-    fn run_daemon_inner(socket: PathBuf, initial_session: &str, cwd: PathBuf) -> Result<()> {
+    fn run_daemon_inner(socket: PathBuf, cwd: PathBuf) -> Result<()> {
         if let Some(parent) = socket.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -765,7 +725,7 @@ mod unix_remote {
             .with_context(|| format!("could not bind {}", socket.display()))?;
         listener.set_nonblocking(true)?;
 
-        let mux = Arc::new(Mutex::new(NativeMux::new(initial_session, cwd, 80, 24)?));
+        let mux = Arc::new(Mutex::new(NativeMux::new(cwd, 80, 24)?));
         let shutdown = Arc::new(AtomicBool::new(false));
 
         while !shutdown.load(Ordering::SeqCst) {
@@ -846,12 +806,6 @@ mod unix_remote {
                     Ok(_) => Response::Snapshot(snapshot),
                     Err(err) => Response::Error(err.to_string()),
                 }
-            }
-            Request::CreateNextSession { width, height } => {
-                into_response(mux.create_next_session(width, height), Response::Name)
-            }
-            Request::SwitchSessionByRow { row } => {
-                into_response(mux.switch_session_by_row(row), |_| Response::Ok)
             }
             Request::SelectWindowByRow { row } => {
                 into_response(mux.select_window_by_row(row), |_| Response::Ok)
@@ -944,9 +898,7 @@ mod unix_remote {
                     .as_nanos()
             ));
             let daemon_socket = socket.clone();
-            let daemon = thread::spawn(move || {
-                run_daemon_inner(daemon_socket, "multi-test", PathBuf::from("."))
-            });
+            let daemon = thread::spawn(move || run_daemon_inner(daemon_socket, PathBuf::from(".")));
             wait_for_socket(&socket);
 
             let mut first = UnixStream::connect(&socket).expect("first client connects");
@@ -1001,9 +953,7 @@ mod unix_remote {
                     .as_nanos()
             ));
             let daemon_socket = socket.clone();
-            let daemon = thread::spawn(move || {
-                run_daemon_inner(daemon_socket, "scroll-test", PathBuf::from("."))
-            });
+            let daemon = thread::spawn(move || run_daemon_inner(daemon_socket, PathBuf::from(".")));
             wait_for_socket(&socket);
 
             let mut client = UnixStream::connect(&socket).expect("client connects");
@@ -1072,9 +1022,7 @@ mod unix_remote {
                     .as_nanos()
             ));
             let daemon_socket = socket.clone();
-            let daemon = thread::spawn(move || {
-                run_daemon_inner(daemon_socket, "altscreen-test", PathBuf::from("."))
-            });
+            let daemon = thread::spawn(move || run_daemon_inner(daemon_socket, PathBuf::from(".")));
             wait_for_socket(&socket);
 
             let mut client = UnixStream::connect(&socket).expect("client connects");
@@ -1154,9 +1102,7 @@ mod unix_remote {
                     .as_nanos()
             ));
             let daemon_socket = socket.clone();
-            let daemon = thread::spawn(move || {
-                run_daemon_inner(daemon_socket, "selection-test", PathBuf::from("."))
-            });
+            let daemon = thread::spawn(move || run_daemon_inner(daemon_socket, PathBuf::from(".")));
             wait_for_socket(&socket);
 
             let mut client = UnixStream::connect(&socket).expect("client connects");
@@ -1238,9 +1184,7 @@ mod unix_remote {
                     .as_nanos()
             ));
             let daemon_socket = socket.clone();
-            let daemon = thread::spawn(move || {
-                run_daemon_inner(daemon_socket, "window-test", PathBuf::from("."))
-            });
+            let daemon = thread::spawn(move || run_daemon_inner(daemon_socket, PathBuf::from(".")));
             wait_for_socket(&socket);
 
             let mut client = UnixStream::connect(&socket).expect("client connects");
@@ -1315,9 +1259,7 @@ mod unix_remote {
                     .as_nanos()
             ));
             let daemon_socket = socket.clone();
-            let daemon = thread::spawn(move || {
-                run_daemon_inner(daemon_socket, "window-title-test", PathBuf::from("."))
-            });
+            let daemon = thread::spawn(move || run_daemon_inner(daemon_socket, PathBuf::from(".")));
             wait_for_socket(&socket);
 
             let mut client = UnixStream::connect(&socket).expect("client connects");
@@ -1382,9 +1324,7 @@ mod unix_remote {
                     .as_nanos()
             ));
             let daemon_socket = socket.clone();
-            let daemon = thread::spawn(move || {
-                run_daemon_inner(daemon_socket, "child-exit-test", PathBuf::from("."))
-            });
+            let daemon = thread::spawn(move || run_daemon_inner(daemon_socket, PathBuf::from(".")));
             wait_for_socket(&socket);
 
             let mut client = UnixStream::connect(&socket).expect("client connects");
@@ -1647,13 +1587,13 @@ mod unix_remote {
         }
     }
 
-    fn socket_path(initial_session: &str) -> PathBuf {
+    fn socket_path(socket_scope: &str) -> PathBuf {
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
         let mut hasher = DefaultHasher::new();
         env!("CARGO_PKG_VERSION").hash(&mut hasher);
-        initial_session.hash(&mut hasher);
+        socket_scope.hash(&mut hasher);
         let hash = hasher.finish();
-        let safe = sanitize(initial_session);
+        let safe = sanitize(socket_scope);
         PathBuf::from("/tmp")
             .join(format!("tuimux-{user}"))
             .join(format!("{safe}-{hash:016x}.sock"))
@@ -1672,7 +1612,7 @@ mod unix_remote {
             .take(24)
             .collect::<String>();
         if out.is_empty() {
-            out.push_str("session");
+            out.push_str("default");
         }
         out
     }
@@ -1682,12 +1622,12 @@ mod unix_remote {
 pub use unix_remote::{run_daemon, stop_daemon, RemoteMuxClient};
 
 #[cfg(not(unix))]
-pub fn run_daemon(_socket: PathBuf, _initial_session: &str, _cwd: PathBuf) -> i32 {
+pub fn run_daemon(_socket: PathBuf, _cwd: PathBuf) -> i32 {
     eprintln!("tuimux daemon mode is not available on this platform yet");
     1
 }
 
 #[cfg(not(unix))]
-pub fn stop_daemon(_initial_session: &str) -> Result<()> {
+pub fn stop_daemon(_socket_scope: &str) -> Result<()> {
     bail!("tuimux daemon mode is not available on this platform yet")
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end macOS smoke test for tuimux session and window workflow."""
+"""End-to-end macOS smoke test for tuimux window workflow."""
 
 from __future__ import annotations
 
@@ -33,9 +33,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="tuimux binary to run. Default: target/debug/tuimux",
     )
     parser.add_argument(
+        "--socket-scope",
+        default=f"window-flow-smoke-{os.getpid()}",
+        help="temporary tuimux daemon socket scope",
+    )
+    parser.add_argument(
         "--session",
-        default=f"session-flow-smoke-{os.getpid()}",
-        help="temporary tuimux session name",
+        dest="socket_scope",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--timeout",
@@ -52,9 +57,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 class PtyClient:
-    def __init__(self, binary: Path, session: str) -> None:
+    def __init__(self, binary: Path, socket_scope: str) -> None:
         self.binary = binary
-        self.session = session
+        self.socket_scope = socket_scope
         self.repo_root = Path(__file__).resolve().parents[1]
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
@@ -62,7 +67,7 @@ class PtyClient:
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         self.process = subprocess.Popen(
-            [str(binary), "--session", session],
+            [str(binary), "--socket-scope", socket_scope],
             cwd=self.repo_root,
             stdin=slave,
             stdout=slave,
@@ -121,9 +126,9 @@ class PtyClient:
         return bytes(self.buffer[-5000:]).decode("utf-8", "replace")
 
 
-def stop_daemon(binary: Path, session: str) -> None:
+def stop_daemon(binary: Path, socket_scope: str) -> None:
     subprocess.run(
-        [str(binary), "--stop-server", "--session", session],
+        [str(binary), "--stop-server", "--socket-scope", socket_scope],
         cwd=Path(__file__).resolve().parents[1],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -158,12 +163,10 @@ def run_window_flow(client: PtyClient, timeout: float) -> None:
 
     client.clear_buffer()
     client.write(b"n")
-    wait_or_fail(client, "created", timeout, "new window status")
     wait_or_fail(client, "2:", timeout, "second window row")
 
     client.clear_buffer()
     client.write(b"x")
-    wait_or_fail(client, "window 2", timeout, "kill active window status")
     wait_or_fail(client, "1:", timeout, "remaining first window row")
 
 
@@ -194,7 +197,7 @@ def main() -> int:
         raise SystemExit("this smoke test currently targets macOS")
 
     try:
-        first = PtyClient(binary, args.session)
+        first = PtyClient(binary, args.socket_scope)
         try:
             first.read_for(1.5)
             shell(
@@ -209,7 +212,7 @@ def main() -> int:
         finally:
             first.close()
 
-        second = PtyClient(binary, args.session)
+        second = PtyClient(binary, args.socket_scope)
         try:
             second.read_for(1.5)
             wait_or_fail(second, "TUIMUX_PERSIST_SET", args.timeout, "reattached screen")
@@ -231,7 +234,7 @@ def main() -> int:
         finally:
             second.close()
 
-        print("OK macOS session flow smoke")
+        print("OK macOS window flow smoke")
         print("window workflow: new, kill")
         print("detach/reattach: shell state persisted")
         return 0
@@ -240,7 +243,7 @@ def main() -> int:
         return 1
     finally:
         if not args.keep_daemon:
-            stop_daemon(binary, args.session)
+            stop_daemon(binary, args.socket_scope)
 
 
 if __name__ == "__main__":

@@ -3,13 +3,13 @@
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
 v0.2.0-alpha.33 keeps the default runtime on the Rust-native path, restores the
-boxed Session/Detach/WINDOWS rail beside the live terminal, and fixes btop-style
+boxed Detach/WINDOWS/STATUS rail beside the live terminal, and fixes btop-style
 cursor positioning in the terminal emulator without adding top or bottom status
 bars. This prerelease keeps the OSC 52 clipboard loop from alpha.29 and
 preserves the recent OSC title, scrollback, alternate-screen, resize, color,
 selection, and child-exit checks.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
-which owns sessions, windows, and PTY-backed shell processes. `tmux` is
+which owns one persistent window list and PTY-backed shell processes. `tmux` is
 no longer required for the default UI; the old plain tmux client remains
 available only through the hidden `--native-client` fallback.
 
@@ -25,18 +25,18 @@ See:
 This is still a 0.x prerelease. Current behavior:
 
 - `tuimux` opens the Rust-native tuimux TUI by default.
-- Terminal mode is now a full tuimux shell: wide terminals show a boxed right rail with Session, Detach, WINDOWS, 3-cell ` X ` close buttons, `+ new`, and a Comet-colored STATUS panel that only shows `scroll:<count>` and jumps to bottom when clicked.
+- Terminal mode is now a full tuimux shell: wide terminals show a boxed right rail with Detach, WINDOWS, 3-cell ` X ` close buttons, `+ new`, and a Comet-colored STATUS panel that only shows `scroll:<count>` and jumps to bottom when clicked.
 - Narrow terminals temporarily hide terminal-mode chrome instead of switching to compact top tabs, so apps such as `btop` can keep an honest 80-column PTY.
 - The PTY parser normalizes HVP cursor-position sequences (`CSI row;col f`) used by full-screen apps such as `btop`.
 - The child PTY uses only the terminal body outside the rail, so mouse and keyboard routing do not treat TUI controls as child terminal cells.
-- `Alt-N` creates a window, `Alt-S` opens the session picker, and `Alt-Left`/`Alt-Right` switch windows while staying in terminal mode.
+- `Alt-N` creates a window, and `Alt-Left`/`Alt-Right` switch windows while staying in terminal mode.
 - Press `F12` to switch between terminal mode and navigation/sidebar mode.
-- Sessions, windows, and each active PTY-backed shell are managed by the tuimux daemon, not by tmux.
+- The window list and each active PTY-backed shell are managed by the tuimux daemon, not by tmux.
 - Navigation mode shows a right-side window list; `Tab` and arrow keys move between windows, `n` creates a window, and `x` closes the active window.
 - Child OSC 0/1/2 terminal titles are shown in the right-side window list, with static `shell` names kept as fallback.
 - Split-pane UI, daemon protocol commands, and native mux split layout state are removed from the default product path. Use separate windows instead.
 - Closing/detaching the UI keeps the daemon-owned PTYs alive for later reattach.
-- Multiple clients can connect to the same daemon concurrently; they currently share active session/window state.
+- Multiple clients can connect to the same daemon concurrently; they currently share active window state.
 - Each window runs a real shell in a PTY, parsed with `vt100` and rendered with ratatui.
 - Mouse wheel scrolls shell history when the child program is not using mouse tracking; `PageUp`/`PageDown`, `Home`, and `End` work in navigation mode, and paste while scrolled back returns to the live bottom, covered by the macOS scrollback smoke.
 - Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen; macOS PTY smoke covers reverse-video selection highlight, drag + Ctrl-C + `pbpaste`, host bracketed paste, and child bracketed paste wrappers.
@@ -51,7 +51,7 @@ This is still a 0.x prerelease. Current behavior:
 - `tuimux --native-client` is a fallback that opens a plain tmux client when tmux is installed.
 - `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
 
-Important alpha limitation: daemon state is in-memory only. Sessions survive UI
+Important alpha limitation: daemon state is in-memory only. Windows survive UI
 detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 
 ## Install
@@ -95,7 +95,7 @@ python3 scripts/smoke_macos_altscreen.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_window_title.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_osc52_clipboard.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_osc52_paste.py --binary target/debug/tuimux
-python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux
+python3 scripts/smoke_macos_window_flow.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_child_exit.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 ```

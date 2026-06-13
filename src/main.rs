@@ -57,13 +57,19 @@ struct Cli {
     #[arg(long, hide = true, value_name = "PATH")]
     socket: Option<PathBuf>,
 
-    /// Internal: stop the Rust-native multiplexer daemon for the selected session.
+    /// Internal: stop the Rust-native multiplexer daemon.
     #[arg(long, hide = true)]
     stop_server: bool,
 
-    /// tuimux session to create. Defaults to `tuimux`.
-    #[arg(long, value_name = "NAME", default_value = "tuimux")]
-    session: String,
+    /// Internal: daemon socket scope. This is not a user-facing session.
+    #[arg(
+        long = "socket-scope",
+        alias = "session",
+        hide = true,
+        value_name = "NAME",
+        default_value = "default"
+    )]
+    socket_scope: String,
 
     /// Directory to use for future workspace features (default: current directory).
     #[arg(long, value_name = "PATH")]
@@ -84,11 +90,11 @@ fn main() -> ExitCode {
             eprintln!("tuimux: --daemon requires --socket <PATH>");
             return ExitCode::FAILURE;
         };
-        return code(mux_backend::run_daemon(socket, &cli.session, base));
+        return code(mux_backend::run_daemon(socket, base));
     }
 
     if cli.stop_server {
-        return match mux_backend::stop_daemon(&cli.session) {
+        return match mux_backend::stop_daemon(&cli.socket_scope) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("tuimux: {e}");
@@ -130,7 +136,7 @@ fn main() -> ExitCode {
                     );
                 }
 
-                match run_native_tmux(&probe, &cli.session) {
+                match run_native_tmux(&probe, &cli.socket_scope) {
                     Ok(rc) => code(rc),
                     Err(e) => {
                         eprintln!("tuimux: {e}");
@@ -147,7 +153,7 @@ fn main() -> ExitCode {
             }
         }
     } else {
-        match tui::run(&cli.session, base) {
+        match tui::run(&cli.socket_scope, base) {
             Ok(rc) => code(rc),
             Err(e) => {
                 eprintln!("tuimux: {e}");
@@ -205,7 +211,7 @@ mod tests {
             daemon: false,
             socket: None,
             stop_server: false,
-            session: "tuimux".to_string(),
+            socket_scope: "default".to_string(),
             cwd: None,
         }
     }

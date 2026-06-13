@@ -57,10 +57,10 @@ self.parser.process(&bytes);
 
 `src/tui.rs`의 terminal mode rail을 다시 boxed 형태로 복구했다.
 
-- `Session` button block
 - `Detach` button block
 - `WINDOWS` block
 - window rows, 3-cell ` X ` close button, `+ new`, STATUS panel, `scroll:<count>`
+- Session panel/picker는 제품 UX에서 제거됐다.
 
 다만 top/bottom status bar와 compact top-tab fallback은 되살리지 않았다. child PTY가 rail을 제외한 body 전체를 받고, 넓은 화면에서도 최소 80 columns를 유지해야 btop 같은 앱이 안정적이다.
 

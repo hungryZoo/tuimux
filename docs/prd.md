@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 3.5
+- **문서 버전**: 3.6
 - **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.33의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.33의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 하나의 persistent mux 안에서 window list와 PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -17,19 +17,19 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - terminal pane이 “진짜 터미널”처럼 느껴지지 않으면 full-screen 앱이 깨진다.
 - mouse drag 후 선택이 사라지면 복사 흐름이 macOS Terminal과 다르게 느껴진다.
 - Ctrl-C가 항상 child program으로 전달되면 선택 텍스트 복사와 process interrupt가 충돌한다.
-- UI를 닫을 때 shell/session까지 사라지면 multiplexer로 믿고 쓰기 어렵다.
+- UI를 닫을 때 shell/window state까지 사라지면 multiplexer로 믿고 쓰기 어렵다.
 - shell이 `exit`로 종료됐는데 window가 stale 화면으로 남으면 실제 terminal이 아니라 frozen preview처럼 느껴진다.
 - alternate-screen 앱이 종료된 뒤 잔상이나 alternate-screen text가 primary scrollback에 남으면 native terminal과 다르게 느껴진다.
 - child 앱이 terminal title이나 OSC 52 clipboard copy/query를 쓰는데 UI가 무시하면 window list와 복붙 흐름이 native terminal보다 둔하게 느껴진다.
 - 한 화면을 여러 pane으로 나누는 방식은 현재 목표가 아니며, window 목록 중심 UX가 더 단순하고 안정적이다.
-- 기본 화면에서 tuimux chrome이 보이지 않으면 사용자는 그냥 shell만 감싼 wrapper처럼 느끼고, window/session 조작이 어디 있는지 알 수 없다.
+- 기본 화면에서 tuimux chrome이 보이지 않으면 사용자는 그냥 shell만 감싼 wrapper처럼 느끼고, window 조작이 어디 있는지 알 수 없다.
 - tmux 설정이나 runtime 설치가 필수이면 tuimux 자체 제품 경험을 제어하기 어렵다.
 
 ## 3. 릴리스 목표
 
 - 기본 `tuimux` 실행에서 tmux 없이 native shell window를 연다.
-- daemon이 session/window/PTY를 소유하고 UI client는 Unix socket으로 attach한다.
-- UI detach/종료 후 같은 session으로 재attach하면 shell state가 유지된다.
+- daemon이 단일 window list와 PTY를 소유하고 UI client는 Unix socket으로 attach한다.
+- UI detach/종료 후 다시 attach하면 shell state가 유지된다.
 - 같은 daemon에 여러 client가 동시에 연결될 수 있다.
 - navigation mode에서 오른쪽 window 목록을 보고 `Tab`/arrow key로 window를 전환하고, `n`/`x`로 window를 만들고 닫을 수 있다.
 - child가 OSC 0/1/2로 terminal title을 설정하면 오른쪽 window 목록에 해당 title을 표시한다.
@@ -37,7 +37,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - legacy split pane hotkey는 core state를 바꾸지 않는다.
 - terminal mode는 넓은 화면에서 boxed 오른쪽 rail만 표시하고 위/아래 status bar는 만들지 않는다. 좁은 화면의 compact top tab fallback은 잠시 비활성화해 `btop`, `htop`, `nano` 같은 앱에 정직한 PTY 크기를 준다.
 - terminal emulator는 btop이 쓰는 `CSI row;col f` HVP cursor-position sequence를 절대 위치 이동으로 처리한다.
-- terminal mode에서도 `Alt-N`, `Alt-S`, `Alt-Left`/`Alt-Right`로 window/session 작업을 할 수 있다.
+- terminal mode에서도 `Alt-N`, `Alt-Left`/`Alt-Right`로 window 작업을 할 수 있다.
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
 - selection이 있을 때 Ctrl-C는 system clipboard copy로 동작한다.
@@ -52,7 +52,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 
 ## 4. 비목표
 
-- daemon 재시작/host reboot 후 session 복구.
+- daemon 재시작/host reboot 후 window 복구.
 - tmux layout string, tmux command 호환성, plugin 호환성.
 - split-pane UX.
 - client별 독립 cursor/viewport 정책.
@@ -75,7 +75,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C + `pbpaste` smoke test가 통과한다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, host bracketed paste 전달, child bracketed paste wrapper 보존이 통과한다.
-- macOS session-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.
+- macOS window-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.
 - macOS no-tmux smoke에서 tmux 없는 PATH의 default TUI/doctor 성공과 `--native-client` 실패가 통과한다.
 - `--layout-preview`가 split-pane/resize 샘플이 아닌 terminal body + window-list preview를 출력한다.
 - macOS mouse-protocol smoke에서 child SGR mouse tracking 중 normal mouse forwarding과 Shift-drag selection override가 통과한다.

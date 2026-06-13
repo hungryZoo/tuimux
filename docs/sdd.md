@@ -1,6 +1,6 @@
 # tuimux SDD
 
-- **문서 버전**: 3.6
+- **문서 버전**: 3.9
 - **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
@@ -15,7 +15,7 @@
 - UI client가 닫혀도 daemon-owned PTY와 shell process는 살아남는다.
 - main terminal mode는 host terminal 안에 오른쪽 rail만 표시하고, rail을 제외한 body 크기를 child PTY에 제공한다.
 - 사용자는 오른쪽 window 목록에서 terminal window를 고른다.
-- terminal mode에서는 오른쪽 rail을 클릭하거나 `Alt-N`, `Alt-S`, `Alt-Left`/`Alt-Right` hotkey로 기본 window/session 작업을 바로 수행한다.
+- terminal mode에서는 오른쪽 rail을 클릭하거나 `Alt-N`, `Alt-Left`/`Alt-Right` hotkey로 기본 window 작업을 바로 수행한다.
 - split-pane 생성/resize/cycle/kill은 기본 UI, daemon protocol, native mux core에서 제거한다.
 - 기존 client가 연결된 상태에서도 새 attach, snapshot, command, shutdown request를 처리한다.
 - host terminal의 bracketed paste mode를 UI 생명주기에 맞춰 켜고 끈다.
@@ -48,7 +48,7 @@
 │ src/mux_backend.rs            │
 │   UnixListener / Request      │
 │ src/native_mux.rs             │
-│   sessions / windows / PTYs   │
+│   window list / PTYs          │
 │ src/terminal.rs               │
 │   PTY / child shell / vt100    │
 │ src/clipboard.rs              │
@@ -56,7 +56,7 @@
 └───────────────────────────────┘
 ```
 
-UI process는 terminal raw mode, alternate screen, host bracketed paste, ratatui frame, mouse/keyboard interaction, selection state를 담당한다. daemon process는 session/window state와 모든 PTY child를 소유한다.
+UI process는 terminal raw mode, alternate screen, host bracketed paste, ratatui frame, mouse/keyboard interaction, selection state를 담당한다. daemon process는 단일 mux의 window state와 모든 PTY child를 소유한다.
 
 ## 3. 모듈 설계
 
@@ -66,7 +66,7 @@ UI process는 terminal raw mode, alternate screen, host bracketed paste, ratatui
 
 - `tuimux` 기본 실행은 `tui::run()`으로 들어간다.
 - `--daemon --socket <path>`는 내부 daemon entrypoint다.
-- `--stop-server --session <name>`은 해당 session daemon에 shutdown request를 보낸다.
+- `--stop-server`는 기본 daemon에 shutdown request를 보낸다.
 - `--doctor`는 native runtime 진단을 출력한다.
 - `--layout-preview`는 정적 preview를 출력한다.
 - `--native-client`가 있을 때만 `tmux::probe()`와 tmux fallback을 사용한다.
@@ -90,7 +90,7 @@ daemon spawn 정책:
 
 - `stdin`, `stdout`, `stderr`는 null로 닫는다.
 - `setsid()`로 parent process group/session에서 분리한다.
-- socket path는 `/tmp/tuimux-$USER/<session>-<hash>.sock`처럼 짧게 만든다.
+- socket path는 `/tmp/tuimux-$USER/<scope>-<hash>.sock`처럼 짧게 만든다. scope는 내부 daemon 격리용이며 사용자-facing session이 아니다.
 - macOS `$TMPDIR`의 긴 경로는 Unix socket path length 제한에 걸릴 수 있으므로 사용하지 않는다.
 - Unix에서 daemon 연결 실패는 조용히 local fallback으로 숨기지 않는다.
 
@@ -104,15 +104,13 @@ Request::SendMouse { mouse }
 Request::NewWindow { width, height }
 Request::KillWindowByRow { row, width, height }
 Request::SelectPaneByRow { row }
-Request::CreateNextSession { width, height }
-Request::SwitchSessionByRow { row }
 Request::SelectWindowByRow { row }
 Request::ScrollPane { lines }
 Request::SelectedText { selection }
 Request::Shutdown
 ```
 
-응답은 `Ok`, `Snapshot`, `Name`, `Index`, `Scrollback`, `Text`, `Error` 중 하나다. daemon은 listener를 nonblocking mode로 두고 accepted client stream은 blocking mode로 되돌린 뒤 thread별로 처리한다. `NativeMux`는 `Arc<Mutex<NativeMux>>`로 공유한다. 여러 client가 동시에 attach할 수 있지만 독립 viewport/cursor 정책은 아직 범위 밖이며 active session/window state는 공유한다.
+응답은 `Ok`, `Snapshot`, `Index`, `Scrollback`, `Text`, `Error` 중 하나다. daemon은 listener를 nonblocking mode로 두고 accepted client stream은 blocking mode로 되돌린 뒤 thread별로 처리한다. `NativeMux`는 `Arc<Mutex<NativeMux>>`로 공유한다. 여러 client가 동시에 attach할 수 있지만 독립 viewport/cursor 정책은 아직 범위 밖이며 active window state는 공유한다.
 
 `SplitPaneRight`, `SplitPaneDown`, `SelectNextPane`, `KillActivePane`, `ResizePane` request는 default product protocol에서 제거했다. `native_mux.rs`의 split layout tree와 split/resize/kill pane core도 제거되어, legacy split hotkey는 daemon state를 변경하지 않는다.
 
@@ -122,28 +120,27 @@ Request::Shutdown
 
 ```rust
 pub struct NativeMux {
-    sessions: Vec<NativeSession>,
-    active_session: usize,
+    windows: Vec<NativeWindow>,
+    active_window: usize,
     cwd: PathBuf,
-    next_session: u32,
     next_window_id: u32,
 }
 ```
 
-각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name, single PTY pane list, active pane index만 가진다. 기본 제품 path에서는 window마다 하나의 active terminal pane이 현재 terminal body를 채운다.
+`NativeMux`는 하나의 window list와 active window index만 가진다. 각 `NativeWindow`는 index/name, single PTY pane list, active pane index만 가진다. 기본 제품 path에서는 window마다 하나의 active terminal pane이 현재 terminal body를 채운다.
 
 window list의 표시 이름은 `NativeWindow::display_name()`으로 계산한다. active pane의 `PtyTerminal::title()`이 있으면 child가 OSC 0/1/2로 설정한 title을 우선 표시하고, 없으면 기존 fallback 이름인 `shell` 또는 `shell-<n>`을 표시한다. pane metadata도 같은 방식으로 `display_title()`을 사용해 snapshot에 반영한다.
 
 주요 동작:
 
-- `NativeMux::new()`는 초기 session과 첫 shell window를 생성한다.
-- `create_next_session()`은 `tuimux-<n>` 이름으로 새 session을 만든다.
-- `new_window()`는 active session에 새 shell PTY를 추가한다.
-- `select_window_by_row()`와 `switch_session_by_row()`는 외부 process 없이 active index만 바꾼다.
-- `kill_window_by_row()`는 마지막 window가 제거될 때 replacement shell을 만들어 빈 session을 방지한다.
+- `NativeMux::new()`는 첫 shell window를 생성한다.
+- session list, active session index, session 생성/선택 함수는 core에 존재하지 않는다.
+- `new_window()`는 단일 window list에 새 shell PTY를 추가한다.
+- `select_window_by_row()`는 외부 process 없이 active window index만 바꾼다.
+- `kill_window_by_row()`는 마지막 window가 제거될 때 replacement shell을 만들어 빈 mux를 방지한다.
 - `select_pane_by_row()`는 remote snapshot 호환을 위한 안전장치로 남아 있지만 기본 UI에서 pane 목록은 노출하지 않는다.
 - `drain_all()`은 모든 window/pane의 pending PTY output을 parser에 반영한다.
-- `reap_finished_windows()`는 종료된 PTY child를 가진 window를 제거하고, session의 마지막 window가 종료되었으면 replacement shell window를 생성한다.
+- `reap_finished_windows()`는 종료된 PTY child를 가진 window를 제거하고, 마지막 window가 종료되었으면 replacement shell window를 생성한다.
 - `resize_active()`는 active window의 terminal rect에 맞춰 PTY와 parser screen size를 갱신한다.
 
 split 관련 `PaneNode::Split`, split/resize/kill pane 함수, pane separator 계산은 core에서 제거했다. `active_pane_refs()`는 항상 active window의 single PTY pane을 전체 terminal rect로 보고하고, `active_pane_separators()`는 빈 목록을 반환한다.
@@ -223,10 +220,8 @@ pub struct PtyTerminal {
 ```rust
 struct UiState {
     mux: MuxBackend,
-    sessions: Vec<Session>,
     windows: Vec<Window>,
     panes: Vec<Pane>,
-    current_session: String,
     terminal_rows: Vec<Vec<TerminalSpan>>,
     terminal_cursor: Option<(u16, u16)>,
     terminal_mouse_protocol_active: bool,
@@ -237,17 +232,17 @@ struct UiState {
 
 두 가지 mode가 있다.
 
-- **Terminal mode**: 첫 화면이자 기본 mode. 넓은 화면에서는 오른쪽 boxed rail이 session/window/action 조작을 제공하고, terminal body는 rail만 제외한 나머지 전체 영역을 차지한다. 좁은 화면에서는 compact top tabs를 만들지 않고 terminal body가 전체 화면을 사용한다. 키 입력은 기본적으로 active PTY로 간다.
-- **Navigation mode**: `F12`로 진입한다. main pane border와 right sidebar가 보이고 session/window 조작을 할 수 있다.
+- **Terminal mode**: 첫 화면이자 기본 mode. 넓은 화면에서는 오른쪽 boxed rail이 window/action 조작을 제공하고, terminal body는 rail만 제외한 나머지 전체 영역을 차지한다. 좁은 화면에서는 compact top tabs를 만들지 않고 terminal body가 전체 화면을 사용한다. 키 입력은 기본적으로 active PTY로 간다.
+- **Navigation mode**: `F12`로 진입한다. main pane border와 right sidebar가 보이고 window 조작을 할 수 있다.
 
-Terminal mode는 넓은 화면에서 TUI rail을 기본으로 노출해 사용자가 multiplexer 기능을 마우스로 바로 쓰게 한다. rail은 100컬럼 이상에서만 표시하고, 표시될 때도 child PTY가 최소 80컬럼을 유지하도록 폭을 제한한다. 100컬럼 미만이거나 높이가 낮은 화면에서는 rail과 compact top-tab fallback을 모두 숨겨 full-screen 프로그램이 실제 host 크기에 가까운 PTY를 받도록 한다. Navigation mode의 오른쪽 sidebar는 같은 session, detach, status, windows 목록을 focus된 조작면으로 다시 보여준다.
+Terminal mode는 넓은 화면에서 TUI rail을 기본으로 노출해 사용자가 multiplexer 기능을 마우스로 바로 쓰게 한다. rail은 100컬럼 이상에서만 표시하고, 표시될 때도 child PTY가 최소 80컬럼을 유지하도록 폭을 제한한다. 100컬럼 미만이거나 높이가 낮은 화면에서는 rail과 compact top-tab fallback을 모두 숨겨 full-screen 프로그램이 실제 host 크기에 가까운 PTY를 받도록 한다. Navigation mode의 오른쪽 sidebar는 detach, status, windows 목록을 focus된 조작면으로 다시 보여준다.
 
 terminal row 렌더링은 `terminal_row_spans_for_width(row, width)`를 통해 각 row 끝을 default-style 공백으로 채운다. ratatui backend가 짧은 `Line`만 받으면 이전 frame의 더 긴 glyph가 host terminal에 남을 수 있으므로, 모든 terminal row는 현재 viewport width만큼 명시적으로 덮어쓴다. default-style 공백은 foreground/background를 강제로 칠하지 않아 host terminal color policy를 유지한다.
 
 Navigation mode 키:
 
 - `Tab`, arrow key: 이전/다음 window 선택.
-- `n`: active session에 새 shell window 생성.
+- `n`: 새 shell window 생성.
 - `x`: active window 종료. 마지막 window이면 replacement shell window를 만든다.
 - `PageUp`, `PageDown`: active terminal scrollback을 한 화면 단위로 이동.
 - `Home`: 가능한 가장 위쪽 scrollback으로 이동.
@@ -313,7 +308,7 @@ OSC 52 clipboard copy는 daemon-side terminal callback에서 처리한다. child
 ```text
 main()
   -> parse CLI
-  -> tui::run(session, cwd)
+  -> tui::run(socket_scope, cwd)
   -> UiState::bootstrap()
   -> MuxBackend::new()
   -> RemoteMuxClient::connect_or_spawn()
@@ -324,9 +319,9 @@ main()
 ### 4.2 Daemon 시작
 
 ```text
-tuimux --daemon --socket <path> --session <name> --cwd <path>
+tuimux --daemon --socket <path> --cwd <path>
   -> UnixListener::bind(socket)
-  -> NativeMux::new(session, cwd, 80, 24)
+  -> NativeMux::new(cwd, 80, 24)
   -> nonblocking accept loop
   -> spawn one worker thread per accepted client
   -> worker reads Request lines
@@ -352,8 +347,7 @@ terminal mode에서 root frame은 화면 폭에 따라 두 형태로 나뉜다. 
 
 ```text
 ┌ root ───────────────────────────────────────┐
-│ <active child PTY terminal body>             │Session │
-│                                              │Detach  │
+│ <active child PTY terminal body>             │Detach  │
 │                                              │        │
 │                                              │WINDOWS │
 │                                              │1:shell✕│
@@ -363,7 +357,7 @@ terminal mode에서 root frame은 화면 폭에 따라 두 형태로 나뉜다. 
 └──────────────────────────────────────────────┘
 ```
 
-넓은 화면의 오른쪽 rail은 session button, detach button, active/inactive window rows, 3-cell ` X ` close button, 새 window row를 boxed control로 노출한다. windows 아래에는 별도 STATUS panel을 두고 `scroll:<count>`만 표시한다. STATUS panel을 클릭하면 active terminal scrollback을 bottom으로 이동해 `scroll:0` 상태로 돌아온다. transient message인 `created window ...`는 terminal-mode status panel에 표시하지 않는다. rail rect는 `Regions`에 별도 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 rail 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
+넓은 화면의 오른쪽 rail은 detach button, active/inactive window rows, 3-cell ` X ` close button, 새 window row를 boxed control로 노출한다. Session panel/picker는 제품 UX에서 제거됐다. windows 아래에는 별도 STATUS panel을 두고 `scroll:<count>`만 표시한다. STATUS panel을 클릭하면 active terminal scrollback을 bottom으로 이동해 `scroll:0` 상태로 돌아온다. transient message인 `created window ...`는 terminal-mode status panel에 표시하지 않는다. rail rect는 `Regions`에 별도 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 rail 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
 
 ### 4.4 Window Navigation
 
@@ -421,11 +415,11 @@ key input, paste, child mouse event는 `PtyTerminal::scrollback_bottom()`을 먼
 ```text
 crossterm KeyEvent
   -> F12이면 mode toggle
-  -> Alt-N / Alt-S / Alt-Left / Alt-Right이면 terminal mode에서도 tuimux command 처리
+  -> Alt-N / Alt-Left / Alt-Right이면 terminal mode에서도 tuimux command 처리
   -> terminal_mode이면 UiState::send_terminal_key()
      -> Ctrl-C + selection이면 clipboard copy
      -> 아니면 Request::SendKey
-  -> navigation mode이면 sidebar/session/window/scrollback shortcut 처리
+  -> navigation mode이면 sidebar/window/scrollback shortcut 처리
 ```
 
 ```text
@@ -435,7 +429,7 @@ crossterm MouseEvent
   -> mouse wheel + child mouse off이면 scrollback 처리
   -> selection gesture이면 selection state 갱신
   -> terminal mode이면 Request::SendMouse
-  -> navigation mode이면 hit_test로 sidebar/modal action 처리
+  -> navigation mode이면 hit_test로 sidebar action 처리
 ```
 
 ```text
@@ -453,7 +447,7 @@ F12, q, Esc, or Detach button
   -> UI restores host terminal
   -> UI process exits
   -> daemon remains alive with PPID=1 on macOS test path
-  -> same `tuimux --session <name>` connects to existing socket
+  -> same `tuimux` connects to existing socket
   -> shell state and PTY screen continue from daemon state
 ```
 
@@ -463,7 +457,7 @@ F12, q, Esc, or Detach button
 
 - version parser와 legacy tmux fallback argument tests.
 - doctor의 `TERM` handling tests.
-- native mux session/window metadata tests.
+- native mux window metadata tests.
 - native mux single terminal-body pane regression test.
 - layout preview deterministic output tests.
 - terminal key/mouse encoder unit tests.
@@ -473,7 +467,7 @@ F12, q, Esc, or Detach button
 - crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
 - terminal row padding regression test: 긴 row 이후 짧은 row를 그렸을 때 stale glyph가 남지 않는지 확인.
 - UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거.
-- terminal-mode rail regression tests: 넓은 기본 terminal mode render buffer에 Session/Detach/WINDOWS rail, 3-cell ` X ` close button, STATUS panel, `scroll:<count>`가 찍히고, rail과 STATUS click이 terminal cell hit-test에서 제외되는지 확인. 좁은 화면에서는 compact top tab fallback 없이 전체 root가 terminal body가 되는지 확인.
+- terminal-mode rail regression tests: 넓은 기본 terminal mode render buffer에 Detach/WINDOWS rail, 3-cell ` X ` close button, STATUS panel, `scroll:<count>`가 찍히고, Session panel이 없으며, rail과 STATUS click이 terminal cell hit-test에서 제외되는지 확인. 좁은 화면에서는 compact top tab fallback 없이 전체 root가 terminal body가 되는지 확인.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
 - daemon child-exit regression test: shell `exit` 직전 출력이 한 snapshot에 노출되고, 마지막 shell `exit` 후 replacement shell이 명령을 받을 수 있으며, non-last shell `exit` 후 window list에서 제거되는지 확인.
@@ -492,7 +486,7 @@ F12, q, Esc, or Detach button
 - macOS window-title smoke script: 실제 TUI client에서 child OSC title이 오른쪽 window list row에 표시되는지 확인.
 - macOS OSC 52 clipboard smoke script: 실제 TUI client에서 child OSC 52 copy 요청이 macOS `pbpaste`에 반영되는지 확인.
 - macOS OSC 52 paste smoke script: 실제 TUI client에서 child OSC 52 paste query가 macOS clipboard text를 PTY response로 돌려받는지 확인.
-- macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
+- macOS window-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, `x` window 종료, detach, reattach 후 shell state 유지를 확인.
 - macOS child-exit smoke script: 실제 TUI client에서 마지막 shell `exit` 후 replacement shell 명령 실행, non-last shell `exit` 후 오른쪽 window list 제거를 확인.
 - macOS no-tmux smoke script: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `SHELL=/bin/sh` 환경에서 `--doctor`, default TUI PTY shell, `--native-client` failure boundary를 확인.
 
@@ -516,12 +510,12 @@ F12, q, Esc, or Detach button
 - `python3 scripts/smoke_macos_window_title.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_osc52_clipboard.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_osc52_paste.py --binary target/debug/tuimux`
-- `python3 scripts/smoke_macos_session_flow.py --binary target/debug/tuimux`
+- `python3 scripts/smoke_macos_window_flow.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_child_exit.py --binary target/debug/tuimux`
 - `python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux`
-- `tuimux --session persist-smoke`에서 `export TUIMUX_PERSIST_MARK=alive`
+- `tuimux`에서 `export TUIMUX_PERSIST_MARK=alive`
 - UI 종료 후 daemon `PPID=1`과 `/tmp/tuimux-$USER/*.sock` 유지 확인
-- 같은 session reattach 후 `echo $TUIMUX_PERSIST_MARK`가 `alive` 출력
+- 같은 daemon에 reattach 후 `echo $TUIMUX_PERSIST_MARK`가 `alive` 출력
 - `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
 - mouse drag selection, Ctrl-C, `pbpaste`가 선택 텍스트 반환 확인
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
@@ -557,8 +551,8 @@ curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.33/sc
 
 ## 7. 알려진 한계와 다음 단계
 
-- daemon state는 memory-only라 daemon 종료, reboot 후 session이 복구되지 않는다.
-- 여러 client는 같은 active session/window state를 공유한다. client별 독립 viewport/cursor는 아직 없다.
+- daemon state는 memory-only라 daemon 종료, reboot 후 window가 복구되지 않는다.
+- 여러 client는 같은 active window state를 공유한다. client별 독립 viewport/cursor는 아직 없다.
 - split-pane UX는 deprecated이며 native mux core에는 split layout state가 없다. window-list workflow를 우선한다.
 - Windows named-pipe daemon backend가 없다.
 - tmux command/plugin/config 호환성은 없다.

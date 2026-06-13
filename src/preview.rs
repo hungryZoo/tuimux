@@ -1,25 +1,22 @@
 //! Simplified layout preview (SRS §5.1).
 //!
 //! Renders the tuimux screen as a static text preview: a center terminal area,
-//! a compact right sidebar with a button-like session name, a red Detach button,
-//! vertical window tabs, and a centered session dialog scaffold. The early
-//! split panes, explorer, bottom menu bar, and PROCS panel were intentionally
-//! removed.
+//! a compact right sidebar with a red Detach button and vertical window tabs.
+//! The early split panes, explorer, bottom menu bar, session picker, and PROCS
+//! panel were intentionally removed.
 
 use std::path::Path;
 
 /// Preview content. The live client derives equivalent data from NativeMux;
 /// this static data keeps --layout-preview reproducible.
 pub struct PreviewData {
-    pub sessions: Vec<(&'static str, u32, bool)>, // (name, windows, active)
-    pub windows: Vec<(u32, &'static str, bool)>,  // (index, name, active)
+    pub windows: Vec<(u32, &'static str, bool)>, // (index, name, active)
     pub terminal_lines: Vec<&'static str>,
 }
 
 impl Default for PreviewData {
     fn default() -> Self {
         PreviewData {
-            sessions: vec![("dev", 3, true), ("work", 2, false), ("scratch", 1, false)],
             windows: vec![(1, "build", true), (2, "logs", false), (3, "ssh", false)],
             terminal_lines: vec![
                 "$ cargo test --quiet",
@@ -29,7 +26,7 @@ impl Default for PreviewData {
                 "",
                 "$ btop",
                 "  PTY body runs beside the integrated tuimux rail",
-                "  click + new, close, Session, or Detach in the rail",
+                "  click + new, close, Detach, or STATUS in the rail",
             ],
         }
     }
@@ -53,17 +50,6 @@ fn fit(s: &str, width: usize) -> String {
     } else {
         format!("{s}{}", " ".repeat(width - count))
     }
-}
-
-/// Build a "name … info" row that fits `width`, right-aligning the info.
-fn name_info_row(name: &str, info: &str, width: usize) -> String {
-    let info_len = info.chars().count();
-    if width <= info_len + 1 {
-        return fit(name, width);
-    }
-    let name_room = width - info_len - 1;
-    let name_fit = fit(name, name_room);
-    format!("{name_fit} {info}")
 }
 
 /// Render the simplified layout to a string (newline-separated rows), sized to
@@ -108,7 +94,6 @@ pub fn render(_base: &Path, data: &PreviewData, width: usize, height: usize) -> 
     out.push_str(&"─".repeat(right_w));
     out.push('┘');
 
-    overlay_session_dialog(&mut out, data, width);
     out
 }
 
@@ -126,7 +111,6 @@ fn main_column(panes: &[&str], w: usize, h: usize) -> Vec<String> {
 fn right_column(data: &PreviewData, w: usize, h: usize) -> Vec<String> {
     let mut rows = Vec::with_capacity(h);
 
-    rows.push(center_button("Session", w));
     rows.push(center_button("Detach", w));
     rows.push(fit(&"─".repeat(w), w));
     rows.push(fit("WINDOWS", w));
@@ -148,10 +132,10 @@ fn right_column(data: &PreviewData, w: usize, h: usize) -> Vec<String> {
 }
 
 fn row_with_close(label: &str, w: usize) -> String {
-    if w <= 2 {
-        return fit("✕", w);
+    if w <= 3 {
+        return fit(" X ", w);
     }
-    let close = "✕";
+    let close = " X ";
     let label_w = w.saturating_sub(close.chars().count() + 1);
     format!("{} {}", fit(label, label_w), close)
 }
@@ -165,41 +149,6 @@ fn center_button(label: &str, w: usize) -> String {
     let left = (w - len) / 2;
     let right = w - len - left;
     format!("{}{}{}", " ".repeat(left), button, " ".repeat(right))
-}
-
-fn overlay_session_dialog(out: &mut String, data: &PreviewData, width: usize) {
-    let dialog_w = 34usize.min(width.saturating_sub(4)).max(24);
-    let pad = (width.saturating_sub(dialog_w)) / 2;
-    let indent = " ".repeat(pad);
-
-    out.push('\n');
-    out.push_str(&indent);
-    out.push('┌');
-    out.push_str(&"─".repeat(dialog_w - 2));
-    out.push_str("┐\n");
-    for (name, windows, active) in &data.sessions {
-        out.push_str(&indent);
-        out.push('│');
-        let mark = if *active { "●" } else { " " };
-        out.push_str(&name_info_row(
-            &format!(" {mark} {name}"),
-            &format!("{windows} win"),
-            dialog_w - 2,
-        ));
-        out.push_str("│\n");
-    }
-    out.push_str(&indent);
-    out.push('│');
-    out.push_str(&fit(" ─────────────────────────────", dialog_w - 2));
-    out.push_str("│\n");
-    out.push_str(&indent);
-    out.push('│');
-    out.push_str(&fit(" [ New Session ]   [ Detach ]", dialog_w - 2));
-    out.push_str("│\n");
-    out.push_str(&indent);
-    out.push('└');
-    out.push_str(&"─".repeat(dialog_w - 2));
-    out.push('┘');
 }
 
 /// Ensure exactly `h` rows, each exactly `w` columns wide.
@@ -224,14 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn name_info_row_right_aligns_info() {
-        let row = name_info_row("main.rs", "12K", 16);
-        assert_eq!(row.chars().count(), 16);
-        assert!(row.ends_with("12K"));
-        assert!(row.starts_with("main.rs"));
-    }
-
-    #[test]
     fn render_produces_rectangular_output_with_simplified_sidebar() {
         let data = PreviewData::default();
         let out = render(Path::new(env!("CARGO_MANIFEST_DIR")), &data, 80, 24);
@@ -243,25 +184,17 @@ mod tests {
         );
 
         assert!(
-            out.contains("[ Session ]"),
-            "sidebar session button should be labeled Session, not the session name"
-        );
-        assert!(
             out.contains("[ Detach ]"),
             "detach should render as a button label only"
         );
         assert!(out.contains("WINDOWS"));
         assert!(
-            out.contains('✕'),
+            out.contains(" X "),
             "window rows should expose a right-side close button"
         );
         assert!(
-            out.contains("[ New Session ]"),
-            "session dialog should expose an explicit New Session button"
-        );
-        assert!(
-            out.contains("● dev"),
-            "session list still shows the active session name"
+            !out.contains("Session"),
+            "preview should not expose sessions"
         );
 
         assert!(

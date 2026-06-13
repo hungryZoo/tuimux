@@ -37,9 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="tuimux binary to run. Default: target/debug/tuimux",
     )
     parser.add_argument(
-        "--session",
+        "--socket-scope",
         default=f"terminal-chrome-smoke-{os.getpid()}",
-        help="temporary tuimux session name",
+        help="temporary tuimux daemon socket scope",
+    )
+    parser.add_argument(
+        "--session",
+        dest="socket_scope",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--timeout",
@@ -56,9 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 class PtyClient:
-    def __init__(self, binary: Path, session: str) -> None:
+    def __init__(self, binary: Path, socket_scope: str) -> None:
         self.binary = binary
-        self.session = session
+        self.socket_scope = socket_scope
         self.repo_root = Path(__file__).resolve().parents[1]
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
@@ -66,7 +71,7 @@ class PtyClient:
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         self.process = subprocess.Popen(
-            [str(binary), "--session", session],
+            [str(binary), "--socket-scope", socket_scope],
             cwd=self.repo_root,
             stdin=slave,
             stdout=slave,
@@ -231,9 +236,9 @@ class AnsiScreen:
         self.col = 0
 
 
-def stop_daemon(binary: Path, session: str) -> None:
+def stop_daemon(binary: Path, socket_scope: str) -> None:
     subprocess.run(
-        [str(binary), "--stop-server", "--session", session],
+        [str(binary), "--stop-server", "--socket-scope", socket_scope],
         cwd=Path(__file__).resolve().parents[1],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -262,14 +267,17 @@ def main() -> int:
     if sys.platform != "darwin":
         raise SystemExit("this smoke test currently targets macOS")
 
-    client = PtyClient(binary, args.session)
+    client = PtyClient(binary, args.socket_scope)
     try:
-        wait_screen_or_fail(client, "Session", args.timeout, "terminal rail session control")
         wait_screen_or_fail(client, "WINDOWS", args.timeout, "integrated window rail")
         wait_screen_or_fail(client, "Detach", args.timeout, "integrated detach button")
         wait_screen_or_fail(client, "+ new", args.timeout, "integrated new-window row")
         wait_screen_or_fail(client, "STATUS", args.timeout, "integrated status panel")
         wait_screen_or_fail(client, "scroll:0", args.timeout, "rail scroll row")
+        if client.screen.contains("Session"):
+            raise RuntimeError(
+                f"session panel should not render; screen:\n{client.screen_text()}"
+            )
 
         client.clear_buffer()
         client.write(
@@ -302,7 +310,7 @@ def main() -> int:
         wait_screen_or_fail(client, "scroll:0", args.timeout, "status click bottom")
 
         client.clear_buffer()
-        client.write(b"\x1b[<0;104;9M\x1b[<0;104;9m")
+        client.write(b"\x1b[<0;104;6M\x1b[<0;104;6m")
         wait_screen_or_fail(client, "2:", args.timeout, "clicked new window row")
 
         client.clear_buffer()
@@ -322,7 +330,7 @@ def main() -> int:
     finally:
         client.close()
         if not args.keep_daemon:
-            stop_daemon(binary, args.session)
+            stop_daemon(binary, args.socket_scope)
 
 
 if __name__ == "__main__":

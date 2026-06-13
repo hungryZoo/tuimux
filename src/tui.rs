@@ -1,7 +1,7 @@
 //! Default tuimux ratatui interface.
 //!
 //! The main pane is backed by tuimux's Rust-native daemon multiplexer:
-//! sessions, windows, and panes are owned by the daemon, and each pane runs a
+//! windows and panes are owned by the daemon, and each pane runs a
 //! real shell in a PTY rendered through a vt100 screen model.
 //!
 //! If stdout is not a TTY we refuse to enter raw mode and instead print guidance,
@@ -26,7 +26,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::clipboard;
 use crate::mux_backend::{KeyInput, MouseInput, MuxBackend, MuxSnapshot, PaneSnapshot};
-use crate::native_mux::{Pane, PaneAxis, PaneRect, PaneSeparator, Session, Window};
+use crate::native_mux::{Pane, PaneAxis, PaneRect, PaneSeparator, Window};
 use crate::terminal::{SelectionRange, TerminalColor, TerminalSpan, TerminalStyle};
 
 /// Why the UI loop ended — affects the farewell message.
@@ -37,23 +37,18 @@ enum Exit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hotspot {
-    SessionButton,
     DetachButton,
     StatusPanel,
     MainPane,
     Window(usize),
     WindowClose(usize),
     NewWindow,
-    ModalSession(usize),
-    ModalNewSession,
-    ModalDetach,
 }
 
 #[derive(Default, Clone, Copy)]
 struct Regions {
     main_pane: Rect,
     terminal_body: Rect,
-    session_button: Rect,
     detach_button: Rect,
     status_panel: Rect,
     new_window: Rect,
@@ -62,22 +57,15 @@ struct Regions {
     window_count: usize,
     terminal_panes: [Rect; 8],
     terminal_pane_count: usize,
-    modal_new_session: Rect,
-    modal_detach: Rect,
-    modal_sessions: [Rect; 8],
-    modal_session_count: usize,
 }
 
 struct UiState {
-    session_modal_open: bool,
     hover: Option<Hotspot>,
     regions: Regions,
     mux: MuxBackend,
     /// Live native mux state, refreshed after every mutating command.
-    sessions: Vec<Session>,
     windows: Vec<Window>,
     panes: Vec<Pane>,
-    current_session: String,
     /// Non-fatal, transient message shown in the status bar (e.g. that a
     /// window was created, selected, or closed).
     status: Option<String>,
@@ -110,10 +98,6 @@ struct TerminalModeLayout {
 
 const WINDOW_CLOSE_WIDTH: u16 = 3;
 
-fn andromeda_nebula() -> Color {
-    Color::Rgb(0x00, 0xE8, 0xC6)
-}
-
 fn andromeda_starlight() -> Color {
     Color::Rgb(0xF3, 0xD5, 0x6E)
 }
@@ -136,19 +120,14 @@ fn andromeda_cosmic() -> Color {
 
 impl UiState {
     /// Build initial state from the native multiplexer.
-    fn bootstrap(initial_session: &str, cwd: PathBuf) -> anyhow::Result<Self> {
-        let mux = MuxBackend::new(initial_session, cwd, 80, 24)?;
+    fn bootstrap(socket_scope: &str, cwd: PathBuf) -> anyhow::Result<Self> {
+        let mux = MuxBackend::new(socket_scope, cwd, 80, 24)?;
         let mut state = UiState {
-            // Native tuimux starts focused in the shell. The Session button or
-            // Alt-S opens the session switcher when needed.
-            session_modal_open: false,
             hover: None,
             regions: Regions::default(),
             mux,
-            sessions: Vec::new(),
             windows: Vec::new(),
             panes: Vec::new(),
-            current_session: String::new(),
             status: None,
             terminal_error: None,
             terminal_mode: true,
@@ -181,10 +160,8 @@ impl UiState {
     }
 
     fn apply_snapshot(&mut self, snapshot: MuxSnapshot) {
-        self.sessions = snapshot.sessions;
         self.windows = snapshot.windows;
         self.panes = snapshot.panes;
-        self.current_session = snapshot.current_session;
         self.terminal_axis = snapshot.terminal.axis;
         self.terminal_separators = snapshot.terminal.separators;
         self.terminal_panes = snapshot.terminal.panes;
@@ -310,7 +287,7 @@ impl UiState {
 }
 
 /// Entry point for the default run. Returns a process exit code.
-pub fn run(initial_session: &str, cwd: PathBuf) -> io::Result<i32> {
+pub fn run(socket_scope: &str, cwd: PathBuf) -> io::Result<i32> {
     if !io::stdout().is_terminal() {
         eprintln!(
             "tuimux: stdout is not a terminal — refusing to start the interactive UI.\n\
@@ -320,7 +297,7 @@ pub fn run(initial_session: &str, cwd: PathBuf) -> io::Result<i32> {
         return Ok(2);
     }
 
-    let mut state = UiState::bootstrap(initial_session, cwd)
+    let mut state = UiState::bootstrap(socket_scope, cwd)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     let mut terminal = setup()?;
@@ -399,9 +376,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                             .to_string(),
                         );
                     }
-                    (KeyCode::Char('s'), KeyModifiers::ALT) => {
-                        state.session_modal_open = !state.session_modal_open;
-                    }
                     (KeyCode::Char('n'), KeyModifiers::ALT) => {
                         new_window(state);
                     }
@@ -416,14 +390,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Exit::Quit),
                     (KeyCode::Char('q'), _) => return Ok(Exit::Quit),
-                    // `n` creates a fresh detached `tuimux-<n>` session, but only
-                    // while the modal is open so it can't fire by accident.
-                    (KeyCode::Char('n'), _) if state.session_modal_open => {
-                        new_session(state);
-                    }
-                    (KeyCode::Esc, _) if state.session_modal_open => {
-                        state.session_modal_open = false;
-                    }
                     (KeyCode::Esc, _) => return Ok(Exit::Quit),
                     (KeyCode::Char('n'), _) => {
                         new_window(state);
@@ -571,18 +537,10 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     }
                 }
 
-                state.hover = hit_test(
-                    mouse.column,
-                    mouse.row,
-                    &state.regions,
-                    state.session_modal_open,
-                );
+                state.hover = hit_test(mouse.column, mouse.row, &state.regions);
                 if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                     match state.hover {
-                        Some(Hotspot::SessionButton) => {
-                            state.session_modal_open = !state.session_modal_open;
-                        }
-                        Some(Hotspot::DetachButton) | Some(Hotspot::ModalDetach) => {
+                        Some(Hotspot::DetachButton) => {
                             return Ok(Exit::Detach);
                         }
                         Some(Hotspot::StatusPanel) => {
@@ -601,12 +559,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                         }
                         Some(Hotspot::NewWindow) => {
                             new_window(state);
-                        }
-                        Some(Hotspot::ModalNewSession) => {
-                            new_session(state);
-                        }
-                        Some(Hotspot::ModalSession(idx)) => {
-                            switch_session(state, idx);
                         }
                         _ => {}
                     }
@@ -730,31 +682,6 @@ fn new_window(state: &mut UiState) {
     }
 }
 
-fn new_session(state: &mut UiState) {
-    let (width, height) = active_terminal_size(state);
-    match state.mux.create_next_session(width, height) {
-        Ok(name) => {
-            state.status = Some(format!("created session '{name}'"));
-            state.clear_selection();
-            state.sync_terminal(width, height);
-        }
-        Err(e) => state.status = Some(format!("new-session failed: {e}")),
-    }
-}
-
-fn switch_session(state: &mut UiState, idx: usize) {
-    match state.mux.switch_session_by_row(idx) {
-        Ok(()) => {
-            state.session_modal_open = false;
-            state.clear_selection();
-            let (width, height) = active_terminal_size(state);
-            state.sync_terminal(width, height);
-            state.status = Some(format!("selected session '{}'", state.current_session));
-        }
-        Err(e) => state.status = Some(format!("select-session failed: {e}")),
-    }
-}
-
 fn ui(f: &mut Frame, state: &mut UiState) {
     let root = f.size();
     state.regions = Regions::default();
@@ -765,13 +692,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
     let terminal_cursor = state.terminal_cursor;
     let terminal_hide_cursor = state.terminal_hide_cursor;
 
-    let session_label = if state.current_session.is_empty() {
-        "(no session)"
-    } else {
-        &state.current_session
-    };
-
-    if state.terminal_mode && !state.session_modal_open {
+    if state.terminal_mode {
         let layout = terminal_mode_layout(root);
         render_main(
             f,
@@ -791,7 +712,6 @@ fn ui(f: &mut Frame, state: &mut UiState) {
             render_terminal_rail(
                 f,
                 side_rail,
-                session_label,
                 &state.windows,
                 state.terminal_scrollback,
                 state.hover,
@@ -814,7 +734,7 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         terminal_panes,
         terminal_rows,
         state.terminal_mode,
-        !state.session_modal_open && !terminal_hide_cursor,
+        !terminal_hide_cursor,
         terminal_cursor,
         state.terminal_error.as_deref(),
         &mut state.regions,
@@ -823,22 +743,11 @@ fn ui(f: &mut Frame, state: &mut UiState) {
     render_sidebar(
         f,
         body[1],
-        session_label,
         &state.windows,
         state.status.as_deref(),
         state.hover,
         &mut state.regions,
     );
-
-    if state.session_modal_open {
-        render_session_modal(
-            f,
-            &state.sessions,
-            &state.current_session,
-            state.hover,
-            &mut state.regions,
-        );
-    }
 }
 
 fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a> {
@@ -888,7 +797,6 @@ fn terminal_mode_layout(area: Rect) -> TerminalModeLayout {
 fn render_terminal_rail(
     f: &mut Frame,
     area: Rect,
-    session_label: &str,
     windows: &[Window],
     scrollback: usize,
     hover: Option<Hotspot>,
@@ -896,7 +804,6 @@ fn render_terminal_rail(
 ) {
     regions.window_count = 0;
     regions.new_window = Rect::default();
-    regions.session_button = Rect::default();
     regions.detach_button = Rect::default();
     regions.status_panel = Rect::default();
     if area.width == 0 || area.height == 0 {
@@ -908,27 +815,12 @@ fn render_terminal_rail(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(3),
             Constraint::Min(4),
             Constraint::Length(3),
         ])
         .split(area);
 
-    regions.session_button = chunks[0];
-    regions.detach_button = chunks[1];
-
-    let session_hot = hover == Some(Hotspot::SessionButton);
-    let session = Paragraph::new(Line::from(Span::styled(
-        session_label.to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )))
-    .alignment(Alignment::Center)
-    .block(button_block(
-        Some("Session"),
-        andromeda_nebula(),
-        session_hot,
-    ));
-    f.render_widget(session, chunks[0]);
+    regions.detach_button = chunks[0];
 
     let detach_hot = hover == Some(Hotspot::DetachButton);
     let detach = Paragraph::new(Line::from(Span::styled(
@@ -939,10 +831,10 @@ fn render_terminal_rail(
     )))
     .alignment(Alignment::Center)
     .block(button_block(None, andromeda_nova(), detach_hot));
-    f.render_widget(detach, chunks[1]);
+    f.render_widget(detach, chunks[0]);
 
-    render_terminal_windows(f, chunks[2], windows, hover, regions);
-    render_terminal_status(f, chunks[3], scrollback, hover, regions);
+    render_terminal_windows(f, chunks[1], windows, hover, regions);
+    render_terminal_status(f, chunks[2], scrollback, hover, regions);
 }
 
 fn render_terminal_windows(
@@ -1355,7 +1247,6 @@ fn terminal_color(color: TerminalColor) -> Option<Color> {
 fn render_sidebar(
     f: &mut Frame,
     area: Rect,
-    session_label: &str,
     windows: &[Window],
     status: Option<&str>,
     hover: Option<Hotspot>,
@@ -1364,28 +1255,13 @@ fn render_sidebar(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // session button
             Constraint::Length(3), // detach button
             Constraint::Length(2), // status
             Constraint::Min(5),    // windows
         ])
         .split(area);
 
-    regions.session_button = chunks[0];
-    regions.detach_button = chunks[1];
-
-    let session_hot = hover == Some(Hotspot::SessionButton);
-    let session = Paragraph::new(Line::from(Span::styled(
-        session_label.to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )))
-    .alignment(Alignment::Center)
-    .block(button_block(
-        Some("Session"),
-        andromeda_nebula(),
-        session_hot,
-    ));
-    f.render_widget(session, chunks[0]);
+    regions.detach_button = chunks[0];
 
     let detach_hot = hover == Some(Hotspot::DetachButton);
     let detach = Paragraph::new(Line::from(Span::styled(
@@ -1396,16 +1272,16 @@ fn render_sidebar(
     )))
     .alignment(Alignment::Center)
     .block(button_block(None, andromeda_nova(), detach_hot));
-    f.render_widget(detach, chunks[1]);
+    f.render_widget(detach, chunks[0]);
 
-    let status_text = fit_and_pad_text(status.unwrap_or_default(), chunks[2].width as usize);
+    let status_text = fit_and_pad_text(status.unwrap_or_default(), chunks[1].width as usize);
     let status_line = Paragraph::new(Line::from(Span::styled(
         status_text,
         Style::default().fg(andromeda_comet()),
     )));
-    f.render_widget(status_line, chunks[2]);
+    f.render_widget(status_line, chunks[1]);
 
-    render_windows(f, chunks[3], windows, hover, regions);
+    render_windows(f, chunks[2], windows, hover, regions);
 }
 
 fn render_windows(
@@ -1480,91 +1356,6 @@ fn render_windows(
     f.render_widget(windows, area);
 }
 
-fn render_session_modal(
-    f: &mut Frame,
-    sessions: &[Session],
-    current_session: &str,
-    hover: Option<Hotspot>,
-    regions: &mut Regions,
-) {
-    let area = centered_rect(48, 44, f.size());
-    f.render_widget(Clear, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
-        .margin(1)
-        .split(area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(andromeda_nebula()));
-    f.render_widget(block, area);
-
-    regions.modal_session_count = 0;
-    let mut items = Vec::new();
-    for (idx, sess) in sessions.iter().enumerate() {
-        if idx >= regions.modal_sessions.len() {
-            break;
-        }
-        let row_rect = Rect::new(
-            chunks[0].x,
-            chunks[0].y.saturating_add(idx as u16),
-            chunks[0].width,
-            1,
-        );
-        regions.modal_sessions[idx] = row_rect;
-        regions.modal_session_count += 1;
-
-        let active = sess.name == current_session;
-        let mark = if active { "●" } else { " " };
-        let hot = hover == Some(Hotspot::ModalSession(idx));
-        let style = if hot {
-            Style::default().fg(Color::Black).bg(andromeda_nebula())
-        } else if active {
-            Style::default()
-                .fg(andromeda_nebula())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!(" {mark} {}", sess.name), style),
-            Span::raw(format!("  {} windows", sess.windows)),
-        ])));
-    }
-    f.render_widget(List::new(items), chunks[0]);
-
-    let actions = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(chunks[1]);
-    regions.modal_new_session = actions[0];
-    regions.modal_detach = actions[1];
-
-    let new_hot = hover == Some(Hotspot::ModalNewSession);
-    let new_button = Paragraph::new(Line::from(Span::styled(
-        "New Session",
-        Style::default()
-            .fg(andromeda_aurora())
-            .add_modifier(Modifier::BOLD),
-    )))
-    .alignment(Alignment::Center)
-    .block(button_block(None, andromeda_aurora(), new_hot));
-    f.render_widget(new_button, actions[0]);
-
-    let hot = hover == Some(Hotspot::ModalDetach);
-    let detach = Paragraph::new(Line::from(Span::styled(
-        "Detach",
-        Style::default()
-            .fg(andromeda_nova())
-            .add_modifier(Modifier::BOLD),
-    )))
-    .alignment(Alignment::Center)
-    .block(button_block(None, andromeda_nova(), hot));
-    f.render_widget(detach, actions[1]);
-}
-
 fn window_row_line(
     marker: &str,
     win: &Window,
@@ -1619,48 +1410,11 @@ fn close_style(hot: bool) -> Style {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}
-
-fn hit_test(x: u16, y: u16, regions: &Regions, modal_open: bool) -> Option<Hotspot> {
-    if modal_open {
-        for idx in 0..regions.modal_session_count {
-            if contains(regions.modal_sessions[idx], x, y) {
-                return Some(Hotspot::ModalSession(idx));
-            }
-        }
-        if contains(regions.modal_new_session, x, y) {
-            return Some(Hotspot::ModalNewSession);
-        }
-        if contains(regions.modal_detach, x, y) {
-            return Some(Hotspot::ModalDetach);
-        }
-    }
-
+fn hit_test(x: u16, y: u16, regions: &Regions) -> Option<Hotspot> {
     if contains(regions.main_pane, x, y) {
         return Some(Hotspot::MainPane);
     }
 
-    if contains(regions.session_button, x, y) {
-        return Some(Hotspot::SessionButton);
-    }
     if contains(regions.detach_button, x, y) {
         return Some(Hotspot::DetachButton);
     }
@@ -1798,16 +1552,13 @@ mod tests {
     use ratatui::buffer::Cell;
 
     fn test_state() -> UiState {
-        let mux = crate::native_mux::NativeMux::new("ui-test", PathBuf::from("."), 20, 5).unwrap();
+        let mux = crate::native_mux::NativeMux::new(PathBuf::from("."), 20, 5).unwrap();
         UiState {
-            session_modal_open: false,
             hover: None,
             regions: Regions::default(),
             mux: MuxBackend::Local(mux),
-            sessions: Vec::new(),
             windows: Vec::new(),
             panes: Vec::new(),
-            current_session: String::new(),
             status: None,
             terminal_error: None,
             terminal_mode: true,
@@ -1842,7 +1593,6 @@ mod tests {
     #[test]
     fn terminal_mode_narrow_layout_gives_full_area_to_pty() {
         let mut state = test_state();
-        state.current_session = "dev".to_string();
         state.windows = vec![
             Window {
                 index: 1,
@@ -1875,16 +1625,12 @@ mod tests {
             terminal_cell_at_pane(71, 9, &state.regions),
             Some((0, 9, 71))
         );
-        assert_eq!(
-            hit_test(1, 0, &state.regions, false),
-            Some(Hotspot::MainPane)
-        );
+        assert_eq!(hit_test(1, 0, &state.regions), Some(Hotspot::MainPane));
     }
 
     #[test]
     fn terminal_mode_no_longer_uses_compact_top_tabs() {
         let mut state = test_state();
-        state.current_session = "dev".to_string();
         state.windows = vec![Window {
             index: 1,
             name: "shell".to_string(),
@@ -1899,16 +1645,12 @@ mod tests {
         assert_eq!(state.regions.terminal_body, Rect::new(0, 0, 60, 8));
         assert_eq!(state.regions.window_count, 0);
         assert_eq!(state.regions.new_window, Rect::default());
-        assert_eq!(
-            hit_test(1, 0, &state.regions, false),
-            Some(Hotspot::MainPane)
-        );
+        assert_eq!(hit_test(1, 0, &state.regions), Some(Hotspot::MainPane));
     }
 
     #[test]
     fn terminal_mode_wide_layout_integrates_boxed_rail_controls() {
         let mut state = test_state();
-        state.current_session = "dev".to_string();
         state.terminal_scrollback = 7;
         state.windows = vec![
             Window {
@@ -1934,28 +1676,30 @@ mod tests {
         terminal.draw(|frame| ui(frame, &mut state)).unwrap();
 
         let body = rendered_line(&terminal, 0, 90);
-        let session_title = rendered_line(&terminal, 0, 110);
-        let session_label = rendered_line(&terminal, 1, 110);
-        let sidebar_title = rendered_line(&terminal, 6, 110);
+        let detach_label = rendered_line(&terminal, 1, 110);
+        let sidebar_title = rendered_line(&terminal, 3, 110);
         let status_title = rendered_line(&terminal, 11, 110);
         let scrollback = rendered_line(&terminal, 12, 110);
+        let full_screen = (0..14)
+            .map(|y| rendered_line(&terminal, y, 110))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(body.contains("BODY_LINE"), "{body:?}");
-        assert!(session_title.contains("Session"), "{session_title:?}");
-        assert!(session_label.contains("dev"), "{session_label:?}");
+        assert!(
+            !full_screen.contains("Session"),
+            "session panel should not render:\n{full_screen}"
+        );
+        assert!(detach_label.contains("Detach"), "{detach_label:?}");
         assert!(sidebar_title.contains("WINDOWS"), "{sidebar_title:?}");
         assert!(status_title.contains("STATUS"), "{status_title:?}");
         assert!(scrollback.contains("scroll:7"), "{scrollback:?}");
         assert_eq!(
-            first_cell_style_for_text(&terminal, 0, 110, "Session").fg,
-            Some(andromeda_nebula())
-        );
-        assert_eq!(
-            first_cell_style_for_text(&terminal, 4, 110, "Detach").fg,
+            first_cell_style_for_text(&terminal, 1, 110, "Detach").fg,
             Some(andromeda_nova())
         );
         assert_eq!(
-            first_cell_style_for_text(&terminal, 6, 110, "WINDOWS").fg,
+            first_cell_style_for_text(&terminal, 3, 110, "WINDOWS").fg,
             Some(andromeda_starlight())
         );
         assert_eq!(
@@ -1972,19 +1716,9 @@ mod tests {
 
         assert_eq!(
             hit_test(
-                state.regions.session_button.x,
-                state.regions.session_button.y,
-                &state.regions,
-                false
-            ),
-            Some(Hotspot::SessionButton)
-        );
-        assert_eq!(
-            hit_test(
                 state.regions.detach_button.x,
                 state.regions.detach_button.y,
-                &state.regions,
-                false
+                &state.regions
             ),
             Some(Hotspot::DetachButton)
         );
@@ -1992,8 +1726,7 @@ mod tests {
             hit_test(
                 state.regions.status_panel.x,
                 state.regions.status_panel.y,
-                &state.regions,
-                false
+                &state.regions
             ),
             Some(Hotspot::StatusPanel)
         );
@@ -2001,8 +1734,7 @@ mod tests {
             hit_test(
                 state.regions.windows[1].x,
                 state.regions.windows[1].y,
-                &state.regions,
-                false
+                &state.regions
             ),
             Some(Hotspot::Window(1))
         );
@@ -2010,8 +1742,7 @@ mod tests {
             hit_test(
                 state.regions.new_window.x,
                 state.regions.new_window.y,
-                &state.regions,
-                false
+                &state.regions
             ),
             Some(Hotspot::NewWindow)
         );
@@ -2024,11 +1755,8 @@ mod tests {
         regions.window_close[0] = Rect::new(27, 5, 3, 1);
         regions.window_count = 1;
 
-        assert_eq!(
-            hit_test(27, 5, &regions, false),
-            Some(Hotspot::WindowClose(0))
-        );
-        assert_eq!(hit_test(12, 5, &regions, false), Some(Hotspot::Window(0)));
+        assert_eq!(hit_test(27, 5, &regions), Some(Hotspot::WindowClose(0)));
+        assert_eq!(hit_test(12, 5, &regions), Some(Hotspot::Window(0)));
     }
 
     #[test]
@@ -2063,19 +1791,6 @@ mod tests {
 
         assert!(text.contains("1: OSC_TITLE"), "{text:?}");
         assert_eq!(text.chars().count(), 26);
-    }
-
-    #[test]
-    fn hit_test_distinguishes_modal_new_session_and_detach_buttons() {
-        let mut regions = Regions::default();
-        regions.modal_new_session = Rect::new(5, 20, 12, 3);
-        regions.modal_detach = Rect::new(18, 20, 10, 3);
-
-        assert_eq!(
-            hit_test(6, 21, &regions, true),
-            Some(Hotspot::ModalNewSession)
-        );
-        assert_eq!(hit_test(19, 21, &regions, true), Some(Hotspot::ModalDetach));
     }
 
     #[test]
@@ -2212,7 +1927,6 @@ mod tests {
                 render_sidebar(
                     frame,
                     frame.size(),
-                    "dev",
                     &windows,
                     Some("scrollback 24 rows"),
                     None,
@@ -2225,7 +1939,6 @@ mod tests {
                 render_sidebar(
                     frame,
                     frame.size(),
-                    "dev",
                     &windows,
                     Some("navigation mode"),
                     None,
@@ -2234,7 +1947,7 @@ mod tests {
             })
             .unwrap();
 
-        let status = rendered_line(&terminal, 6, 40);
+        let status = rendered_line(&terminal, 3, 40);
         assert!(status.contains("navigation mode"), "{status:?}");
         assert!(!status.contains("rows"), "{status:?}");
     }
@@ -2335,7 +2048,7 @@ mod tests {
     fn hit_test_only_exposes_windows_not_deprecated_pane_controls() {
         let regions = Regions::default();
 
-        assert_eq!(hit_test(21, 7, &regions, false), None);
-        assert_eq!(hit_test(21, 8, &regions, false), None);
+        assert_eq!(hit_test(21, 7, &regions), None);
+        assert_eq!(hit_test(21, 8, &regions), None);
     }
 }

@@ -1,6 +1,6 @@
 //! Rust-native multiplexer core.
 //!
-//! The daemon owns sessions, windows, and real PTY-backed terminal processes
+//! The daemon owns one window list and real PTY-backed terminal processes
 //! directly. The UI only attaches to this state through the backend boundary.
 
 use std::path::{Path, PathBuf};
@@ -9,13 +9,6 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::terminal::PtyTerminal;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Session {
-    pub name: String,
-    pub windows: u32,
-    pub attached: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Window {
@@ -81,17 +74,10 @@ pub struct PaneRef<'a> {
 }
 
 pub struct NativeMux {
-    sessions: Vec<NativeSession>,
-    active_session: usize,
-    cwd: PathBuf,
-    next_session: u32,
-    next_window_id: u32,
-}
-
-struct NativeSession {
-    name: String,
     windows: Vec<NativeWindow>,
     active_window: usize,
+    cwd: PathBuf,
+    next_window_id: u32,
 }
 
 struct NativeWindow {
@@ -108,46 +94,29 @@ struct NativePane {
 }
 
 impl NativeMux {
-    pub fn new(initial_session: &str, cwd: PathBuf, width: u16, height: u16) -> Result<Self> {
+    pub fn new(cwd: PathBuf, width: u16, height: u16) -> Result<Self> {
         let mut mux = Self {
-            sessions: Vec::new(),
-            active_session: 0,
+            windows: Vec::new(),
+            active_window: 0,
             cwd,
-            next_session: 1,
             next_window_id: 1,
         };
-        mux.create_session(initial_session, width, height)?;
+        let window = mux.spawn_window(1, width, height)?;
+        mux.windows.push(window);
         Ok(mux)
     }
 
-    pub fn session_infos(&self) -> Vec<Session> {
-        self.sessions
+    pub fn window_infos(&self) -> Vec<Window> {
+        self.windows
             .iter()
             .enumerate()
-            .map(|(idx, session)| Session {
-                name: session.name.clone(),
-                windows: session.windows.len() as u32,
-                attached: idx == self.active_session,
+            .map(|(idx, window)| Window {
+                index: window.index,
+                name: window.display_name(),
+                active: idx == self.active_window,
+                panes: window.panes.len() as u32,
             })
             .collect()
-    }
-
-    pub fn window_infos(&self) -> Vec<Window> {
-        self.active_session()
-            .map(|session| {
-                session
-                    .windows
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, window)| Window {
-                        index: window.index,
-                        name: window.display_name(),
-                        active: idx == session.active_window,
-                        panes: window.panes.len() as u32,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     pub fn pane_infos(&self) -> Vec<Pane> {
@@ -194,53 +163,11 @@ impl NativeMux {
         Vec::new()
     }
 
-    pub fn current_session_name(&self) -> &str {
-        self.active_session()
-            .map(|session| session.name.as_str())
-            .unwrap_or("")
-    }
-
-    pub fn create_next_session(&mut self, width: u16, height: u16) -> Result<String> {
-        loop {
-            let name = format!("tuimux-{}", self.next_session);
-            self.next_session += 1;
-            if !self.sessions.iter().any(|session| session.name == name) {
-                self.create_session(&name, width, height)?;
-                return Ok(name);
-            }
-        }
-    }
-
-    pub fn create_session(&mut self, name: &str, width: u16, height: u16) -> Result<()> {
-        if self.sessions.iter().any(|session| session.name == name) {
-            bail!("session '{name}' already exists");
-        }
-        let window = self.spawn_window(1, width, height)?;
-        self.sessions.push(NativeSession {
-            name: name.to_string(),
-            windows: vec![window],
-            active_window: 0,
-        });
-        self.active_session = self.sessions.len().saturating_sub(1);
-        Ok(())
-    }
-
-    pub fn switch_session_by_row(&mut self, row: usize) -> Result<()> {
-        if row >= self.sessions.len() {
-            bail!("session row {row} does not exist");
-        }
-        self.active_session = row;
-        Ok(())
-    }
-
     pub fn select_window_by_row(&mut self, row: usize) -> Result<()> {
-        let Some(session) = self.active_session_mut() else {
-            bail!("no active session");
-        };
-        if row >= session.windows.len() {
+        if row >= self.windows.len() {
             bail!("window row {row} does not exist");
         }
-        session.active_window = row;
+        self.active_window = row;
         Ok(())
     }
 
@@ -256,10 +183,7 @@ impl NativeMux {
     }
 
     pub fn new_window(&mut self, width: u16, height: u16) -> Result<u32> {
-        let Some(session) = self.active_session() else {
-            bail!("no active session");
-        };
-        let index = session
+        let index = self
             .windows
             .iter()
             .map(|window| window.index)
@@ -267,39 +191,28 @@ impl NativeMux {
             .unwrap_or(0)
             + 1;
         let window = self.spawn_window(index, width, height)?;
-        let Some(session) = self.active_session_mut() else {
-            bail!("no active session");
-        };
-        session.windows.push(window);
-        session.active_window = session.windows.len().saturating_sub(1);
+        self.windows.push(window);
+        self.active_window = self.windows.len().saturating_sub(1);
         Ok(index)
     }
 
     pub fn kill_window_by_row(&mut self, row: usize, width: u16, height: u16) -> Result<u32> {
-        let Some(session) = self.active_session() else {
-            bail!("no active session");
-        };
-        if row >= session.windows.len() {
+        if row >= self.windows.len() {
             bail!("window row {row} does not exist");
         }
-        let needs_replacement = session.windows.len() == 1;
+        let needs_replacement = self.windows.len() == 1;
         let replacement = if needs_replacement {
             Some(self.spawn_window(1, width, height)?)
         } else {
             None
         };
 
-        let Some(session) = self.active_session_mut() else {
-            bail!("no active session");
-        };
-        let removed = session.windows.remove(row).index;
+        let removed = self.windows.remove(row).index;
         if let Some(window) = replacement {
-            session.windows.push(window);
-            session.active_window = 0;
+            self.windows.push(window);
+            self.active_window = 0;
         } else {
-            session.active_window = session
-                .active_window
-                .min(session.windows.len().saturating_sub(1));
+            self.active_window = self.active_window.min(self.windows.len().saturating_sub(1));
         }
         Ok(removed)
     }
@@ -318,11 +231,9 @@ impl NativeMux {
 
     pub fn drain_all(&mut self) -> bool {
         let mut changed = false;
-        for session in &mut self.sessions {
-            for window in &mut session.windows {
-                for pane in &mut window.panes {
-                    changed |= pane.terminal.drain();
-                }
+        for window in &mut self.windows {
+            for pane in &mut window.panes {
+                changed |= pane.terminal.drain();
             }
         }
         changed
@@ -330,45 +241,37 @@ impl NativeMux {
 
     pub fn reap_finished_windows(&mut self, width: u16, height: u16) -> Result<bool> {
         let mut changed = false;
-        let mut session_idx = 0;
-
-        while session_idx < self.sessions.len() {
-            let mut window_idx = 0;
-            while window_idx < self.sessions[session_idx].windows.len() {
-                let finished = {
-                    let window = &mut self.sessions[session_idx].windows[window_idx];
-                    window
-                        .panes
-                        .iter_mut()
-                        .all(|pane| pane.terminal.is_finished())
-                };
-                if !finished {
-                    window_idx += 1;
-                    continue;
-                }
-
-                let needs_replacement = self.sessions[session_idx].windows.len() == 1;
-                let replacement = if needs_replacement {
-                    Some(self.spawn_window(1, width, height)?)
-                } else {
-                    None
-                };
-
-                let session = &mut self.sessions[session_idx];
-                session.windows.remove(window_idx);
-                if let Some(window) = replacement {
-                    session.windows.push(window);
-                    session.active_window = 0;
-                    changed = true;
-                    break;
-                }
-
-                session.active_window = session
-                    .active_window
-                    .min(session.windows.len().saturating_sub(1));
-                changed = true;
+        let mut window_idx = 0;
+        while window_idx < self.windows.len() {
+            let finished = {
+                let window = &mut self.windows[window_idx];
+                window
+                    .panes
+                    .iter_mut()
+                    .all(|pane| pane.terminal.is_finished())
+            };
+            if !finished {
+                window_idx += 1;
+                continue;
             }
-            session_idx += 1;
+
+            let needs_replacement = self.windows.len() == 1;
+            let replacement = if needs_replacement {
+                Some(self.spawn_window(1, width, height)?)
+            } else {
+                None
+            };
+
+            self.windows.remove(window_idx);
+            if let Some(window) = replacement {
+                self.windows.push(window);
+                self.active_window = 0;
+                changed = true;
+                break;
+            }
+
+            self.active_window = self.active_window.min(self.windows.len().saturating_sub(1));
+            changed = true;
         }
 
         Ok(changed)
@@ -421,22 +324,12 @@ impl NativeMux {
         })
     }
 
-    fn active_session(&self) -> Option<&NativeSession> {
-        self.sessions.get(self.active_session)
-    }
-
-    fn active_session_mut(&mut self) -> Option<&mut NativeSession> {
-        self.sessions.get_mut(self.active_session)
-    }
-
     fn active_window(&self) -> Option<&NativeWindow> {
-        self.active_session()
-            .and_then(|session| session.windows.get(session.active_window))
+        self.windows.get(self.active_window)
     }
 
     fn active_window_mut(&mut self) -> Option<&mut NativeWindow> {
-        self.active_session_mut()
-            .and_then(|session| session.windows.get_mut(session.active_window))
+        self.windows.get_mut(self.active_window)
     }
 }
 
@@ -472,33 +365,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_mux_starts_with_one_attached_session_and_window() {
-        let mux = NativeMux::new("tuimux", PathBuf::from("."), 80, 24).unwrap();
-        let sessions = mux.session_infos();
+    fn native_mux_starts_with_one_window() {
+        let mux = NativeMux::new(PathBuf::from("."), 80, 24).unwrap();
         let windows = mux.window_infos();
 
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name, "tuimux");
-        assert!(sessions[0].attached);
-        assert_eq!(sessions[0].windows, 1);
         assert_eq!(windows.len(), 1);
         assert!(windows[0].active);
     }
 
     #[test]
-    fn native_mux_can_create_and_switch_sessions() {
-        let mut mux = NativeMux::new("tuimux", PathBuf::from("."), 80, 24).unwrap();
-        let name = mux.create_next_session(80, 24).unwrap();
+    fn native_mux_rejects_missing_window_rows() {
+        let mut mux = NativeMux::new(PathBuf::from("."), 80, 24).unwrap();
 
-        assert_eq!(name, "tuimux-1");
-        assert_eq!(mux.current_session_name(), "tuimux-1");
-        mux.switch_session_by_row(0).unwrap();
-        assert_eq!(mux.current_session_name(), "tuimux");
+        assert!(mux.select_window_by_row(1).is_err());
+        assert!(mux.kill_window_by_row(1, 80, 24).is_err());
     }
 
     #[test]
     fn native_mux_reports_single_full_size_pane() {
-        let mux = NativeMux::new("tuimux", PathBuf::from("."), 80, 24).unwrap();
+        let mux = NativeMux::new(PathBuf::from("."), 80, 24).unwrap();
 
         assert_eq!(mux.window_infos()[0].panes, 1);
         assert_eq!(mux.pane_infos().len(), 1);
@@ -514,7 +399,7 @@ mod tests {
 
     #[test]
     fn native_mux_can_create_select_and_kill_windows() {
-        let mut mux = NativeMux::new("tuimux", PathBuf::from("."), 80, 24).unwrap();
+        let mut mux = NativeMux::new(PathBuf::from("."), 80, 24).unwrap();
 
         assert_eq!(mux.new_window(80, 24).unwrap(), 2);
         let windows = mux.window_infos();
@@ -539,7 +424,7 @@ mod tests {
 
     #[test]
     fn native_mux_replaces_last_window_when_killed() {
-        let mut mux = NativeMux::new("tuimux", PathBuf::from("."), 80, 24).unwrap();
+        let mut mux = NativeMux::new(PathBuf::from("."), 80, 24).unwrap();
 
         assert_eq!(mux.kill_window_by_row(0, 80, 24).unwrap(), 1);
         let windows = mux.window_infos();
