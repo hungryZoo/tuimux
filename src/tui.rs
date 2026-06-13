@@ -308,10 +308,26 @@ impl UiState {
     }
 
     fn send_terminal_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Char('c')
-            && key.modifiers == KeyModifiers::CONTROL
-            && self.copy_selection()
-        {
+        if is_copy_shortcut(key) {
+            if self.selection_range().is_some() {
+                self.copy_selection();
+                return;
+            }
+            if !is_plain_control_c(key) {
+                self.status = Some("nothing selected".to_string());
+                return;
+            }
+        }
+
+        if is_paste_shortcut(key) {
+            self.paste_clipboard();
+            return;
+        }
+
+        let key = terminal_line_boundary_key(key).unwrap_or(key);
+
+        if key.modifiers.contains(KeyModifiers::SUPER) {
+            self.status = Some("shortcut ignored".to_string());
             return;
         }
 
@@ -372,6 +388,38 @@ impl UiState {
                 self.status = Some(format!("terminal mouse failed: {e}"));
             }
         }
+    }
+}
+
+fn is_copy_shortcut(key: KeyEvent) -> bool {
+    shortcut_char(key, 'c')
+        && (key.modifiers.contains(KeyModifiers::CONTROL)
+            || key.modifiers.contains(KeyModifiers::SUPER))
+}
+
+fn is_plain_control_c(key: KeyEvent) -> bool {
+    shortcut_char(key, 'c') && key.modifiers == KeyModifiers::CONTROL
+}
+
+fn is_paste_shortcut(key: KeyEvent) -> bool {
+    shortcut_char(key, 'v')
+        && (key.modifiers.contains(KeyModifiers::CONTROL)
+            || key.modifiers.contains(KeyModifiers::SUPER))
+}
+
+fn shortcut_char(key: KeyEvent, expected: char) -> bool {
+    matches!(key.code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&expected))
+}
+
+fn terminal_line_boundary_key(key: KeyEvent) -> Option<KeyEvent> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Left, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            Some(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
+        }
+        (KeyCode::Right, modifiers) if modifiers.contains(KeyModifiers::SUPER) => {
+            Some(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+        }
+        _ => None,
     }
 }
 
@@ -2239,6 +2287,64 @@ mod tests {
         let style = terminal_style(TerminalStyle::default());
         assert_eq!(style.fg, None);
         assert_eq!(style.bg, None);
+    }
+
+    #[test]
+    fn terminal_shortcuts_support_host_copy_paste_variants() {
+        assert!(is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::SUPER
+        )));
+        assert!(is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::SUPER
+        )));
+        assert!(!is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn only_plain_control_c_falls_back_to_child_interrupt() {
+        assert!(is_plain_control_c(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_plain_control_c(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(!is_plain_control_c(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::SUPER
+        )));
+    }
+
+    #[test]
+    fn macos_command_arrows_map_to_terminal_home_end() {
+        assert_eq!(
+            terminal_line_boundary_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER))
+                .map(|key| (key.code, key.modifiers)),
+            Some((KeyCode::Home, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            terminal_line_boundary_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER))
+                .map(|key| (key.code, key.modifiers)),
+            Some((KeyCode::End, KeyModifiers::NONE))
+        );
+        assert!(
+            terminal_line_boundary_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL))
+                .is_none()
+        );
     }
 
     #[test]

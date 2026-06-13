@@ -1,6 +1,6 @@
 # tuimux PRD
 
-- **문서 버전**: 3.8
+- **문서 버전**: 3.9
 - **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 
@@ -41,7 +41,9 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - terminal mode에서도 `Alt-N`, `Alt-Left`/`Alt-Right`로 window 작업을 할 수 있다.
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
-- selection이 있을 때 Ctrl-C는 system clipboard copy로 동작한다.
+- selection이 있을 때 Ctrl-C/Cmd-C는 system clipboard copy로 동작하고, selection이 없을 때 plain Ctrl-C는 child interrupt로 남는다.
+- Ctrl-V/Cmd-V는 system clipboard paste로 동작한다.
+- terminal mode의 Home/End와 macOS Cmd-Left/Cmd-Right는 input line start/end 이동으로 동작한다.
 - 우클릭은 TUI context menu를 열고 Copy, Paste, Cancel을 제공한다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
 - host paste는 bracketed paste event로 받아 active PTY에 전달한다.
@@ -74,7 +76,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - 열린 client가 있는 상태에서 두 번째 client가 snapshot/window/scrollback command를 수행하고 세 번째 client가 shutdown할 수 있다.
 - `btop`, `htop`, `nano`, `llmfit --help`가 native terminal surface에서 실행된다.
 - daemon snapshot에서 btop의 cpu/proc panel과 mouse protocol state가 정상으로 관측된다.
-- drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C + `pbpaste` smoke test가 통과한다.
+- drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C/Cmd-C copy shortcut 정책과 `pbpaste` smoke test가 통과한다.
+- Ctrl-V/Cmd-V paste shortcut과 Home/End/Cmd-Left/Cmd-Right line-boundary shortcut regression test가 통과한다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, right-click context menu Copy, Ctrl-C clipboard copy, foreground child SIGINT 미전달, context menu Paste, child bracketed paste wrapper 보존이 통과한다.
 - macOS window-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.

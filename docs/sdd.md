@@ -1,6 +1,6 @@
 # tuimux SDD
 
-- **문서 버전**: 4.1
+- **문서 버전**: 4.2
 - **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
@@ -272,17 +272,22 @@ struct SelectionState {
 - child mouse protocol 상태와 무관하게 wheel 동작은 기존 정책을 유지한다. child mouse protocol이 켜져 있으면 child로 전달하고, 꺼져 있으면 tuimux scrollback으로 처리한다.
 - mouse-up은 drag-in-progress 상태를 종료하지만 selection 자체를 지우지 않는다.
 - selection이 zero-width이면 지운다.
-- 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C copy는 selection을 유지한다.
+- 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C/Cmd-C copy는 selection을 유지한다.
+- Ctrl-C/Cmd-C/Super-C는 selection이 있을 때만 copy로 처리한다.
+- selection이 없으면 plain Ctrl-C는 active PTY로 전달해 foreground child interrupt로 동작하게 하고, Cmd-C/Super-C는 일반 문자 `c`로 누수하지 않는다.
+- Ctrl-V/Cmd-V/Super-V는 `clipboard::read_text()` 결과를 active PTY에 paste한다. Linux host마다 shortcut 전달 방식이 다를 수 있어 Control과 Super 계열을 모두 허용한다.
+- Home/End는 active PTY에 line start/end key로 전달한다. macOS에서 흔한 Cmd-Left/Cmd-Right는 UI client에서 Home/End key로 정규화해 active PTY에 전달한다.
 - 우클릭은 host terminal context menu를 직접 열 수 없으므로, TUI 안에 context menu를 띄워 native에 가까운 copy/paste 동작으로 에뮬레이션한다.
 - context menu는 Copy, Paste, Cancel 항목을 갖는다. Copy는 selection이 있을 때 `copy_selection()`으로 system clipboard에 복사하고, Paste는 `clipboard::read_text()` 결과를 active PTY에 paste한다.
 
-terminal mode에서 Ctrl-C는 다음 순서로 처리된다.
+terminal mode에서 copy shortcut은 다음 순서로 처리된다.
 
-1. UI가 `selection_range()`를 확인한다.
+1. UI가 Ctrl-C/Cmd-C/Super-C를 받으면 `selection_range()`를 확인한다.
 2. selection이 있으면 `Request::SelectedText`로 daemon에서 텍스트를 추출한다.
 3. UI process가 `clipboard::copy_text()`로 system clipboard에 복사한다.
-4. 복사 성공 시 Ctrl-C byte를 PTY로 보내지 않는다.
-5. selection이 없으면 일반 Ctrl-C byte를 daemon의 active PTY로 보낸다.
+4. copy 성공/실패와 무관하게 copy shortcut을 소비하고 Ctrl-C byte를 PTY로 보내지 않는다.
+5. selection이 없고 plain Ctrl-C이면 일반 Ctrl-C byte를 daemon의 active PTY로 보낸다.
+6. selection이 없고 Cmd-C/Super-C이면 child에 `c`를 보내지 않고 status만 갱신한다.
 
 이 설계는 macOS 기본 Terminal처럼 “텍스트를 선택한 상태의 Ctrl-C는 복사”라는 동작을 우선한다. 우클릭은 crossterm mouse capture 때문에 host terminal 메뉴를 그대로 띄우지는 못하지만, Copy/Paste/Cancel context menu를 TUI 위에 표시해 복붙 흐름을 줄인다.
 
@@ -420,7 +425,11 @@ crossterm KeyEvent
   -> F12이면 mode toggle
   -> Alt-N / Alt-Left / Alt-Right이면 terminal mode에서도 tuimux command 처리
   -> terminal_mode이면 UiState::send_terminal_key()
-     -> Ctrl-C + selection이면 clipboard copy
+     -> Ctrl-C/Cmd-C + selection이면 clipboard copy
+     -> Ctrl-C + no selection이면 child interrupt
+     -> Cmd-C/Super-C + no selection이면 consume
+     -> Ctrl-V/Cmd-V이면 clipboard paste
+     -> Cmd-Left/Cmd-Right이면 Home/End로 정규화
      -> 아니면 Request::SendKey
   -> navigation mode이면 sidebar/window/scrollback shortcut 처리
 ```
@@ -482,6 +491,7 @@ F12, q, Esc, or Detach button
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click context menu의 Copy, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, context menu의 Paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
+- keyboard shortcut unit tests: Ctrl-C/Cmd-C/Super-C copy predicate, 선택 없는 plain Ctrl-C interrupt fallback, Ctrl-V/Cmd-V/Super-V paste predicate, Cmd-Left/Cmd-Right to Home/End 정규화, Home/End PTY key encoding을 확인.
 - macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 boxed right rail과 scrollback/hint rows가 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
 - macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal left click forwarding, normal drag tuimux selection, selection Ctrl-C child 누수 방지를 확인.
@@ -524,6 +534,7 @@ F12, q, Esc, or Detach button
 - 같은 daemon에 reattach 후 `echo $TUIMUX_PERSIST_MARK`가 `alive` 출력
 - `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
 - mouse drag selection, Ctrl-C, `pbpaste`가 선택 텍스트 반환 확인
+- Ctrl-V/Cmd-V paste와 Home/End/Cmd-Left/Cmd-Right line start/end 이동 확인
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
 - child mouse tracking 중 normal left click은 child로 전달되고 normal drag는 tuimux selection으로 처리되는지 확인
 - 우클릭 context menu에서 Copy, Paste, Cancel이 표시되고 Copy/Paste가 동작하는지 확인

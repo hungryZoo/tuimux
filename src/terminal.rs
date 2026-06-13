@@ -737,8 +737,8 @@ fn key_to_bytes(key: KeyEvent, application_cursor: bool) -> Option<Vec<u8>> {
         KeyCode::Right => cursor_key('C', key.modifiers, application_cursor),
         KeyCode::Up => cursor_key('A', key.modifiers, application_cursor),
         KeyCode::Down => cursor_key('B', key.modifiers, application_cursor),
-        KeyCode::Home => cursor_key('H', key.modifiers, application_cursor),
-        KeyCode::End => cursor_key('F', key.modifiers, application_cursor),
+        KeyCode::Home => home_end_key('H', key.modifiers),
+        KeyCode::End => home_end_key('F', key.modifiers),
         KeyCode::PageUp => csi_tilde(5, key.modifiers),
         KeyCode::PageDown => csi_tilde(6, key.modifiers),
         KeyCode::Delete => csi_tilde(3, key.modifiers),
@@ -814,6 +814,14 @@ fn cursor_key(final_byte: char, modifiers: KeyModifiers, application_cursor: boo
         format!("\x1bO{final_byte}").into_bytes()
     } else {
         format!("\x1b[{final_byte}").into_bytes()
+    }
+}
+
+fn home_end_key(final_byte: char, modifiers: KeyModifiers) -> Vec<u8> {
+    if let Some(code) = modifier_code(modifiers) {
+        format!("\x1b[1;{code}{final_byte}").into_bytes()
+    } else {
+        format!("\x1bO{final_byte}").into_bytes()
     }
 }
 
@@ -985,6 +993,18 @@ mod tests {
         assert_eq!(
             key_to_bytes(key(KeyCode::Left, KeyModifiers::CONTROL), true),
             Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(key(KeyCode::Home, KeyModifiers::NONE), false),
+            Some(b"\x1bOH".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(key(KeyCode::End, KeyModifiers::NONE), false),
+            Some(b"\x1bOF".to_vec())
+        );
+        assert_eq!(
+            key_to_bytes(key(KeyCode::Home, KeyModifiers::CONTROL), false),
+            Some(b"\x1b[1;5H".to_vec())
         );
         assert_eq!(
             key_to_bytes(key(KeyCode::F(1), KeyModifiers::NONE), false),
