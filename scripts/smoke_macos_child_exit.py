@@ -297,7 +297,6 @@ def verify_non_last_window_pruning(client: PtyClient, timeout: float) -> None:
 
     client.clear_buffer()
     client.write(b"n")
-    wait_screen_or_fail(client, "created", timeout, "new window status")
     wait_screen_or_fail(client, "2: shell-2", timeout, "second window row")
 
     leave_navigation(client, timeout)

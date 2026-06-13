@@ -20,6 +20,7 @@ from pathlib import Path
 ROWS = 24
 COLS = 100
 PAYLOAD = "TUIMUX_CLICK_CURSOR_MOVE_FINAL"
+NORMAL_PAYLOAD = "TUIMUX_NORMAL_CLICK_CURSOR_MOVE"
 CLICK_COL = 36
 CLICK_ROW = 1
 
@@ -140,10 +141,32 @@ def main() -> int:
         final_cursor = cursor_positions[-1] if cursor_positions else None
         clicked_column = final_cursor == (str(CLICK_ROW).encode(), str(CLICK_COL).encode())
 
-        if highlighted and unhighlighted and not mouse_leaked and clicked_column:
+        client.write(b"\x15")
+        client.read_for(0.2)
+        client.write(NORMAL_PAYLOAD.encode())
+        client.read_for(0.6)
+        client.write(click.encode())
+        normal_after_click = client.read_for(0.8)
+        normal_cursor_positions = re.findall(rb"\x1b\[(\d+);(\d+)H", normal_after_click)
+        normal_final_cursor = normal_cursor_positions[-1] if normal_cursor_positions else None
+        normal_clicked_column = normal_final_cursor == (
+            str(CLICK_ROW).encode(),
+            str(CLICK_COL).encode(),
+        )
+        normal_mouse_leaked = b"\x1b[<" in normal_after_click or b"!!#!!" in normal_after_click
+
+        if (
+            highlighted
+            and unhighlighted
+            and not mouse_leaked
+            and clicked_column
+            and normal_clicked_column
+            and not normal_mouse_leaked
+        ):
             print("OK macOS paste cursor-move smoke")
             print("paste highlight: reverse video observed before click")
             print(f"left click moved cursor to column {CLICK_COL}")
+            print("normal left click moved cursor to clicked column")
             print("paste highlight cleared without mouse escape leak")
             return 0
 
@@ -153,6 +176,8 @@ def main() -> int:
         print(f"still_highlighted={still_highlighted}", file=sys.stderr)
         print(f"mouse_leaked={mouse_leaked}", file=sys.stderr)
         print(f"final_cursor={final_cursor}", file=sys.stderr)
+        print(f"normal_final_cursor={normal_final_cursor}", file=sys.stderr)
+        print(f"normal_mouse_leaked={normal_mouse_leaked}", file=sys.stderr)
         return 1
     finally:
         client.close()

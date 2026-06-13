@@ -429,6 +429,17 @@ impl UiState {
         true
     }
 
+    fn delete_selection_for_replacement(&mut self) {
+        let Some(range) = self.selection_range() else {
+            self.clear_selection();
+            return;
+        };
+        if let Ok(text) = self.mux.selected_text(range) {
+            let _ = self.delete_editable_selection(range, &text);
+        }
+        self.clear_selection();
+    }
+
     fn terminal_mouse_protocol_active(&self) -> bool {
         self.terminal_mouse_protocol_active
     }
@@ -521,21 +532,10 @@ impl UiState {
     }
 
     fn send_terminal_paste(&mut self, text: &str) {
-        self.clear_selection();
-        match self.mux.send_paste(text) {
-            Ok(()) => {
-                self.paste_highlight_pending = !text.is_empty();
-            }
-            Err(e) => {
-                self.paste_highlight_pending = false;
-                self.status = Some(format!("terminal paste failed: {e}"));
-            }
-        }
+        let _ = self.paste_text(text, None);
     }
 
     fn paste_clipboard(&mut self) -> bool {
-        self.clear_selection();
-        self.paste_highlight_pending = false;
         match clipboard::read_text() {
             Ok(text) if text.is_empty() => {
                 self.status = Some("clipboard is empty".to_string());
@@ -543,20 +543,33 @@ impl UiState {
             }
             Ok(text) => {
                 let chars = text.chars().count();
-                match self.mux.send_paste(&text) {
-                    Ok(()) => {
-                        self.paste_highlight_pending = true;
-                        self.status = Some(format!("pasted {chars} chars"));
-                        true
-                    }
-                    Err(e) => {
-                        self.status = Some(format!("terminal paste failed: {e}"));
-                        false
-                    }
-                }
+                self.paste_text(&text, Some(format!("pasted {chars} chars")))
             }
             Err(e) => {
                 self.status = Some(format!("paste failed: {e}"));
+                false
+            }
+        }
+    }
+
+    fn paste_text(&mut self, text: &str, status: Option<String>) -> bool {
+        if text.is_empty() {
+            self.paste_highlight_pending = false;
+            return false;
+        }
+        self.terminal_mode = true;
+        self.delete_selection_for_replacement();
+        match self.mux.send_paste(text) {
+            Ok(()) => {
+                self.paste_highlight_pending = true;
+                if let Some(status) = status {
+                    self.status = Some(status);
+                }
+                true
+            }
+            Err(e) => {
+                self.paste_highlight_pending = false;
+                self.status = Some(format!("terminal paste failed: {e}"));
                 false
             }
         }
@@ -649,21 +662,23 @@ impl UiState {
 }
 
 fn is_copy_shortcut(key: KeyEvent) -> bool {
-    shortcut_char(key, 'c')
+    (shortcut_char(key, 'c') || raw_control_char(key, 'c'))
         && (is_plain_control_c(key)
             || is_control_shift_shortcut(key.modifiers)
             || is_macos_shift_command(key.modifiers))
 }
 
 fn is_plain_control_c(key: KeyEvent) -> bool {
-    shortcut_char(key, 'c') && key.modifiers == KeyModifiers::CONTROL
+    (shortcut_char(key, 'c') && key.modifiers == KeyModifiers::CONTROL)
+        || raw_control_char(key, 'c')
 }
 
 fn is_paste_shortcut(key: KeyEvent) -> bool {
-    shortcut_char(key, 'v')
-        && (key.modifiers == KeyModifiers::CONTROL
-            || is_control_shift_shortcut(key.modifiers)
-            || is_macos_shift_command(key.modifiers))
+    raw_control_char(key, 'v')
+        || (shortcut_char(key, 'v')
+            && (key.modifiers == KeyModifiers::CONTROL
+                || is_control_shift_shortcut(key.modifiers)
+                || is_macos_shift_command(key.modifiers)))
 }
 
 fn is_cut_shortcut(key: KeyEvent) -> bool {
@@ -691,6 +706,16 @@ fn is_selection_replacement_key(key: KeyEvent) -> bool {
 
 fn shortcut_char(key: KeyEvent, expected: char) -> bool {
     matches!(key.code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&expected))
+}
+
+fn raw_control_char(key: KeyEvent, expected: char) -> bool {
+    let expected = expected.to_ascii_lowercase();
+    if !expected.is_ascii_lowercase() {
+        return false;
+    }
+    let codepoint = (expected as u8).saturating_sub(b'a') + 1;
+    matches!(key.code, KeyCode::Char(ch) if ch as u32 == codepoint as u32)
+        && key.modifiers.difference(KeyModifiers::CONTROL).is_empty()
 }
 
 fn terminal_line_boundary_key(key: KeyEvent) -> Option<KeyEvent> {
@@ -834,7 +859,11 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     (KeyCode::Right, KeyModifiers::ALT) => {
                         select_adjacent_window(state, 1);
                     }
-                    _ if state.terminal_mode => {
+                    _ if state.terminal_mode
+                        || is_paste_shortcut(key)
+                        || (state.selection_range().is_some()
+                            && (is_copy_shortcut(key) || is_cut_shortcut(key))) =>
+                    {
                         state.send_terminal_key(key);
                     }
                     (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(Exit::Quit),
@@ -955,8 +984,6 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     }
 
                     let child_wants_mouse = state.pane_mouse_protocol_active(pane_row);
-                    let selection_gesture =
-                        mouse.modifiers.contains(KeyModifiers::SHIFT) || !child_wants_mouse;
                     if !child_wants_mouse {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
@@ -990,17 +1017,13 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             state.terminal_mode = true;
-                            if selection_gesture {
-                                state.begin_selection(pane_row, row, col);
-                            } else {
-                                state.pending_left_down = Some(PendingMouseDown {
-                                    pane: pane_row,
-                                    row,
-                                    col,
-                                    modifiers: mouse.modifiers,
-                                    child_wants_mouse,
-                                });
-                            }
+                            state.pending_left_down = Some(PendingMouseDown {
+                                pane: pane_row,
+                                row,
+                                col,
+                                modifiers: mouse.modifiers,
+                                child_wants_mouse,
+                            });
                             continue;
                         }
                         _ if state.terminal_mode => {
@@ -1047,7 +1070,7 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     }
                 }
             }
-            Event::Paste(text) if state.terminal_mode => {
+            Event::Paste(text) => {
                 state.send_terminal_paste(&text);
             }
             Event::Resize(_, _) => {}
@@ -1153,9 +1176,24 @@ fn handle_paste_highlight_mouse(state: &mut UiState, mouse: &MouseEvent) -> bool
 }
 
 fn handle_context_menu_key(state: &mut UiState, key: KeyEvent) -> bool {
-    let Some(menu) = state.context_menu else {
+    if state.context_menu.is_none() {
         return false;
-    };
+    }
+
+    if is_cut_shortcut(key) {
+        perform_context_menu_action(state, ContextMenuAction::Cut);
+        return true;
+    }
+    if is_copy_shortcut(key) {
+        perform_context_menu_action(state, ContextMenuAction::Copy);
+        return true;
+    }
+    if is_paste_shortcut(key) {
+        perform_context_menu_action(state, ContextMenuAction::Paste);
+        return true;
+    }
+
+    let menu = state.context_menu.expect("context menu exists");
 
     match key.code {
         KeyCode::Esc => {
@@ -2701,6 +2739,14 @@ mod tests {
             KeyCode::Char('v'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT
         )));
+        assert!(is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('\u{16}'),
+            KeyModifiers::NONE
+        )));
+        assert!(is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('\u{16}'),
+            KeyModifiers::CONTROL
+        )));
         assert!(is_cut_shortcut(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::SUPER | KeyModifiers::SHIFT
@@ -2735,6 +2781,14 @@ mod tests {
     fn only_plain_control_c_falls_back_to_child_interrupt() {
         assert!(is_plain_control_c(KeyEvent::new(
             KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(is_plain_control_c(KeyEvent::new(
+            KeyCode::Char('\u{3}'),
+            KeyModifiers::NONE
+        )));
+        assert!(is_plain_control_c(KeyEvent::new(
+            KeyCode::Char('\u{3}'),
             KeyModifiers::CONTROL
         )));
         assert!(!is_plain_control_c(KeyEvent::new(

@@ -33,6 +33,8 @@ from pathlib import Path
 MARKER = "TUIMUX_UI_COPY_TARGET"
 RIGHT_PASTE_MARKER = "TUIMUX_UI_RIGHT_PASTE_TARGET"
 RIGHT_PASTE_OUTPUT = f"RIGHT_PASTE_RAN:{RIGHT_PASTE_MARKER}"
+SHORTCUT_PASTE_MARKER = "TUIMUX_UI_SHORTCUT_PASTE_TARGET"
+SHORTCUT_PASTE_OUTPUT = f"SHORTCUT_PASTE_RAN:{SHORTCUT_PASTE_MARKER}"
 CHILD_PASTE_MARKER = "TUIMUX_CHILD_BRACKETED_TARGET"
 CHILD_PASTE_READY = "CHILD_BRACKETED_READY"
 CHILD_PASTE_OK = "CHILD_BRACKETED_OK"
@@ -57,6 +59,7 @@ EDIT_DELETE_READY = "EDIT_DELETE_READY"
 BACKSPACE_DELETE_OK = "BACKSPACE_DELETE_OK"
 DELETE_DELETE_OK = "DELETE_DELETE_OK"
 REPLACE_DELETE_OK = "REPLACE_DELETE_OK"
+PASTE_REPLACE_OK = "PASTE_REPLACE_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -182,6 +185,18 @@ def set_clipboard(text: str) -> None:
 
 def get_clipboard() -> str:
     return subprocess.check_output(["pbpaste"], text=True)
+
+
+def wait_file_contains(path: Path, text: str, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if text in path.read_text(encoding="utf-8"):
+                return True
+        except FileNotFoundError:
+            pass
+        time.sleep(0.05)
+    return False
 
 
 def stop_daemon(binary: Path, session: str) -> None:
@@ -421,11 +436,13 @@ def main() -> int:
     require_macos()
 
     trap_file = Path("/tmp") / f"tuimux-ui-copy-int-{os.getpid()}"
+    shortcut_paste_file = Path("/tmp") / f"tuimux-shortcut-paste-{os.getpid()}"
     child_paste_script = Path("/tmp") / f"tuimux-child-bracketed-{os.getpid()}.py"
     paste_click_script = Path("/tmp") / f"tuimux-paste-click-clear-{os.getpid()}.py"
     cut_delete_script = Path("/tmp") / f"tuimux-cut-delete-{os.getpid()}.py"
     edit_delete_script = Path("/tmp") / f"tuimux-edit-delete-{os.getpid()}.py"
     trap_file.unlink(missing_ok=True)
+    shortcut_paste_file.unlink(missing_ok=True)
     child_paste_script.unlink(missing_ok=True)
     paste_click_script.unlink(missing_ok=True)
     cut_delete_script.unlink(missing_ok=True)
@@ -540,6 +557,26 @@ def main() -> int:
             print("right-click pasted command output did not appear", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
+        client.read_for(0.8)
+
+        shortcut_paste_payload = (
+            "printf '\\033[2J\\033[H'; "
+            f"printf 'SHORTCUT_PASTE_RAN:%s\\n' {SHORTCUT_PASTE_MARKER}; "
+            f"printf 'SHORTCUT_PASTE_RAN:%s\\n' {SHORTCUT_PASTE_MARKER} > "
+            f"{shlex.quote(str(shortcut_paste_file))}"
+            "\n"
+        )
+        set_clipboard(shortcut_paste_payload)
+        shortcut_clipboard = get_clipboard()
+        client.write(b"\x16")
+        client.read_for(0.5)
+        client.write(b"\r")
+        client.read_for(0.5)
+        if not wait_file_contains(shortcut_paste_file, SHORTCUT_PASTE_OUTPUT, args.timeout):
+            print("Ctrl-V pasted command output did not appear", file=sys.stderr)
+            print(f"clipboard before Ctrl-V: {shortcut_clipboard!r}", file=sys.stderr)
+            print(client.excerpt_around(SHORTCUT_PASTE_MARKER), file=sys.stderr)
+            return 1
 
         child_probe_command = child_bracketed_paste_probe_command(
             CHILD_PASTE_MARKER, child_paste_script
@@ -600,7 +637,7 @@ def main() -> int:
             return 1
         client.write(b"\x1b[<0;1;3M\x1b[<0;1;3m")
         if not client.wait_contains(MOUSE_MODE_PASTE_CLICK_OK, args.timeout):
-            print("mouse-mode click did not send CSI paste highlight clear", file=sys.stderr)
+            print("mouse-mode click did not move cursor to clear paste highlight", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
 
@@ -777,26 +814,56 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
+        paste_target = "PASTESEL"
+        paste_replacement = "pv"
+        paste_replace_command = edit_delete_probe_command(
+            edit_prefix,
+            paste_target,
+            edit_suffix,
+            paste_replacement,
+            PASTE_REPLACE_OK,
+            edit_delete_script,
+        )
+        client.write((paste_replace_command + "\r").encode())
+        client.read_for(0.8)
+        edit_x2 = len(edit_prefix) + len(paste_target)
+        edit_drag = (
+            f"\x1b[<0;{edit_x1};{edit_y}M"
+            f"\x1b[<32;{edit_x2};{edit_y}M"
+            f"\x1b[<0;{edit_x2};{edit_y}m"
+        )
+        client.write(edit_drag.encode())
+        client.read_for(0.3)
+        set_clipboard(paste_replacement)
+        client.write(b"\x16")
+        if not client.wait_contains(PASTE_REPLACE_OK, args.timeout):
+            print("Ctrl-V did not replace the editable selection", file=sys.stderr)
+            print(client.excerpt_around("EDIT_DELETE_BAD"), file=sys.stderr)
+            return 1
+
         print("OK macOS UI selection smoke")
         print("selection highlight: reverse video observed after mouse-up")
         print(f"right-click menu copied: {right_copied}")
         print(f"right-click menu cut: {cut_copied}")
         print(f"right-click menu cut deleted: {cut_deleted}")
-        print("copied clipboard context paste click clear: observed")
-        print("cut clipboard context paste click clear: observed")
+        print("copied clipboard context paste cursor move: observed")
+        print("cut clipboard context paste cursor move: observed")
         print("Backspace deleted editable selection: observed")
         print("Delete deleted editable selection: observed")
         print("text input replaced editable selection: observed")
+        print("Ctrl-V replaced editable selection: observed")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
+        print(f"Ctrl-V pasted command output: {SHORTCUT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
-        print("paste highlight click clear: observed")
-        print("mouse-mode paste highlight click clear: observed")
+        print("paste highlight click cursor move: observed")
+        print("mouse-mode paste highlight cursor move: observed")
         print("foreground child SIGINT: not observed")
         return 0
     finally:
         client.close()
         trap_file.unlink(missing_ok=True)
+        shortcut_paste_file.unlink(missing_ok=True)
         child_paste_script.unlink(missing_ok=True)
         paste_click_script.unlink(missing_ok=True)
         cut_delete_script.unlink(missing_ok=True)

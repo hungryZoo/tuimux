@@ -1,7 +1,7 @@
 # Skill: btop이 깨질 때 terminal emulator를 고치는 법
 
 - **작성일**: 2026-06-13
-- **적용 버전**: v0.2.0-alpha.36
+- **적용 버전**: v0.2.0-alpha.37
 - **관련 파일**: `src/terminal.rs`, `src/tui.rs`, `scripts/smoke_macos_apps.py`, `scripts/smoke_macos_terminal_chrome.py`
 
 ## 언제 이 스킬을 쓰는가

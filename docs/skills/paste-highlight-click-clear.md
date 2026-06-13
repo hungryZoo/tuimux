@@ -2,7 +2,7 @@
 
 - **작성일**: 2026-06-14
 - **적용 버전**: v0.2 native multiplexer branch
-- **관련 파일**: `src/tui.rs`, `src/mux_backend.rs`, `src/terminal.rs`, `scripts/smoke_macos_ui_selection.py`
+- **관련 파일**: `src/tui.rs`, `src/mux_backend.rs`, `src/terminal.rs`, `scripts/smoke_macos_ui_selection.py`, `scripts/smoke_macos_paste_cursor_move.py`
 
 ## 언제 이 스킬을 쓰는가
 
@@ -11,6 +11,7 @@
 - 붙여넣기 후 글자 배경이 흰색으로 남아 있다.
 - 방향키를 누르면 흰 배경이 사라지는데 마우스 클릭으로는 사라지지 않는다.
 - 특히 Copy 또는 Cut으로 clipboard에 들어간 텍스트를 context menu Paste로 붙인 뒤 우클릭/클릭에서 highlight가 남는다.
+- Ctrl-V로 붙여넣으면 동작하는데 context menu Paste 뒤에는 highlight가 남거나, 반대로 context menu Paste는 되는데 shortcut paste 뒤 동작이 다르다.
 - raw bracketed paste smoke는 통과하는데 실제 context menu paste 후 클릭만 불안정하다.
 - child가 mouse protocol 또는 application cursor mode를 켠 뒤 shell로 돌아온 상태에서만 클릭 clear가 실패한다.
 
@@ -42,12 +43,14 @@ paste click cursor move
 
 구체적으로는 `src/tui.rs`에서 다음 정책을 유지한다.
 
-- `Event::Mouse`를 받으면 context menu 처리보다 먼저 `should_clear_paste_highlight_for_click()`를 호출한다.
+- `Event::Mouse`를 받으면 context menu 처리보다 먼저 `handle_paste_highlight_mouse()`를 호출한다.
 - terminal body left click이면 `terminal_cursor`, pane width, clicked local cell로 visual delta를 계산한다.
 - delta가 음수면 raw `ESC[D`, 양수면 raw `ESC[C`를 반복해서 clicked cell로 input cursor를 옮긴다.
 - delta가 0이면 fallback으로 `ESC[D ESC[C`를 보낼 수 있지만, 검증은 clicked cell로 실제 cursor가 이동하는 케이스를 반드시 포함한다.
 - terminal body left click이 paste cursor move를 수행한 경우 그 click은 소비한다. 그렇지 않으면 같은 mouse up/down이 child로 전달되어 shell 입력줄에 mouse escape가 섞일 수 있다.
 - terminal body 밖 UI chrome, rail, context menu 위 click은 clear 대상으로 본다.
+- host paste event, context menu Paste, Ctrl-V 계열 shortcut은 모두 `paste_text()`로 모은다. 이 함수에서 selection replacement, `terminal_mode = true`, active PTY paste, `paste_highlight_pending = true`가 같은 순서로 처리되어야 한다.
+- context menu가 열려 있을 때도 copy/cut/paste shortcut은 메뉴에 삼켜지지 않고 같은 action으로 처리되어야 한다.
 
 ## smoke test로 고정할 것
 
@@ -62,7 +65,8 @@ paste click cursor move
 5. probe가 흰 배경 paste text를 표시하고 대기하게 한다.
 6. right click을 보낸다.
 7. child가 clicked cell 방향으로 2회 이상의 cursor movement를 받는지 확인한다.
-8. 실제 zsh prompt에서 paste 뒤 left click 후 reverse-video가 사라지고 final cursor position이 clicked column으로 이동하는지 확인한다.
+8. Ctrl-V paste가 shell 명령으로 실행되고, editable selection 위 Ctrl-V paste가 selection 삭제 후 replacement text를 넣는지 확인한다.
+9. 실제 zsh prompt에서 paste 뒤 left click 후 reverse-video가 사라지고 final cursor position이 clicked column으로 이동하는지 확인한다.
 
 이 테스트는 “paste는 됐지만 click clear가 context menu에서 먹힌다”는 회귀를 잡는다. 단순 raw bracketed paste key sequence만 보내는 테스트로는 context menu 처리 순서 버그를 놓칠 수 있다.
 
@@ -71,11 +75,12 @@ paste click cursor move
 - paste 관련 변경 뒤에는 `paste_highlight_pending`이 어디서 켜지고 꺼지는지 먼저 추적한다.
 - `send_terminal_key_to_child()`나 synthetic cursor movement가 pending 상태를 불필요하게 끄지 않는지 본다.
 - mouse handler 순서를 바꿀 때 context menu, rail click, terminal body click 모두에서 click-clear가 먼저 실행되는지 확인한다.
-- `should_clear_paste_highlight_for_click()`를 left click이나 mouse down 한 종류에만 묶지 않는다.
+- `handle_paste_highlight_mouse()`를 left click이나 mouse down 한 종류에만 묶지 않는다.
 - child mouse protocol active 여부를 paste cursor move 조건으로 쓰지 않는다.
 - clear를 `send_terminal_key_event(KeyCode::Left/Right)`로 보내지 않는다. application cursor mode가 켜져 있으면 바이트가 달라질 수 있으므로 raw `ESC[D`/`ESC[C`를 써야 한다.
 - paste cursor move용 terminal-body left click은 `mouse up`까지 소비되는지 확인한다.
 - smoke에는 raw paste path와 context menu paste path를 둘 다 둔다.
+- shortcut paste와 context menu paste가 같은 `paste_text()` 경로를 쓰는지 확인한다.
 
 ## 검증 루틴
 
