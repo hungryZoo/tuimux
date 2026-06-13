@@ -2,12 +2,11 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.31 keeps the default runtime on the Rust-native path and brings
-the tuimux TUI back into the default terminal screen: terminal mode now shows a
-top session/window tab strip and a bottom command/status strip around the live
-PTY body. This prerelease keeps the OSC 52 clipboard loop from alpha.29 and
-preserves the recent OSC title, scrollback, alternate-screen, resize, color,
-selection, and child-exit checks.
+v0.2.0-alpha.32 keeps the default runtime on the Rust-native path and keeps
+tuimux controls beside the live terminal without top or bottom status bars.
+This prerelease keeps the OSC 52 clipboard loop from alpha.29 and preserves the
+recent OSC title, scrollback, alternate-screen, resize, color, selection, and
+child-exit checks.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
 which owns sessions, windows, and PTY-backed shell processes. `tmux` is
 no longer required for the default UI; the old plain tmux client remains
@@ -24,8 +23,9 @@ See:
 This is still a 0.x prerelease. Current behavior:
 
 - `tuimux` opens the Rust-native tuimux TUI by default.
-- Terminal mode is now a full tuimux shell: wide terminals show a persistent right rail with Session, Detach, WINDOWS, close buttons, and `+ new`; narrow terminals fall back to compact top tabs.
-- The child PTY uses only the terminal body outside the chrome/rail, so mouse and keyboard routing do not treat TUI controls as child terminal cells.
+- Terminal mode is now a full tuimux shell: wide terminals show a borderless right rail with Session, Detach, WINDOWS, close buttons, `+ new`, scrollback count, and a small hint/status row.
+- Narrow terminals temporarily hide terminal-mode chrome instead of switching to compact top tabs, so apps such as `btop` can keep an honest 80-column PTY.
+- The child PTY uses only the terminal body outside the rail, so mouse and keyboard routing do not treat TUI controls as child terminal cells.
 - `Alt-N` creates a window, `Alt-S` opens the session picker, and `Alt-Left`/`Alt-Right` switch windows while staying in terminal mode.
 - Press `F12` to switch between terminal mode and navigation/sidebar mode.
 - Sessions, windows, and each active PTY-backed shell are managed by the tuimux daemon, not by tmux.
@@ -56,8 +56,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.31/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.31 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.32/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.32 bash
 ```
 
 Verify:
@@ -99,5 +99,5 @@ python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.31` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.32` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

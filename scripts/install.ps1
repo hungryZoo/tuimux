@@ -4,7 +4,7 @@
 #   irm https://raw.githubusercontent.com/hungryZoo/tuimux/main/scripts/install.ps1 | iex
 #
 # Environment variables:
-#   TUIMUX_VERSION       Tag to install, e.g. v0.2.0-alpha.31. Default: latest prerelease/release.
+#   TUIMUX_VERSION       Tag to install, e.g. v0.2.0-alpha.32. Default: latest prerelease/release.
 #   TUIMUX_INSTALL_DIR   Where to put tuimux.exe. Default: %LOCALAPPDATA%\Programs\tuimux\bin.
 
 $ErrorActionPreference = "Stop"

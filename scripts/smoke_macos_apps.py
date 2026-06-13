@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 
 
-ROWS = 32
-COLS = 120
+ROWS = 24
+COLS = 100
 TIMEOUT = 10.0
 
 
