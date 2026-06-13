@@ -127,6 +127,13 @@ struct TerminalModeLayout {
     side_rail: Option<Rect>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EditableSelectionDelete {
+    left_moves: u16,
+    right_moves: u16,
+    backspaces: usize,
+}
+
 const WINDOW_CLOSE_WIDTH: u16 = 3;
 const CONTEXT_MENU_WIDTH: u16 = 14;
 const CONTEXT_MENU_HEIGHT: u16 = 6;
@@ -343,26 +350,76 @@ impl UiState {
     }
 
     fn delete_editable_selection(&mut self, range: SelectionRange, text: &str) -> bool {
-        let range = range.normalized();
-        let Some((cursor_row, cursor_col)) = self.terminal_cursor else {
+        let Some(delete) = self.editable_selection_delete(range, text) else {
             return false;
         };
+        self.paste_highlight_pending = false;
+        for _ in 0..delete.left_moves {
+            self.send_terminal_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        for _ in 0..delete.right_moves {
+            self.send_terminal_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        for _ in 0..delete.backspaces {
+            self.send_terminal_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        true
+    }
+
+    fn editable_selection_delete(
+        &self,
+        range: SelectionRange,
+        text: &str,
+    ) -> Option<EditableSelectionDelete> {
+        let range = range.normalized();
+        let Some((cursor_row, cursor_col)) = self.terminal_cursor else {
+            return None;
+        };
         if self.terminal_hide_cursor {
-            return false;
+            return None;
         }
         if range.start_row != range.end_row || cursor_row != range.start_row {
-            return false;
-        }
-        if cursor_col != range.end_col && cursor_col != range.end_col.saturating_add(1) {
-            return false;
+            return None;
         }
 
         let delete_count = text.chars().filter(|ch| *ch != '\n').count();
         if delete_count == 0 {
+            return None;
+        }
+        let delete_at_col = if cursor_col == range.end_col {
+            range.end_col
+        } else {
+            range.end_col.saturating_add(1)
+        };
+        let (left_moves, right_moves) = if cursor_col > delete_at_col {
+            (cursor_col - delete_at_col, 0)
+        } else {
+            (0, delete_at_col - cursor_col)
+        };
+
+        Some(EditableSelectionDelete {
+            left_moves,
+            right_moves,
+            backspaces: delete_count,
+        })
+    }
+
+    fn delete_selection_for_edit_key(&mut self, key: KeyEvent) -> bool {
+        if !is_selection_edit_key(key) {
             return false;
         }
-        for _ in 0..delete_count {
-            self.send_terminal_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let Ok(text) = self.mux.selected_text(range) else {
+            return false;
+        };
+        if !self.delete_editable_selection(range, &text) {
+            return false;
+        }
+        self.clear_selection();
+        if is_selection_replacement_key(key) {
+            self.send_terminal_key_to_child(key);
         }
         true
     }
@@ -412,15 +469,13 @@ impl UiState {
         }
 
         if self.selection.is_some() {
+            if self.delete_selection_for_edit_key(key) {
+                return;
+            }
             self.clear_selection();
         }
 
-        let completed_raw_paste = self.observe_raw_bracketed_paste_key(key);
-        self.paste_highlight_pending = false;
-        self.send_terminal_key_event(key);
-        if completed_raw_paste {
-            self.paste_highlight_pending = true;
-        }
+        self.send_terminal_key_to_child(key);
     }
 
     fn observe_raw_bracketed_paste_key(&mut self, key: KeyEvent) -> bool {
@@ -448,6 +503,15 @@ impl UiState {
             if let Err(e) = self.mux.send_key(key) {
                 self.status = Some(format!("terminal input failed: {e}"));
             }
+        }
+    }
+
+    fn send_terminal_key_to_child(&mut self, key: KeyEvent) {
+        let completed_raw_paste = self.observe_raw_bracketed_paste_key(key);
+        self.paste_highlight_pending = false;
+        self.send_terminal_key_event(key);
+        if completed_raw_paste {
+            self.paste_highlight_pending = true;
         }
     }
 
@@ -540,6 +604,24 @@ fn is_paste_shortcut(key: KeyEvent) -> bool {
 fn is_cut_shortcut(key: KeyEvent) -> bool {
     shortcut_char(key, 'x')
         && (is_control_shift_shortcut(key.modifiers) || is_macos_shift_command(key.modifiers))
+}
+
+fn is_selection_edit_key(key: KeyEvent) -> bool {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return false;
+    }
+
+    matches!(
+        key.code,
+        KeyCode::Backspace | KeyCode::Delete | KeyCode::Char(_)
+    )
+}
+
+fn is_selection_replacement_key(key: KeyEvent) -> bool {
+    is_selection_edit_key(key) && matches!(key.code, KeyCode::Char(_))
 }
 
 fn shortcut_char(key: KeyEvent, expected: char) -> bool {
@@ -2915,18 +2997,79 @@ mod tests {
     }
 
     #[test]
-    fn cut_deletes_only_current_input_suffix_selection() {
+    fn editable_selection_delete_plans_cursor_motion_on_current_input_row() {
         let mut state = test_state();
         state.terminal_cursor = Some((2, 8));
         state.terminal_hide_cursor = false;
 
-        assert!(state.delete_editable_selection(SelectionRange::new(2, 5, 2, 7), "abc"));
-        assert!(!state.delete_editable_selection(SelectionRange::new(1, 5, 1, 7), "abc"));
-        assert!(!state.delete_editable_selection(SelectionRange::new(2, 2, 2, 4), "abc"));
-        assert!(!state.delete_editable_selection(SelectionRange::new(2, 5, 3, 7), "abc"));
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 5, 2, 7), "abc"),
+            Some(EditableSelectionDelete {
+                left_moves: 0,
+                right_moves: 0,
+                backspaces: 3,
+            })
+        );
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 2, 2, 4), "abc"),
+            Some(EditableSelectionDelete {
+                left_moves: 3,
+                right_moves: 0,
+                backspaces: 3,
+            })
+        );
+
+        state.terminal_cursor = Some((2, 1));
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 5, 2, 7), "abc"),
+            Some(EditableSelectionDelete {
+                left_moves: 0,
+                right_moves: 7,
+                backspaces: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn editable_selection_delete_rejects_non_editable_selection() {
+        let mut state = test_state();
+        state.terminal_cursor = Some((2, 8));
+        state.terminal_hide_cursor = false;
+
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(1, 5, 1, 7), "abc"),
+            None
+        );
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 5, 3, 7), "abc"),
+            None
+        );
 
         state.terminal_hide_cursor = true;
-        assert!(!state.delete_editable_selection(SelectionRange::new(2, 5, 2, 7), "abc"));
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 5, 2, 7), "abc"),
+            None
+        );
+    }
+
+    #[test]
+    fn backspace_delete_and_plain_text_replace_editable_selection() {
+        assert!(is_selection_edit_key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE
+        )));
+        assert!(is_selection_edit_key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE
+        )));
+        assert!(is_selection_replacement_key(KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::SHIFT
+        )));
+        assert!(!is_selection_edit_key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL
+        )));
     }
 
     #[test]

@@ -43,6 +43,10 @@ PASTE_CLICK_OK = "PASTE_CLICK_CLEAR_OK"
 CUT_DELETE_MARKER = "TUIMUX_CUT_DELETE_TARGET"
 CUT_DELETE_READY = "CUT_DELETE_READY"
 CUT_DELETE_OK = "CUT_DELETE_OK"
+EDIT_DELETE_READY = "EDIT_DELETE_READY"
+BACKSPACE_DELETE_OK = "BACKSPACE_DELETE_OK"
+DELETE_DELETE_OK = "DELETE_DELETE_OK"
+REPLACE_DELETE_OK = "REPLACE_DELETE_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -299,6 +303,68 @@ finally:
     return f"python3 {shlex.quote(str(script_path))}"
 
 
+def edit_delete_probe_command(
+    prefix: str,
+    target: str,
+    suffix: str,
+    replacement: str,
+    ok_marker: str,
+    script_path: Path,
+) -> str:
+    probe = f"""
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+prefix = {prefix.encode()!r}
+target = {target.encode()!r}
+suffix = {suffix.encode()!r}
+replacement = {replacement.encode()!r}
+requires_replacement = {bool(replacement)!r}
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+try:
+    tty.setraw(fd)
+    os.write(sys.stdout.fileno(), b"\\x1b[2J\\x1b[H{EDIT_DELETE_READY}\\r\\n" + prefix + target + suffix)
+    data = b""
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        dels = data.count(b"\\x7f")
+        has_replacement = (not requires_replacement) or replacement in data
+        if dels >= len(target) and has_replacement:
+            break
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            data += chunk
+    lefts = data.count(b"\\x1b[D") + data.count(b"\\x1bOD")
+    dels = data.count(b"\\x7f")
+    has_replacement = (not requires_replacement) or replacement in data
+    if lefts >= len(suffix) and dels >= len(target) and has_replacement:
+        os.write(sys.stdout.fileno(), b"\\r\\n{ok_marker}\\r\\n")
+    else:
+        os.write(
+            sys.stdout.fileno(),
+            b"\\r\\nEDIT_DELETE_BAD:lefts="
+            + str(lefts).encode()
+            + b",dels="
+            + str(dels).encode()
+            + b",data="
+            + data.hex().encode()
+            + b"\\r\\n",
+        )
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+"""
+    script_path.write_text(probe, encoding="utf-8")
+    return f"python3 {shlex.quote(str(script_path))}"
+
+
 def has_reverse_video_highlight(output: bytes, text: str) -> bool:
     text_bytes = re.escape(text.encode())
     return (
@@ -319,10 +385,12 @@ def main() -> int:
     child_paste_script = Path("/tmp") / f"tuimux-child-bracketed-{os.getpid()}.py"
     paste_click_script = Path("/tmp") / f"tuimux-paste-click-clear-{os.getpid()}.py"
     cut_delete_script = Path("/tmp") / f"tuimux-cut-delete-{os.getpid()}.py"
+    edit_delete_script = Path("/tmp") / f"tuimux-edit-delete-{os.getpid()}.py"
     trap_file.unlink(missing_ok=True)
     child_paste_script.unlink(missing_ok=True)
     paste_click_script.unlink(missing_ok=True)
     cut_delete_script.unlink(missing_ok=True)
+    edit_delete_script.unlink(missing_ok=True)
     set_clipboard(SENTINEL)
 
     client = PtyClient(binary, args.session)
@@ -504,11 +572,94 @@ def main() -> int:
             )
             return 1
 
+        edit_prefix = "PRE"
+        backspace_target = "BACKSPACE"
+        edit_suffix = "POST"
+        backspace_delete_command = edit_delete_probe_command(
+            edit_prefix,
+            backspace_target,
+            edit_suffix,
+            "",
+            BACKSPACE_DELETE_OK,
+            edit_delete_script,
+        )
+        client.write((backspace_delete_command + "\r").encode())
+        client.read_for(0.8)
+        edit_y = 2
+        edit_x1 = len(edit_prefix) + 1
+        edit_x2 = len(edit_prefix) + len(backspace_target)
+        edit_drag = (
+            f"\x1b[<0;{edit_x1};{edit_y}M"
+            f"\x1b[<32;{edit_x2};{edit_y}M"
+            f"\x1b[<0;{edit_x2};{edit_y}m"
+        )
+        client.write(edit_drag.encode())
+        client.read_for(0.3)
+        client.write(b"\x7f")
+        if not client.wait_contains(BACKSPACE_DELETE_OK, args.timeout):
+            print("Backspace did not delete the editable selection", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
+        delete_target = "DELETEKEY"
+        delete_delete_command = edit_delete_probe_command(
+            edit_prefix,
+            delete_target,
+            edit_suffix,
+            "",
+            DELETE_DELETE_OK,
+            edit_delete_script,
+        )
+        client.write((delete_delete_command + "\r").encode())
+        client.read_for(0.8)
+        edit_x2 = len(edit_prefix) + len(delete_target)
+        edit_drag = (
+            f"\x1b[<0;{edit_x1};{edit_y}M"
+            f"\x1b[<32;{edit_x2};{edit_y}M"
+            f"\x1b[<0;{edit_x2};{edit_y}m"
+        )
+        client.write(edit_drag.encode())
+        client.read_for(0.3)
+        client.write(b"\x1b[3~")
+        if not client.wait_contains(DELETE_DELETE_OK, args.timeout):
+            print("Delete did not delete the editable selection", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
+        replace_target = "REPLACE"
+        replacement = "z"
+        replace_delete_command = edit_delete_probe_command(
+            edit_prefix,
+            replace_target,
+            edit_suffix,
+            replacement,
+            REPLACE_DELETE_OK,
+            edit_delete_script,
+        )
+        client.write((replace_delete_command + "\r").encode())
+        client.read_for(0.8)
+        edit_x2 = len(edit_prefix) + len(replace_target)
+        edit_drag = (
+            f"\x1b[<0;{edit_x1};{edit_y}M"
+            f"\x1b[<32;{edit_x2};{edit_y}M"
+            f"\x1b[<0;{edit_x2};{edit_y}m"
+        )
+        client.write(edit_drag.encode())
+        client.read_for(0.3)
+        client.write(replacement.encode())
+        if not client.wait_contains(REPLACE_DELETE_OK, args.timeout):
+            print("text input did not replace the editable selection", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
         print("OK macOS UI selection smoke")
         print("selection highlight: reverse video observed after mouse-up")
         print(f"right-click menu copied: {right_copied}")
         print(f"right-click menu cut: {cut_copied}")
         print(f"right-click menu cut deleted: {cut_deleted}")
+        print("Backspace deleted editable selection: observed")
+        print("Delete deleted editable selection: observed")
+        print("text input replaced editable selection: observed")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
@@ -521,6 +672,7 @@ def main() -> int:
         child_paste_script.unlink(missing_ok=True)
         paste_click_script.unlink(missing_ok=True)
         cut_delete_script.unlink(missing_ok=True)
+        edit_delete_script.unlink(missing_ok=True)
         if not args.keep_daemon:
             stop_daemon(binary, args.session)
 

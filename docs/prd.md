@@ -45,7 +45,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V는 system clipboard paste로 동작한다.
 - terminal mode의 Home/End와 macOS Cmd-Shift-Left/Cmd-Shift-Right는 input line start/end 이동으로 동작한다.
 - 우클릭은 TUI context menu를 열고 Cut, Copy, Paste, Cancel을 제공한다.
-- Cmd-Shift-X는 현재 입력줄 suffix 선택이면 선택 텍스트를 system clipboard에 복사한 뒤 Backspace로 삭제하고, 삭제할 수 없는 출력 화면 선택이면 복사 후 tuimux selection을 해제한다.
+- Cmd-Shift-X는 현재 입력줄 선택이면 선택 텍스트를 system clipboard에 복사한 뒤 커서를 선택 끝으로 이동하고 Backspace로 삭제하며, 삭제할 수 없는 출력 화면 선택이면 복사 후 tuimux selection을 해제한다.
+- 현재 입력줄 선택이 있을 때 Backspace/Delete는 선택 영역을 삭제하고, 일반 문자 입력은 선택 영역을 삭제한 뒤 해당 문자를 입력한다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
 - host paste는 paste event 또는 raw bracketed-paste key sequence로 처리한다.
 - 붙여넣기 직후 쉘이 표시한 paste highlight는 다음 일반 left click에서 드래그 선택 해제처럼 사라진다.
@@ -82,7 +83,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V paste shortcut과 Home/End/Cmd-Shift-Left/Cmd-Shift-Right line-boundary shortcut regression test가 통과한다.
 - 붙여넣기 뒤 일반 left click이 쉘의 paste highlight pending 상태를 해제하고 기존 drag selection 흐름을 깨지 않는다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
-- macOS PTY UI smoke에서 drag selection, right-click context menu Cut/Copy, Cut의 Backspace child 전달, Ctrl-C clipboard copy, foreground child SIGINT 미전달, context menu Paste, child bracketed paste wrapper 보존이 통과한다.
+- macOS PTY UI smoke에서 drag selection, right-click context menu Cut/Copy, Cut의 Backspace child 전달, Backspace/delete/text replacement editable selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, context menu Paste, child bracketed paste wrapper 보존이 통과한다.
 - macOS window-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.
 - macOS no-tmux smoke에서 tmux 없는 PATH의 default TUI/doctor 성공과 `--native-client` 실패가 통과한다.
 - `--layout-preview`가 split-pane/resize 샘플이 아닌 terminal body + window-list preview를 출력한다.
