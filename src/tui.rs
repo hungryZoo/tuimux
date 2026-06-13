@@ -425,6 +425,7 @@ impl UiState {
         }
 
         self.paste_highlight_pending = false;
+        self.send_terminal_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         self.send_terminal_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     }
 
