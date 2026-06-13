@@ -1,12 +1,12 @@
 # tuimux PRD
 
-- **문서 버전**: 3.4
-- **대상 릴리스**: v0.2.0-alpha.32
+- **문서 버전**: 3.5
+- **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.32의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.33의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -35,7 +35,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - child가 OSC 0/1/2로 terminal title을 설정하면 오른쪽 window 목록에 해당 title을 표시한다.
 - child shell이 자체 종료되면 non-last window는 목록에서 제거하고, 마지막 window는 새 shell로 대체한다.
 - legacy split pane hotkey는 core state를 바꾸지 않는다.
-- terminal mode는 넓은 화면에서 borderless 오른쪽 rail만 표시하고 위/아래 status bar는 만들지 않는다. 좁은 화면의 compact top tab fallback은 잠시 비활성화해 `btop`, `htop`, `nano` 같은 앱에 정직한 PTY 크기를 준다.
+- terminal mode는 넓은 화면에서 boxed 오른쪽 rail만 표시하고 위/아래 status bar는 만들지 않는다. 좁은 화면의 compact top tab fallback은 잠시 비활성화해 `btop`, `htop`, `nano` 같은 앱에 정직한 PTY 크기를 준다.
+- terminal emulator는 btop이 쓰는 `CSI row;col f` HVP cursor-position sequence를 절대 위치 이동으로 처리한다.
 - terminal mode에서도 `Alt-N`, `Alt-S`, `Alt-Left`/`Alt-Right`로 window/session 작업을 할 수 있다.
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
@@ -61,7 +62,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 
 - `cargo fmt -- --check`와 `cargo test --quiet` 통과.
 - macOS ARM release build 성공.
-- macOS terminal-chrome smoke에서 기본 화면 borderless rail, child body 실행, rail `+ new` click, `F12` handoff가 통과한다.
+- macOS terminal-chrome smoke에서 기본 화면 boxed rail, child body 실행, rail `+ new` click, `F12` handoff가 통과한다.
 - `tuimux --doctor`가 tmux 부재를 실패로 보지 않는다.
 - detach 후 reattach smoke에서 shell 환경값이 유지된다.
 - navigation mode window 전환/생성/종료가 split-pane 조작 대신 동작한다.
@@ -70,6 +71,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - host bracketed paste setup/restore가 적용되어 paste event가 active pane으로 전달된다.
 - 열린 client가 있는 상태에서 두 번째 client가 snapshot/window/scrollback command를 수행하고 세 번째 client가 shutdown할 수 있다.
 - `btop`, `htop`, `nano`, `llmfit --help`가 native terminal surface에서 실행된다.
+- daemon snapshot에서 btop의 cpu/proc panel과 mouse protocol state가 정상으로 관측된다.
 - drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C + `pbpaste` smoke test가 통과한다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, host bracketed paste 전달, child bracketed paste wrapper 보존이 통과한다.

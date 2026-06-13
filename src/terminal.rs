@@ -206,6 +206,7 @@ pub struct PtyTerminal {
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     rx: Receiver<Vec<u8>>,
+    pending_parser_bytes: Vec<u8>,
     rows: u16,
     cols: u16,
     finished: bool,
@@ -266,6 +267,7 @@ impl PtyTerminal {
             writer,
             child,
             rx,
+            pending_parser_bytes: Vec::new(),
             rows,
             cols,
             finished: false,
@@ -277,6 +279,7 @@ impl PtyTerminal {
         loop {
             match self.rx.try_recv() {
                 Ok(bytes) => {
+                    let bytes = normalize_terminal_input(&bytes, &mut self.pending_parser_bytes);
                     self.parser.process(&bytes);
                     self.copy_pending_clipboard();
                     self.respond_pending_clipboard_paste();
@@ -587,6 +590,68 @@ impl PtyTerminal {
         let _ = self.writer.write_all(&response);
         let _ = self.writer.flush();
     }
+}
+
+fn normalize_terminal_input(chunk: &[u8], pending: &mut Vec<u8>) -> Vec<u8> {
+    let mut data = Vec::with_capacity(pending.len().saturating_add(chunk.len()));
+    if !pending.is_empty() {
+        data.extend_from_slice(pending);
+        pending.clear();
+    }
+    data.extend_from_slice(chunk);
+
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] != 0x1b {
+            out.push(data[i]);
+            i += 1;
+            continue;
+        }
+
+        if i + 1 >= data.len() {
+            pending.extend_from_slice(&data[i..]);
+            break;
+        }
+
+        if data[i + 1] != b'[' {
+            out.extend_from_slice(&data[i..=i + 1]);
+            i += 2;
+            continue;
+        }
+
+        let start = i;
+        let mut j = i + 2;
+        let mut invalid = false;
+        while j < data.len() {
+            let byte = data[j];
+            if (0x40..=0x7e).contains(&byte) {
+                break;
+            }
+            if !(0x20..=0x3f).contains(&byte) {
+                invalid = true;
+                break;
+            }
+            j += 1;
+        }
+
+        if invalid {
+            out.push(data[i]);
+            i += 1;
+            continue;
+        }
+
+        if j >= data.len() {
+            pending.extend_from_slice(&data[start..]);
+            break;
+        }
+
+        out.extend_from_slice(&data[start..j]);
+        out.push(if data[j] == b'f' { b'H' } else { data[j] });
+        i = j + 1;
+    }
+
+    out
 }
 
 impl Drop for PtyTerminal {
@@ -1046,6 +1111,46 @@ mod tests {
             TerminalStyle::from_cell(bg).bg,
             TerminalColor::Rgb(78, 90, 123)
         );
+    }
+
+    #[test]
+    fn terminal_input_normalizes_hvp_cursor_position() {
+        let mut pending = Vec::new();
+        let bytes = normalize_terminal_input(b"\x1b[2;3fX", &mut pending);
+        assert_eq!(bytes, b"\x1b[2;3HX");
+        assert!(pending.is_empty());
+
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(&bytes);
+
+        assert_eq!(parser.screen().cell(1, 2).unwrap().contents(), "X");
+        assert!(!parser.screen().cell(0, 0).unwrap().has_contents());
+    }
+
+    #[test]
+    fn terminal_input_keeps_incomplete_csi_between_chunks() {
+        let mut pending = Vec::new();
+        let first = normalize_terminal_input(b"\x1b[2;3", &mut pending);
+        assert!(first.is_empty());
+        assert_eq!(pending, b"\x1b[2;3");
+
+        let second = normalize_terminal_input(b"fX", &mut pending);
+        assert_eq!(second, b"\x1b[2;3HX");
+        assert!(pending.is_empty());
+
+        let mut parser = vt100::Parser::new(3, 10, 0);
+        parser.process(&second);
+        assert_eq!(parser.screen().cell(1, 2).unwrap().contents(), "X");
+    }
+
+    #[test]
+    fn terminal_input_leaves_other_csi_sequences_unchanged() {
+        let mut pending = Vec::new();
+        assert_eq!(
+            normalize_terminal_input(b"\x1b[?25l\x1b[31mred", &mut pending),
+            b"\x1b[?25l\x1b[31mred"
+        );
+        assert!(pending.is_empty());
     }
 
     #[test]

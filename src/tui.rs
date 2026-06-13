@@ -878,71 +878,69 @@ fn render_terminal_rail(
     }
 
     f.render_widget(Clear, area);
-    let width = area.width as usize;
-    let active_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Green)
-        .add_modifier(Modifier::BOLD);
-    let hot_style = Style::default().fg(Color::Black).bg(Color::Yellow);
-    let title_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let detach_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-    let muted_style = Style::default().fg(Color::DarkGray);
-    let hint_style = Style::default().fg(Color::Gray);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(2),
+        ])
+        .split(area);
 
-    let mut y = area.y;
-    regions.session_button = Rect::new(area.x, y, area.width, 1);
-    render_rail_line(
-        f,
-        regions.session_button,
-        &fit_and_pad_text(&format!("Session {session_label}"), width),
-        if hover == Some(Hotspot::SessionButton) {
-            hot_style
-        } else {
-            title_style
-        },
-    );
-    y = y.saturating_add(1);
-    if y >= area.bottom() {
+    regions.session_button = chunks[0];
+    regions.detach_button = chunks[1];
+
+    let session_hot = hover == Some(Hotspot::SessionButton);
+    let session = Paragraph::new(Line::from(Span::styled(
+        session_label.to_string(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .block(button_block(Some("Session"), Color::Cyan, session_hot));
+    f.render_widget(session, chunks[0]);
+
+    let detach_hot = hover == Some(Hotspot::DetachButton);
+    let detach = Paragraph::new(Line::from(Span::styled(
+        "Detach",
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .block(button_block(None, Color::Red, detach_hot));
+    f.render_widget(detach, chunks[1]);
+
+    render_terminal_windows(f, chunks[2], windows, status, scrollback, hover, regions);
+}
+
+fn render_terminal_windows(
+    f: &mut Frame,
+    area: Rect,
+    windows: &[Window],
+    status: Option<&str>,
+    scrollback: usize,
+    hover: Option<Hotspot>,
+    regions: &mut Regions,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" WINDOWS ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
         return;
     }
 
-    regions.detach_button = Rect::new(area.x, y, area.width, 1);
-    render_rail_line(
-        f,
-        regions.detach_button,
-        &fit_and_pad_text("Detach", width),
-        if hover == Some(Hotspot::DetachButton) {
-            hot_style
-        } else {
-            detach_style
-        },
-    );
-    y = y.saturating_add(2);
-    if y >= area.bottom() {
-        return;
-    }
+    let capacity = inner.height as usize;
+    let reserved_info_rows = if capacity >= 4 { 2 } else { 0 };
+    let max_windows = capacity
+        .saturating_sub(reserved_info_rows)
+        .saturating_sub(1)
+        .min(regions.windows.len());
+    let mut items = Vec::new();
 
-    render_rail_line(
-        f,
-        Rect::new(area.x, y, area.width, 1),
-        &fit_and_pad_text("WINDOWS", width),
-        title_style,
-    );
-    y = y.saturating_add(1);
-
-    let info_rows = 2_u16;
-    let mut max_window_rows = area.bottom().saturating_sub(y).saturating_sub(info_rows);
-    if max_window_rows > 0 {
-        max_window_rows = max_window_rows.saturating_sub(1);
-    }
-
-    for (row, win) in windows.iter().enumerate() {
-        if row >= regions.windows.len() || row as u16 >= max_window_rows || y >= area.bottom() {
-            break;
-        }
-        let row_rect = Rect::new(area.x, y, area.width, 1);
+    for (row, win) in windows.iter().take(max_windows).enumerate() {
+        let y = inner.y.saturating_add(row as u16);
+        let row_rect = Rect::new(inner.x, y, inner.width, 1);
         let close_rect = Rect::new(
             row_rect.x.saturating_add(row_rect.width.saturating_sub(2)),
             y,
@@ -954,67 +952,47 @@ fn render_terminal_rail(
         regions.window_count += 1;
 
         let marker = if win.active { "▸" } else { " " };
-        let mut text = fit_bar_text(
-            &format!("{marker} {}: {}", win.index, win.name),
-            width.saturating_sub(2),
-        );
-        text.push(' ');
-        text.push('✕');
-        let style = if hover == Some(Hotspot::Window(row)) {
-            hot_style
-        } else if win.active {
-            active_style
+        items.push(ListItem::new(window_row_line(
+            marker,
+            win,
+            area.width.saturating_sub(2),
+            hover,
+            row,
+        )));
+    }
+
+    if items.len() < capacity {
+        let row = items.len() as u16;
+        regions.new_window = Rect::new(inner.x, inner.y.saturating_add(row), inner.width, 1);
+        let new_hot = hover == Some(Hotspot::NewWindow);
+        let new_style = if new_hot {
+            Style::default().fg(Color::Black).bg(Color::Green)
         } else {
-            Style::default()
+            Style::default().fg(Color::Green)
         };
-        render_rail_line(f, row_rect, &fit_and_pad_text(&text, width), style);
-        y = y.saturating_add(1);
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  + new", new_style,
+        ))));
     }
 
-    if y < area.bottom().saturating_sub(info_rows) {
-        regions.new_window = Rect::new(area.x, y, area.width, 1);
-        render_rail_line(
-            f,
-            regions.new_window,
-            &fit_and_pad_text("+ new", width),
-            if hover == Some(Hotspot::NewWindow) {
-                hot_style
-            } else {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            },
-        );
-        y = y.saturating_add(1);
+    if items.len() < capacity {
+        items.push(ListItem::new(Line::from(Span::styled(
+            fit_bar_text(&format!("  scrollback:{scrollback}"), inner.width as usize),
+            Style::default().fg(Color::DarkGray),
+        ))));
     }
 
-    if y < area.bottom() {
-        render_rail_line(
-            f,
-            Rect::new(area.x, y, area.width, 1),
-            &fit_and_pad_text(&format!("scrollback:{scrollback}"), width),
-            muted_style,
-        );
-        y = y.saturating_add(1);
-    }
-    if y < area.bottom() {
+    if items.len() < capacity {
         let hint = status
             .filter(|text| !text.is_empty())
             .unwrap_or("F12 nav Alt-N new");
-        render_rail_line(
-            f,
-            Rect::new(area.x, y, area.width, 1),
-            &fit_and_pad_text(hint, width),
-            hint_style,
-        );
+        items.push(ListItem::new(Line::from(Span::styled(
+            fit_bar_text(&format!("  {hint}"), inner.width as usize),
+            Style::default().fg(Color::Gray),
+        ))));
     }
-}
 
-fn render_rail_line(f: &mut Frame, area: Rect, text: &str, style: Style) {
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(text.to_string(), style))),
-        area,
-    );
+    f.render_widget(List::new(items), inner);
 }
 
 fn fit_bar_text(text: &str, width: usize) -> String {
@@ -1839,7 +1817,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_mode_wide_layout_integrates_borderless_rail_controls() {
+    fn terminal_mode_wide_layout_integrates_boxed_rail_controls() {
         let mut state = test_state();
         state.current_session = "dev".to_string();
         state.terminal_scrollback = 7;
@@ -1867,13 +1845,15 @@ mod tests {
         terminal.draw(|frame| ui(frame, &mut state)).unwrap();
 
         let body = rendered_line(&terminal, 0, 90);
-        let session = rendered_line(&terminal, 0, 110);
-        let sidebar_title = rendered_line(&terminal, 3, 110);
-        let scrollback = rendered_line(&terminal, 7, 110);
-        let hint = rendered_line(&terminal, 8, 110);
+        let session_title = rendered_line(&terminal, 0, 110);
+        let session_label = rendered_line(&terminal, 1, 110);
+        let sidebar_title = rendered_line(&terminal, 6, 110);
+        let scrollback = rendered_line(&terminal, 10, 110);
+        let hint = rendered_line(&terminal, 11, 110);
 
         assert!(body.contains("BODY_LINE"), "{body:?}");
-        assert!(session.contains("Session dev"), "{session:?}");
+        assert!(session_title.contains("Session"), "{session_title:?}");
+        assert!(session_label.contains("dev"), "{session_label:?}");
         assert!(sidebar_title.contains("WINDOWS"), "{sidebar_title:?}");
         assert!(scrollback.contains("scrollback:7"), "{scrollback:?}");
         assert!(hint.contains("F12 nav"), "{hint:?}");

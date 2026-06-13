@@ -280,8 +280,8 @@ def main() -> int:
         wait_screen_or_fail(client, "F12 nav", args.timeout, "rail after child clear")
 
         client.clear_buffer()
-        client.write(b"\x1b[<0;104;6M\x1b[<0;104;6m")
-        wait_or_fail(client, "created window 2", args.timeout, "sidebar new-window click")
+        client.write(b"\x1b[<0;104;9M\x1b[<0;104;9m")
+        wait_screen_or_fail(client, "created window", args.timeout, "sidebar new-window click")
         wait_screen_or_fail(client, "2:", args.timeout, "clicked new window row")
 
         client.clear_buffer()
@@ -289,7 +289,7 @@ def main() -> int:
         wait_or_fail(client, "WINDOWS", args.timeout, "navigation sidebar")
 
         print("OK macOS terminal chrome smoke")
-        print("default terminal mode chrome: visible with borderless rail")
+        print("default terminal mode chrome: visible with boxed rail")
         print(f"child body marker: {CHILD_MARKER}")
         print("sidebar + new click: observed")
         print("F12 navigation handoff: observed")

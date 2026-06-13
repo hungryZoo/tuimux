@@ -1,13 +1,13 @@
 # tuimux SDD
 
-- **문서 버전**: 3.5
-- **대상 릴리스**: v0.2.0-alpha.32
+- **문서 버전**: 3.6
+- **대상 릴리스**: v0.2.0-alpha.33
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.32 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 넓은 화면에는 오른쪽 borderless rail을 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다. 위/아래 status bar와 compact top-tab fallback은 btop 호환성 확인 전까지 비활성화한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.33 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 넓은 화면에는 오른쪽 boxed rail을 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다. 위/아래 status bar와 compact top-tab fallback은 btop 같은 full-screen 앱의 PTY 크기를 보존하기 위해 비활성화한다.
 
 핵심 목표는 다음과 같다.
 
@@ -21,6 +21,7 @@
 - host terminal의 bracketed paste mode를 UI 생명주기에 맞춰 켜고 끈다.
 - scrollback, selection, clipboard는 host terminal에 가까운 감각으로 동작한다.
 - renderer는 이전 frame의 긴 줄이 다음 frame의 짧은 줄 뒤에 남지 않도록 row를 viewport 폭까지 지운다.
+- terminal emulator 입력은 `CSI row;col f` HVP(cursor position) sequence를 `CSI row;col H`와 동일하게 처리해 btop 같은 앱의 절대 위치 렌더링을 보존한다.
 - child application의 OSC title, OSC 52 clipboard copy, OSC 52 clipboard paste query를 terminal callback으로 처리한다.
 - tmux C 코드는 구조 참고로만 삼고 Rust 모듈로 직접 구현한다.
 - tmux fallback은 hidden `--native-client` 옵션에만 남긴다.
@@ -236,7 +237,7 @@ struct UiState {
 
 두 가지 mode가 있다.
 
-- **Terminal mode**: 첫 화면이자 기본 mode. 넓은 화면에서는 오른쪽 borderless rail이 session/window/action 조작을 제공하고, terminal body는 rail만 제외한 나머지 전체 영역을 차지한다. 좁은 화면에서는 compact top tabs를 만들지 않고 terminal body가 전체 화면을 사용한다. 키 입력은 기본적으로 active PTY로 간다.
+- **Terminal mode**: 첫 화면이자 기본 mode. 넓은 화면에서는 오른쪽 boxed rail이 session/window/action 조작을 제공하고, terminal body는 rail만 제외한 나머지 전체 영역을 차지한다. 좁은 화면에서는 compact top tabs를 만들지 않고 terminal body가 전체 화면을 사용한다. 키 입력은 기본적으로 active PTY로 간다.
 - **Navigation mode**: `F12`로 진입한다. main pane border와 right sidebar가 보이고 session/window 조작을 할 수 있다.
 
 Terminal mode는 넓은 화면에서 TUI rail을 기본으로 노출해 사용자가 multiplexer 기능을 마우스로 바로 쓰게 한다. rail은 100컬럼 이상에서만 표시하고, 표시될 때도 child PTY가 최소 80컬럼을 유지하도록 폭을 제한한다. 100컬럼 미만이거나 높이가 낮은 화면에서는 rail과 compact top-tab fallback을 모두 숨겨 full-screen 프로그램이 실제 host 크기에 가까운 PTY를 받도록 한다. Navigation mode의 오른쪽 sidebar는 같은 session, detach, status, windows 목록을 focus된 조작면으로 다시 보여준다.
@@ -362,7 +363,7 @@ terminal mode에서 root frame은 화면 폭에 따라 두 형태로 나뉜다. 
 └──────────────────────────────────────────────┘
 ```
 
-넓은 화면의 오른쪽 rail은 session button, detach button, active/inactive window rows, close button, 새 window row를 borderless text row로 노출한다. windows 아래에는 scrollback count와 hint/status row 두 줄을 둔다. rail rect는 `Regions`에 별도 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 rail 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
+넓은 화면의 오른쪽 rail은 session button, detach button, active/inactive window rows, close button, 새 window row를 boxed control로 노출한다. windows 아래에는 scrollback count와 hint/status row 두 줄을 둔다. rail rect는 `Regions`에 별도 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 rail 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
 
 ### 4.4 Window Navigation
 
@@ -481,7 +482,7 @@ F12, q, Esc, or Detach button
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
-- macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 borderless right rail과 scrollback/hint rows가 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
+- macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 boxed right rail과 scrollback/hint rows가 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
 - macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal click forwarding, Shift-drag tuimux selection override, selection Ctrl-C child 누수 방지를 확인.
 - macOS scrollback smoke script: 실제 TUI client에서 긴 shell output을 만든 뒤 mouse wheel, `PageUp`, `Home`, `End`가 active terminal history viewport를 이동하고 bottom으로 돌아오는지 확인하며, scrollback 중 host paste가 live bottom으로 복귀해 active shell에서 실행되는지 확인.
@@ -539,10 +540,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.32 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.33 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.32-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.33-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -550,8 +551,8 @@ v0.2.0-alpha.32 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.32/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.32 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.33/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.33 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계
