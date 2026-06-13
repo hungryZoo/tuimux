@@ -286,7 +286,33 @@ impl UiState {
     }
 
     fn cut_selection(&mut self) -> bool {
-        self.copy_selected_text("cut", true)
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let Ok(text) = self.mux.selected_text(range) else {
+            self.status = Some("cut failed: terminal is not ready".to_string());
+            return false;
+        };
+        if text.is_empty() {
+            return false;
+        }
+        match clipboard::copy_text(&text) {
+            Ok(()) => {
+                let chars = text.chars().count();
+                let deleted = self.delete_editable_selection(range, &text);
+                self.clear_selection();
+                self.status = Some(if deleted {
+                    format!("cut {chars} chars")
+                } else {
+                    format!("copied {chars} chars (not editable)")
+                });
+                true
+            }
+            Err(e) => {
+                self.status = Some(format!("cut failed: {e}"));
+                false
+            }
+        }
     }
 
     fn copy_selected_text(&mut self, verb: &str, clear_after: bool) -> bool {
@@ -314,6 +340,31 @@ impl UiState {
                 false
             }
         }
+    }
+
+    fn delete_editable_selection(&mut self, range: SelectionRange, text: &str) -> bool {
+        let range = range.normalized();
+        let Some((cursor_row, cursor_col)) = self.terminal_cursor else {
+            return false;
+        };
+        if self.terminal_hide_cursor {
+            return false;
+        }
+        if range.start_row != range.end_row || cursor_row != range.start_row {
+            return false;
+        }
+        if cursor_col != range.end_col && cursor_col != range.end_col.saturating_add(1) {
+            return false;
+        }
+
+        let delete_count = text.chars().filter(|ch| *ch != '\n').count();
+        if delete_count == 0 {
+            return false;
+        }
+        for _ in 0..delete_count {
+            self.send_terminal_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        true
     }
 
     fn terminal_mouse_protocol_active(&self) -> bool {
@@ -2861,6 +2912,21 @@ mod tests {
         }
 
         assert!(state.paste_highlight_pending);
+    }
+
+    #[test]
+    fn cut_deletes_only_current_input_suffix_selection() {
+        let mut state = test_state();
+        state.terminal_cursor = Some((2, 8));
+        state.terminal_hide_cursor = false;
+
+        assert!(state.delete_editable_selection(SelectionRange::new(2, 5, 2, 7), "abc"));
+        assert!(!state.delete_editable_selection(SelectionRange::new(1, 5, 1, 7), "abc"));
+        assert!(!state.delete_editable_selection(SelectionRange::new(2, 2, 2, 4), "abc"));
+        assert!(!state.delete_editable_selection(SelectionRange::new(2, 5, 3, 7), "abc"));
+
+        state.terminal_hide_cursor = true;
+        assert!(!state.delete_editable_selection(SelectionRange::new(2, 5, 2, 7), "abc"));
     }
 
     #[test]

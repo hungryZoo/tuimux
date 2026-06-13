@@ -279,11 +279,11 @@ struct SelectionState {
 - Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Super-Shift-C는 selection이 있을 때만 copy로 처리한다.
 - selection이 없으면 plain Ctrl-C는 active PTY로 전달해 foreground child interrupt로 동작하게 하고, Cmd-C/Super-C/Cmd-Shift-C/Super-Shift-C는 일반 문자 `c`로 누수하지 않는다.
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Super-Shift-V는 `clipboard::read_text()` 결과를 active PTY에 paste한다. Linux host마다 shortcut 전달 방식이 다를 수 있어 Control, Control-Shift, Super-Shift 계열을 모두 허용한다.
-- Ctrl-Shift-X/Cmd-Shift-X/Super-Shift-X는 selection이 있을 때 선택 텍스트를 clipboard에 복사하고 tuimux selection을 해제한다. 이는 host-side screen selection cut이며 child PTY의 화면/입력 버퍼를 삭제하지 않는다.
+- Ctrl-Shift-X/Cmd-Shift-X/Super-Shift-X는 selection이 있을 때 선택 텍스트를 clipboard에 복사한다. selection이 현재 cursor row에 있고 선택 끝이 cursor에 붙어 있으며 cursor가 숨겨져 있지 않으면 선택 글자 수만큼 Backspace를 active PTY에 보내 현재 입력줄 suffix를 삭제한다. 이 조건이 아니면 출력 화면처럼 편집할 수 없는 selection으로 보고 복사 후 tuimux selection만 해제한다.
 - Home/End는 active PTY에 line start/end key로 전달한다. macOS에서는 Cmd-Shift-Left/Cmd-Shift-Right를 UI client에서 Home/End key로 정규화해 active PTY에 전달한다.
 - paste 성공 후 `paste_highlight_pending`을 세운다. 또한 raw key 입력 tail이 `ESC [ 201 ~`와 일치하면 raw bracketed paste가 끝난 것으로 보고 같은 pending 상태를 세운다. child mouse protocol이 꺼진 상태에서 다음 left click이 발생하면 UI는 pending 상태를 내리고 Left/Right cursor key를 active PTY로 보내 shell-side paste highlight를 지운 뒤 cursor 위치를 되돌리고 기존 click/selection 처리를 계속한다.
 - 우클릭은 host terminal context menu를 직접 열 수 없으므로, TUI 안에 context menu를 띄워 native에 가까운 cut/copy/paste 동작으로 에뮬레이션한다.
-- context menu는 Cut, Copy, Paste, Cancel 항목을 갖는다. Cut은 selection이 있을 때 `cut_selection()`으로 system clipboard에 복사하고 tuimux selection을 해제한다. Copy는 selection이 있을 때 `copy_selection()`으로 system clipboard에 복사하고, Paste는 `clipboard::read_text()` 결과를 active PTY에 paste한다.
+- context menu는 Cut, Copy, Paste, Cancel 항목을 갖는다. Cut은 selection이 있을 때 `cut_selection()`으로 system clipboard에 복사하고, 현재 입력줄 suffix selection이면 Backspace를 보내 삭제한다. 삭제할 수 없는 화면 selection은 복사 후 tuimux selection만 해제한다. Copy는 selection이 있을 때 `copy_selection()`으로 system clipboard에 복사하고, Paste는 `clipboard::read_text()` 결과를 active PTY에 paste한다.
 
 terminal mode에서 copy shortcut은 다음 순서로 처리된다.
 
@@ -504,7 +504,7 @@ F12, q, Esc, or Detach button
 - daemon window-title regression test: child OSC 2 title이 snapshot window/pane metadata에 반영되는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
-- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click context menu의 Cut/Copy, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, context menu의 Paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지, raw bracketed paste 후 left click이 clear 입력을 보내는지 확인.
+- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click context menu의 Cut/Copy, Cut이 현재 입력줄 suffix selection에서 Backspace를 child까지 보내는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, context menu의 Paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지, raw bracketed paste 후 left click이 clear 입력을 보내는지 확인.
 - keyboard shortcut unit tests: Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Super-Shift-C copy predicate, 선택 없는 plain Ctrl-C interrupt fallback, Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Super-Shift-V paste predicate, Cmd-Shift-Left/Cmd-Shift-Right to Home/End 정규화, Home/End PTY key encoding을 확인.
 - paste highlight regression test: paste 성공 후 pending 상태가 켜지고 click-clear 경로에서 상태가 내려가는지 확인한다.
 - macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 boxed right rail과 scrollback/hint rows가 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
@@ -553,6 +553,7 @@ F12, q, Esc, or Detach button
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
 - child mouse tracking 중 normal left click은 child로 전달되고 normal drag는 tuimux selection으로 처리되는지 확인
 - 우클릭 context menu에서 Cut, Copy, Paste, Cancel이 표시되고 Cut/Copy/Paste가 동작하는지 확인
+- Cut이 현재 입력줄 suffix selection에서 system clipboard copy 후 Backspace를 child PTY에 보내 삭제 시도를 하는지 확인
 - parent `NO_COLOR=1` 상태에서도 child truecolor foreground/background SGR과 default reset이 tuimux TUI output에 보존되는지 확인
 - host resize 후 active child PTY가 새 rows/cols와 `SIGWINCH`를 관측하는지 확인
 - alternate-screen active/exit 후 primary screen 복귀와 primary scrollback 격리 확인

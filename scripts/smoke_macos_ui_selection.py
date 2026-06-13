@@ -40,6 +40,9 @@ PASTE_CLICK_MARKER = "TUIMUX_PASTE_CLICK_CLEAR_TARGET"
 PASTE_CLICK_READY = "PASTE_CLICK_CLEAR_READY"
 PASTE_CLICK_WAITING = "PASTE_CLICK_CLEAR_WAITING"
 PASTE_CLICK_OK = "PASTE_CLICK_CLEAR_OK"
+CUT_DELETE_MARKER = "TUIMUX_CUT_DELETE_TARGET"
+CUT_DELETE_READY = "CUT_DELETE_READY"
+CUT_DELETE_OK = "CUT_DELETE_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -256,6 +259,46 @@ finally:
     return f"python3 {shlex.quote(str(script_path))}"
 
 
+def cut_delete_probe_command(payload: str, script_path: Path) -> str:
+    probe = f"""
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+payload = {payload.encode()!r}
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+try:
+    tty.setraw(fd)
+    os.write(sys.stdout.fileno(), b"\\x1b[2J\\x1b[H{CUT_DELETE_READY}\\r\\n" + payload)
+    deleted = 0
+    deadline = time.time() + 5.0
+    while time.time() < deadline and deleted < len(payload):
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            for byte in chunk:
+                if byte == 0x7f:
+                    deleted += 1
+                    os.write(sys.stdout.fileno(), b"\\b \\b")
+                elif byte == 0x03:
+                    raise KeyboardInterrupt
+    if deleted == len(payload):
+        os.write(sys.stdout.fileno(), b"\\r\\n{CUT_DELETE_OK}\\r\\n")
+    else:
+        os.write(sys.stdout.fileno(), b"\\r\\nCUT_DELETE_BAD:" + str(deleted).encode() + b"\\r\\n")
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+"""
+    script_path.write_text(probe, encoding="utf-8")
+    return f"python3 {shlex.quote(str(script_path))}"
+
+
 def has_reverse_video_highlight(output: bytes, text: str) -> bool:
     text_bytes = re.escape(text.encode())
     return (
@@ -275,9 +318,11 @@ def main() -> int:
     trap_file = Path("/tmp") / f"tuimux-ui-copy-int-{os.getpid()}"
     child_paste_script = Path("/tmp") / f"tuimux-child-bracketed-{os.getpid()}.py"
     paste_click_script = Path("/tmp") / f"tuimux-paste-click-clear-{os.getpid()}.py"
+    cut_delete_script = Path("/tmp") / f"tuimux-cut-delete-{os.getpid()}.py"
     trap_file.unlink(missing_ok=True)
     child_paste_script.unlink(missing_ok=True)
     paste_click_script.unlink(missing_ok=True)
+    cut_delete_script.unlink(missing_ok=True)
     set_clipboard(SENTINEL)
 
     client = PtyClient(binary, args.session)
@@ -425,10 +470,45 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
+        cut_delete_command = cut_delete_probe_command(CUT_DELETE_MARKER, cut_delete_script)
+        client.write((cut_delete_command + "\r").encode())
+        client.read_for(0.8)
+
+        cut_y = 2
+        cut_x1 = 1
+        cut_x2 = len(CUT_DELETE_MARKER)
+        cut_drag = (
+            f"\x1b[<0;{cut_x1};{cut_y}M"
+            f"\x1b[<32;{cut_x2};{cut_y}M"
+            f"\x1b[<0;{cut_x2};{cut_y}m"
+        )
+        client.write(cut_drag.encode())
+        client.read_for(0.3)
+        client.write(f"\x1b[<2;{cut_x2};{cut_y}M\x1b[<2;{cut_x2};{cut_y}m".encode())
+        if not client.wait_contains("Cut", args.timeout):
+            print("cut delete context menu did not appear", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(
+            f"\x1b[<0;{cut_x2 + 2};{cut_y + 1}M\x1b[<0;{cut_x2 + 2};{cut_y + 1}m".encode()
+        )
+        if not client.wait_contains(CUT_DELETE_OK, args.timeout):
+            print("cut did not send Backspace to the foreground child", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        cut_deleted = get_clipboard()
+        if cut_deleted != CUT_DELETE_MARKER:
+            print(
+                f"cut delete clipboard mismatch: expected {CUT_DELETE_MARKER!r}, got {cut_deleted!r}",
+                file=sys.stderr,
+            )
+            return 1
+
         print("OK macOS UI selection smoke")
         print("selection highlight: reverse video observed after mouse-up")
         print(f"right-click menu copied: {right_copied}")
         print(f"right-click menu cut: {cut_copied}")
+        print(f"right-click menu cut deleted: {cut_deleted}")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
@@ -440,6 +520,7 @@ def main() -> int:
         trap_file.unlink(missing_ok=True)
         child_paste_script.unlink(missing_ok=True)
         paste_click_script.unlink(missing_ok=True)
+        cut_delete_script.unlink(missing_ok=True)
         if not args.keep_daemon:
             stop_daemon(binary, args.session)
 
