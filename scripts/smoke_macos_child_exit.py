@@ -257,8 +257,8 @@ def paste_shell(client: PtyClient, command: str) -> None:
 def enter_navigation(client: PtyClient, timeout: float) -> None:
     client.clear_buffer()
     client.write(F12)
-    wait_screen_or_fail(client, "navigation mode", timeout, "navigation status")
     wait_screen_or_fail(client, "WINDOWS", timeout, "window list")
+    wait_screen_or_fail(client, "+ new", timeout, "new-window row")
 
 
 def leave_navigation(client: PtyClient, timeout: float) -> None:

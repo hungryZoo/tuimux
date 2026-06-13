@@ -28,8 +28,8 @@ impl Default for PreviewData {
                 "test result: ok. 43 passed; 0 failed",
                 "",
                 "$ btop",
-                "  full-size PTY window selected from the right list",
-                "  F12 opens navigation; n creates a new window",
+                "  PTY body runs beside the integrated tuimux rail",
+                "  click + new, close, Session, or Detach in the rail",
             ],
         }
     }

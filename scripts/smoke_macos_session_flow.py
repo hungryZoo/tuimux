@@ -149,7 +149,6 @@ def paste_shell(client: PtyClient, command: str) -> None:
 def enter_navigation(client: PtyClient, timeout: float) -> None:
     client.clear_buffer()
     client.write(F12)
-    wait_or_fail(client, "navigation mode", timeout, "navigation status")
     wait_or_fail(client, "WINDOWS", timeout, "window list")
     wait_or_fail(client, "+ new", timeout, "new-window row")
 
@@ -161,15 +160,6 @@ def run_window_flow(client: PtyClient, timeout: float) -> None:
     client.write(b"n")
     wait_or_fail(client, "created", timeout, "new window status")
     wait_or_fail(client, "2:", timeout, "second window row")
-
-    client.clear_buffer()
-    client.write(b"|")
-    wait_or_fail(
-        client,
-        "deprecated",
-        timeout,
-        "split deprecated status",
-    )
 
     client.clear_buffer()
     client.write(b"x")
@@ -242,7 +232,7 @@ def main() -> int:
             second.close()
 
         print("OK macOS session flow smoke")
-        print("window workflow: new, split-deprecated, kill")
+        print("window workflow: new, kill")
         print("detach/reattach: shell state persisted")
         return 0
     except RuntimeError as exc:

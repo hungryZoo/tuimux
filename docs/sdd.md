@@ -1,13 +1,13 @@
 # tuimux SDD
 
 - **문서 버전**: 3.5
-- **대상 릴리스**: v0.2.0-alpha.30
+- **대상 릴리스**: v0.2.0-alpha.31
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.30 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 tuimux top tab strip과 bottom command/status strip을 항상 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.31 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 오른쪽 integrated rail 또는 compact tabs와 bottom command/status strip을 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다.
 
 핵심 목표는 다음과 같다.
 
@@ -113,7 +113,7 @@ Request::Shutdown
 
 응답은 `Ok`, `Snapshot`, `Name`, `Index`, `Scrollback`, `Text`, `Error` 중 하나다. daemon은 listener를 nonblocking mode로 두고 accepted client stream은 blocking mode로 되돌린 뒤 thread별로 처리한다. `NativeMux`는 `Arc<Mutex<NativeMux>>`로 공유한다. 여러 client가 동시에 attach할 수 있지만 독립 viewport/cursor 정책은 아직 범위 밖이며 active session/window state는 공유한다.
 
-`SplitPaneRight`, `SplitPaneDown`, `SelectNextPane`, `KillActivePane`, `ResizePane` request는 default product protocol에서 제거했다. `native_mux.rs`의 split layout tree와 split/resize/kill pane core도 제거되어, split hotkey는 UI status만 표시하고 daemon state를 변경하지 않는다.
+`SplitPaneRight`, `SplitPaneDown`, `SelectNextPane`, `KillActivePane`, `ResizePane` request는 default product protocol에서 제거했다. `native_mux.rs`의 split layout tree와 split/resize/kill pane core도 제거되어, legacy split hotkey는 daemon state를 변경하지 않는다.
 
 ### 3.3 `src/native_mux.rs`
 
@@ -129,7 +129,7 @@ pub struct NativeMux {
 }
 ```
 
-각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name, single PTY pane list, active pane index만 가진다. 기본 제품 path에서는 window마다 하나의 active terminal pane을 full-size로 사용한다.
+각 `NativeSession`은 window list와 active window index를 가진다. 각 `NativeWindow`는 index/name, single PTY pane list, active pane index만 가진다. 기본 제품 path에서는 window마다 하나의 active terminal pane이 현재 terminal body를 채운다.
 
 window list의 표시 이름은 `NativeWindow::display_name()`으로 계산한다. active pane의 `PtyTerminal::title()`이 있으면 child가 OSC 0/1/2로 설정한 title을 우선 표시하고, 없으면 기존 fallback 이름인 `shell` 또는 `shell-<n>`을 표시한다. pane metadata도 같은 방식으로 `display_title()`을 사용해 snapshot에 반영한다.
 
@@ -213,7 +213,7 @@ pub struct PtyTerminal {
 - `drain()`은 pending bytes를 parser에 반영한 뒤 `Child::try_wait()`로 child process 종료를 nonblocking으로 확인한다.
 - `is_finished()`는 cached `finished` 상태를 반환하거나 `try_wait()` 결과를 반영한다.
 - `Drop`은 아직 finished가 아닌 child만 best-effort kill한다.
-- daemon snapshot 경로는 `resize_active()`, `drain_all()`, `reap_finished_windows()` 순서로 실행되어 stale screen 대신 최신 window state를 반환한다.
+- daemon snapshot 경로는 `resize_active()`, `drain_all()`, `local_snapshot()`, `reap_finished_windows()` 순서로 실행한다. 그래서 child가 출력 직후 종료되어도 마지막 terminal 화면은 현재 snapshot에 한 번 노출되고, replacement/prune은 다음 snapshot부터 보인다.
 
 ### 3.5 `src/tui.rs`
 
@@ -236,10 +236,10 @@ struct UiState {
 
 두 가지 mode가 있다.
 
-- **Terminal mode**: 첫 화면이자 기본 mode. terminal body가 전체 frame을 차지한다. 키 입력은 기본적으로 active PTY로 간다.
+- **Terminal mode**: 첫 화면이자 기본 mode. 넓은 화면에서는 오른쪽 integrated rail이 session/window/action 조작을 제공하고, terminal body는 rail과 top/bottom chrome을 제외한 영역을 차지한다. 좁은 화면에서는 compact top tabs로 축약된다. 키 입력은 기본적으로 active PTY로 간다.
 - **Navigation mode**: `F12`로 진입한다. main pane border와 right sidebar가 보이고 session/window 조작을 할 수 있다.
 
-Terminal mode를 fullscreen으로 둔 이유는 full-screen 프로그램이 80x24 host에서 sidebar 때문에 52x22 같은 작은 PTY를 받지 않도록 하기 위해서다. Navigation mode의 오른쪽 sidebar는 session, detach, status, windows 목록만 노출한다.
+Terminal mode는 넓은 화면에서 TUI rail을 기본으로 노출해 사용자가 multiplexer 기능을 마우스로 바로 쓰게 한다. 96컬럼 미만이거나 높이가 낮은 화면에서는 rail을 접고 compact top/bottom chrome만 남겨 full-screen 프로그램이 지나치게 작은 PTY를 받지 않도록 한다. Navigation mode의 오른쪽 sidebar는 같은 session, detach, status, windows 목록을 focus된 조작면으로 다시 보여준다.
 
 terminal row 렌더링은 `terminal_row_spans_for_width(row, width)`를 통해 각 row 끝을 default-style 공백으로 채운다. ratatui backend가 짧은 `Line`만 받으면 이전 frame의 더 긴 glyph가 host terminal에 남을 수 있으므로, 모든 terminal row는 현재 viewport width만큼 명시적으로 덮어쓴다. default-style 공백은 foreground/background를 강제로 칠하지 않아 host terminal color policy를 유지한다.
 
@@ -251,7 +251,7 @@ Navigation mode 키:
 - `PageUp`, `PageDown`: active terminal scrollback을 한 화면 단위로 이동.
 - `Home`: 가능한 가장 위쪽 scrollback으로 이동.
 - `End`: scrollback bottom으로 이동.
-- `|`, `v`, `-`, `h`: split-pane deprecated status를 표시하고 새 pane을 만들지 않는다.
+- `|`, `v`, `-`, `h`: legacy split key로 예약되어 있지만 새 pane을 만들지 않는다.
 
 `setup()`은 raw mode, alternate screen, mouse capture와 함께 `EnableBracketedPaste`를 실행한다. 또한 tuimux가 일반 CLI가 아니라 child terminal renderer라는 점 때문에 `force_color_output(true)`를 호출해 parent-side `NO_COLOR`가 child output color를 지우지 않게 한다. `restore()`는 alternate screen/mouse capture를 해제하면서 `DisableBracketedPaste`도 실행해 host terminal 상태를 되돌린다.
 
@@ -340,24 +340,26 @@ tuimux --daemon --socket <path> --session <name> --cwd <path>
 loop
   -> state.sync_terminal(current terminal_body size)
      -> Request::Snapshot { width, height, selection }
-     -> daemon resize_active + drain_all + reap_finished_windows + local_snapshot
+     -> daemon resize_active + drain_all + local_snapshot + reap_finished_windows
   -> terminal.draw(ui)
   -> crossterm event poll/read
 ```
 
-terminal mode에서 root frame은 상단 1줄 `terminal_top_bar`, 가운데 `terminal_body`, 하단 1줄 `terminal_bottom_bar`로 나뉜다. `terminal_body`만 active child PTY size와 mouse/selection coordinate에 사용한다. navigation mode에서는 main pane과 sidebar layout으로 나뉜다.
+terminal mode에서 root frame은 화면 폭에 따라 두 형태로 나뉜다. 넓은 화면은 왼쪽 terminal frame과 오른쪽 `side_rail`로 나뉘며, terminal frame 내부는 상단 1줄 `terminal_top_bar`, 가운데 `terminal_body`, 하단 1줄 `terminal_bottom_bar`로 나뉜다. 좁은 화면은 `side_rail` 없이 top tab strip, terminal body, bottom bar만 사용한다. `terminal_body`만 active child PTY size와 mouse/selection coordinate에 사용한다. navigation mode에서는 main pane과 sidebar layout으로 나뉜다.
 
 ### 4.3.1 Terminal Mode Chrome
 
 ```text
 ┌ root ───────────────────────────────────────┐
-│ tuimux  <session>  1:shell  2:logs  +       │
-│ <active child PTY terminal body>             │
-│ F12 nav  Alt-S sessions  Alt-N new ...       │
+│ tuimux <session> | window 1:shell            │ Session │
+│ <active child PTY terminal body>             │ Detach  │
+│ click WINDOWS/+ new/session/detach ...       │ WINDOWS │
+│                                              │ 1:shell │
+│                                              │ + new   │
 └──────────────────────────────────────────────┘
 ```
 
-상단 bar는 session button, active/inactive window tab, 새 window button을 노출한다. 하단 bar는 status가 있으면 status를, 없으면 terminal mode hotkey를 표시한다. 두 bar는 `Regions`에 별도 rect로 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 top/bottom chrome 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
+넓은 화면의 오른쪽 rail은 session button, detach button, active/inactive window rows, close button, 새 window row를 노출한다. compact mode의 상단 bar는 session button, active/inactive window tab, 새 window button을 노출한다. 하단 bar는 status가 있으면 status를, 없으면 terminal mode hotkey와 mouse-first 조작 힌트를 표시한다. chrome/rail rect는 `Regions`에 별도 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 chrome 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
 
 ### 4.4 Window Navigation
 
@@ -467,26 +469,26 @@ F12, q, Esc, or Detach button
 - crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
 - terminal row padding regression test: 긴 row 이후 짧은 row를 그렸을 때 stale glyph가 남지 않는지 확인.
 - UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거.
-- terminal-mode chrome regression tests: 기본 terminal mode render buffer에 tuimux/session/window tab/command hint가 찍히고, top/bottom chrome이 terminal cell hit-test에서 제외되는지 확인.
+- terminal-mode chrome regression tests: 기본 terminal mode render buffer에 tuimux/session/window rail/command hint가 찍히고, chrome/rail이 terminal cell hit-test에서 제외되는지 확인.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
-- daemon child-exit regression test: 마지막 shell `exit` 후 replacement shell이 명령을 받을 수 있고, non-last shell `exit` 후 window list에서 제거되는지 확인.
+- daemon child-exit regression test: shell `exit` 직전 출력이 한 snapshot에 노출되고, 마지막 shell `exit` 후 replacement shell이 명령을 받을 수 있으며, non-last shell `exit` 후 window list에서 제거되는지 확인.
 - daemon alternate-screen regression test: alternate-screen marker가 primary screen 복귀 후 primary scrollback snapshot에 섞이지 않는지 확인.
 - daemon window-title regression test: child OSC 2 title이 snapshot window/pane metadata에 반영되는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
 - macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, host bracketed paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
-- macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 top tab strip과 bottom command/status strip이 보이는지, child terminal body가 계속 명령을 실행하는지, `Alt-N` 새 window와 `F12` navigation handoff가 동작하는지 확인.
+- macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 integrated right rail과 bottom command/status strip이 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
 - macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal click forwarding, Shift-drag tuimux selection override, selection Ctrl-C child 누수 방지를 확인.
 - macOS scrollback smoke script: 실제 TUI client에서 긴 shell output을 만든 뒤 mouse wheel, `PageUp`, `Home`, `End`가 active terminal history viewport를 이동하고 bottom으로 돌아오는지 확인하며, scrollback 중 host paste가 live bottom으로 복귀해 active shell에서 실행되는지 확인.
 - macOS truecolor smoke script: parent `NO_COLOR=1` 환경에서 child가 출력한 `38;2` foreground, `48;2` background, default color reset이 실제 TUI output에 남는지 확인.
-- macOS resize smoke script: 실제 TUI client의 host PTY를 resize한 뒤 active child process가 `SIGWINCH`와 chrome을 제외한 새 `30x120` terminal body size를 관측하는지 확인.
+- macOS resize smoke script: 실제 TUI client의 host PTY를 resize한 뒤 active child process가 `SIGWINCH`와 integrated rail/chrome을 제외한 새 `30x92` terminal body size를 관측하는지 확인.
 - macOS alternate-screen smoke script: 실제 TUI client에서 raw alternate-screen sequence가 active일 때 보이고 종료 후 primary screen으로 복귀하는지 확인.
 - macOS window-title smoke script: 실제 TUI client에서 child OSC title이 오른쪽 window list row에 표시되는지 확인.
 - macOS OSC 52 clipboard smoke script: 실제 TUI client에서 child OSC 52 copy 요청이 macOS `pbpaste`에 반영되는지 확인.
 - macOS OSC 52 paste smoke script: 실제 TUI client에서 child OSC 52 paste query가 macOS clipboard text를 PTY response로 돌려받는지 확인.
-- macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, split hotkey deprecated status, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
+- macOS session-flow smoke script: 실제 TUI client에서 `F12` navigation mode, 오른쪽 window list, `n` 새 window, `x` window 종료, detach, 같은 session reattach 후 shell state 유지를 확인.
 - macOS child-exit smoke script: 실제 TUI client에서 마지막 shell `exit` 후 replacement shell 명령 실행, non-last shell `exit` 후 오른쪽 window list 제거를 확인.
 - macOS no-tmux smoke script: `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `SHELL=/bin/sh` 환경에서 `--doctor`, default TUI PTY shell, `--native-client` failure boundary를 확인.
 
@@ -530,14 +532,14 @@ F12, q, Esc, or Detach button
 - scrollback 중 host paste가 live bottom으로 돌아와 active shell에서 실행되는지 확인
 - navigation mode에서 `n` 새 window, `x` active window 종료, `Tab`/arrow window 전환 확인
 - shell `exit`로 마지막 window replacement와 non-last window list 제거 확인
-- navigation mode에서 split hotkey가 새 pane을 만들지 않고 deprecated status를 표시하는지 확인
+- legacy split hotkey가 native mux core에 pane state를 만들지 않는지 확인
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.30 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.31 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.30-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.31-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -545,8 +547,8 @@ v0.2.0-alpha.30 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.30/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.30 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.31/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.31 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

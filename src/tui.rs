@@ -102,6 +102,14 @@ struct SelectionState {
     dragging: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TerminalModeLayout {
+    top_bar: Rect,
+    terminal_body: Rect,
+    bottom_bar: Rect,
+    side_rail: Option<Rect>,
+}
+
 impl UiState {
     /// Build initial state from the native multiplexer.
     fn bootstrap(initial_session: &str, cwd: PathBuf) -> anyhow::Result<Self> {
@@ -740,18 +748,20 @@ fn ui(f: &mut Frame, state: &mut UiState) {
     };
 
     if state.terminal_mode && !state.session_modal_open {
-        let (top_bar, terminal_area, bottom_bar) = terminal_mode_layout(root);
+        let layout = terminal_mode_layout(root);
+        let compact_tabs = layout.side_rail.is_none();
         render_terminal_top_bar(
             f,
-            top_bar,
+            layout.top_bar,
             session_label,
             &state.windows,
             state.hover,
+            compact_tabs,
             &mut state.regions,
         );
         render_main(
             f,
-            terminal_area,
+            layout.terminal_body,
             terminal_axis,
             terminal_separators,
             terminal_panes,
@@ -765,11 +775,23 @@ fn ui(f: &mut Frame, state: &mut UiState) {
         );
         render_terminal_bottom_bar(
             f,
-            bottom_bar,
+            layout.bottom_bar,
             state.status.as_deref(),
             state.terminal_scrollback,
+            layout.side_rail.is_some(),
             &mut state.regions,
         );
+        if let Some(side_rail) = layout.side_rail {
+            render_sidebar(
+                f,
+                side_rail,
+                session_label,
+                &state.windows,
+                state.status.as_deref(),
+                state.hover,
+                &mut state.regions,
+            );
+        }
         return;
     }
 
@@ -830,20 +852,45 @@ fn button_block<'a>(title: Option<&'a str>, color: Color, hot: bool) -> Block<'a
     }
 }
 
-fn terminal_mode_layout(area: Rect) -> (Rect, Rect, Rect) {
+fn terminal_mode_layout(area: Rect) -> TerminalModeLayout {
     if area.height < 3 {
-        return (Rect::default(), area, Rect::default());
+        return TerminalModeLayout {
+            top_bar: Rect::default(),
+            terminal_body: area,
+            bottom_bar: Rect::default(),
+            side_rail: None,
+        };
     }
 
-    let top = Rect::new(area.x, area.y, area.width, 1);
-    let bottom = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
-    let body = Rect::new(
-        area.x,
-        area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(2),
+    let (terminal_frame, side_rail) = if area.width >= 96 && area.height >= 10 {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(48), Constraint::Length(28)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
+    let top = Rect::new(terminal_frame.x, terminal_frame.y, terminal_frame.width, 1);
+    let bottom = Rect::new(
+        terminal_frame.x,
+        terminal_frame.bottom().saturating_sub(1),
+        terminal_frame.width,
+        1,
     );
-    (top, body, bottom)
+    let body = Rect::new(
+        terminal_frame.x,
+        terminal_frame.y.saturating_add(1),
+        terminal_frame.width,
+        terminal_frame.height.saturating_sub(2),
+    );
+    TerminalModeLayout {
+        top_bar: top,
+        terminal_body: body,
+        bottom_bar: bottom,
+        side_rail,
+    }
 }
 
 fn render_terminal_top_bar(
@@ -852,6 +899,7 @@ fn render_terminal_top_bar(
     session_label: &str,
     windows: &[Window],
     hover: Option<Hotspot>,
+    compact_tabs: bool,
     regions: &mut Regions,
 ) {
     regions.terminal_top_bar = area;
@@ -893,48 +941,61 @@ fn render_terminal_top_bar(
         },
     );
     let session_text = format!(" {session_label} ");
-    regions.session_button = Rect::new(
-        area.x,
-        area.y,
-        (x.saturating_sub(area.x) as usize + session_text.chars().count()).min(area.width as usize)
-            as u16,
-        1,
-    );
+    if compact_tabs {
+        regions.session_button = Rect::new(
+            area.x,
+            area.y,
+            (x.saturating_sub(area.x) as usize + session_text.chars().count())
+                .min(area.width as usize) as u16,
+            1,
+        );
+    }
     push_bar_segment(&mut spans, &mut x, right, &session_text, base_style);
 
-    push_bar_segment(&mut spans, &mut x, right, " ", base_style);
-    for (row, win) in windows.iter().enumerate() {
-        if row >= regions.windows.len() || x >= right {
-            break;
+    if compact_tabs {
+        push_bar_segment(&mut spans, &mut x, right, " ", base_style);
+        for (row, win) in windows.iter().enumerate() {
+            if row >= regions.windows.len() || x >= right {
+                break;
+            }
+            let label = truncate_chars(&format!(" {}:{} ", win.index, win.name), 18);
+            let width = label.chars().count().min(right.saturating_sub(x) as usize) as u16;
+            regions.windows[row] = Rect::new(x, area.y, width, 1);
+            regions.window_close[row] = Rect::default();
+            regions.window_count += 1;
+            let hot = hover == Some(Hotspot::Window(row));
+            let style = if hot {
+                hot_style
+            } else if win.active {
+                active_style
+            } else {
+                inactive_style
+            };
+            push_bar_segment(&mut spans, &mut x, right, &label, style);
         }
-        let label = truncate_chars(&format!(" {}:{} ", win.index, win.name), 18);
-        let width = label.chars().count().min(right.saturating_sub(x) as usize) as u16;
-        regions.windows[row] = Rect::new(x, area.y, width, 1);
-        regions.window_close[row] = Rect::default();
-        regions.window_count += 1;
-        let hot = hover == Some(Hotspot::Window(row));
-        let style = if hot {
-            hot_style
-        } else if win.active {
-            active_style
-        } else {
-            inactive_style
-        };
-        push_bar_segment(&mut spans, &mut x, right, &label, style);
-    }
 
-    if x < right {
-        let new_label = " + ";
-        regions.new_window = Rect::new(x, area.y, new_label.chars().count() as u16, 1);
-        let style = if hover == Some(Hotspot::NewWindow) {
-            hot_style
-        } else {
-            Style::default()
-                .fg(Color::Green)
-                .bg(Color::Black)
-                .add_modifier(Modifier::BOLD)
-        };
-        push_bar_segment(&mut spans, &mut x, right, new_label, style);
+        if x < right {
+            let new_label = " + ";
+            regions.new_window = Rect::new(x, area.y, new_label.chars().count() as u16, 1);
+            let style = if hover == Some(Hotspot::NewWindow) {
+                hot_style
+            } else {
+                Style::default()
+                    .fg(Color::Green)
+                    .bg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            };
+            push_bar_segment(&mut spans, &mut x, right, new_label, style);
+        }
+    } else {
+        let count = windows.len();
+        let active = windows
+            .iter()
+            .find(|window| window.active)
+            .map(|window| format!("window {}:{}", window.index, window.name))
+            .unwrap_or_else(|| "no window".to_string());
+        let rail_hint = format!(" | {active} | {count} windows | right rail controls sessions");
+        push_bar_segment(&mut spans, &mut x, right, &rail_hint, muted_style);
     }
 
     if x < right {
@@ -950,6 +1011,7 @@ fn render_terminal_bottom_bar(
     area: Rect,
     status: Option<&str>,
     scrollback: usize,
+    side_rail_visible: bool,
     regions: &mut Regions,
 ) {
     regions.terminal_bottom_bar = area;
@@ -966,8 +1028,11 @@ fn render_terminal_bottom_bar(
         .add_modifier(Modifier::BOLD);
     let scroll_style = Style::default().fg(Color::Yellow).bg(Color::Black);
 
-    let hints =
-        "F12 nav  Alt-S sessions  Alt-N new  Alt-Left/Right windows  drag select  Ctrl-C copy";
+    let hints = if side_rail_visible {
+        "click WINDOWS/+ new/session/detach  F12 focus nav  Alt-N new  drag select  Ctrl-C copy"
+    } else {
+        "F12 nav  Alt-S sessions  Alt-N new  Alt-Left/Right windows  drag select  Ctrl-C copy"
+    };
     let has_status = status.filter(|s| !s.is_empty()).is_some();
     let mut text = if let Some(status) = status.filter(|s| !s.is_empty()) {
         format!(" {status}  |  {hints}")
@@ -1038,6 +1103,15 @@ fn fit_bar_text(text: &str, width: usize) -> String {
         fitted.push('…');
         fitted
     }
+}
+
+fn fit_and_pad_text(text: &str, width: usize) -> String {
+    let mut fitted = fit_bar_text(text, width);
+    let used = fitted.chars().count();
+    if used < width {
+        fitted.push_str(&" ".repeat(width - used));
+    }
+    fitted
 }
 
 fn render_main(
@@ -1356,8 +1430,9 @@ fn render_sidebar(
     .block(button_block(None, Color::Red, detach_hot));
     f.render_widget(detach, chunks[1]);
 
+    let status_text = fit_and_pad_text(status.unwrap_or_default(), chunks[2].width as usize);
     let status_line = Paragraph::new(Line::from(Span::styled(
-        status.unwrap_or_default().to_string(),
+        status_text,
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(status_line, chunks[2]);
@@ -1853,6 +1928,84 @@ mod tests {
     }
 
     #[test]
+    fn terminal_mode_wide_layout_integrates_sidebar_controls() {
+        let mut state = test_state();
+        state.current_session = "dev".to_string();
+        state.windows = vec![
+            Window {
+                index: 1,
+                name: "shell".to_string(),
+                active: true,
+                panes: 1,
+            },
+            Window {
+                index: 2,
+                name: "logs".to_string(),
+                active: false,
+                panes: 1,
+            },
+        ];
+        state.terminal_rows = vec![vec![TerminalSpan {
+            text: "BODY_LINE".to_string(),
+            style: TerminalStyle::default(),
+        }]];
+
+        let backend = TestBackend::new(110, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| ui(frame, &mut state)).unwrap();
+
+        let top = rendered_line(&terminal, 0, 82);
+        let body = rendered_line(&terminal, 1, 82);
+        let sidebar_title = rendered_line(&terminal, 8, 110);
+        let bottom = rendered_line(&terminal, 13, 82);
+
+        assert!(top.contains("right rail controls"), "{top:?}");
+        assert!(body.contains("BODY_LINE"), "{body:?}");
+        assert!(sidebar_title.contains("WINDOWS"), "{sidebar_title:?}");
+        assert!(bottom.contains("click WINDOWS"), "{bottom:?}");
+        assert_eq!(state.regions.terminal_body, Rect::new(0, 1, 82, 12));
+        assert_eq!(terminal_cell_at_pane(0, 1, &state.regions), Some((0, 0, 0)));
+        assert_eq!(terminal_cell_at_pane(83, 1, &state.regions), None);
+
+        assert_eq!(
+            hit_test(
+                state.regions.session_button.x,
+                state.regions.session_button.y,
+                &state.regions,
+                false
+            ),
+            Some(Hotspot::SessionButton)
+        );
+        assert_eq!(
+            hit_test(
+                state.regions.detach_button.x,
+                state.regions.detach_button.y,
+                &state.regions,
+                false
+            ),
+            Some(Hotspot::DetachButton)
+        );
+        assert_eq!(
+            hit_test(
+                state.regions.windows[1].x,
+                state.regions.windows[1].y,
+                &state.regions,
+                false
+            ),
+            Some(Hotspot::Window(1))
+        );
+        assert_eq!(
+            hit_test(
+                state.regions.new_window.x,
+                state.regions.new_window.y,
+                &state.regions,
+                false
+            ),
+            Some(Hotspot::NewWindow)
+        );
+    }
+
+    #[test]
     fn hit_test_prefers_window_close_x_over_window_row() {
         let mut regions = Regions::default();
         regions.windows[0] = Rect::new(10, 5, 20, 1);
@@ -1879,6 +2032,25 @@ mod tests {
         assert_eq!(last.content.as_ref(), "✕");
         assert_eq!(last.style.fg, Some(Color::Red));
         assert_eq!(last.style.bg, Some(Color::Black));
+    }
+
+    #[test]
+    fn window_row_line_renders_osc_title_name() {
+        let active = Window {
+            index: 1,
+            name: "OSC_TITLE".to_string(),
+            active: true,
+            panes: 1,
+        };
+        let row = window_row_line("▸", &active, 26, None, 0);
+        let text = row
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("1: OSC_TITLE"), "{text:?}");
+        assert_eq!(text.chars().count(), 26);
     }
 
     #[test]
@@ -2009,6 +2181,50 @@ mod tests {
         );
 
         assert_eq!(spans.last().expect("padding span").content.as_ref(), "  ");
+    }
+
+    #[test]
+    fn sidebar_status_padding_clears_previous_long_status() {
+        let windows = vec![Window {
+            index: 1,
+            name: "shell".to_string(),
+            active: true,
+            panes: 1,
+        }];
+        let backend = TestBackend::new(40, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut regions = Regions::default();
+
+        terminal
+            .draw(|frame| {
+                render_sidebar(
+                    frame,
+                    frame.size(),
+                    "dev",
+                    &windows,
+                    Some("scrollback 24 rows"),
+                    None,
+                    &mut regions,
+                );
+            })
+            .unwrap();
+        terminal
+            .draw(|frame| {
+                render_sidebar(
+                    frame,
+                    frame.size(),
+                    "dev",
+                    &windows,
+                    Some("navigation mode"),
+                    None,
+                    &mut regions,
+                );
+            })
+            .unwrap();
+
+        let status = rendered_line(&terminal, 6, 40);
+        assert!(status.contains("navigation mode"), "{status:?}");
+        assert!(!status.contains("rows"), "{status:?}");
     }
 
     #[test]

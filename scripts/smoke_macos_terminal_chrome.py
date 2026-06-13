@@ -262,8 +262,11 @@ def main() -> int:
     client = PtyClient(binary, args.session)
     try:
         wait_screen_or_fail(client, "tuimux", args.timeout, "terminal top chrome")
-        wait_screen_or_fail(client, "F12 nav", args.timeout, "terminal command bar")
-        wait_screen_or_fail(client, "Alt-N new", args.timeout, "new-window hint")
+        wait_screen_or_fail(client, "WINDOWS", args.timeout, "integrated window rail")
+        wait_screen_or_fail(client, "Detach", args.timeout, "integrated detach button")
+        wait_screen_or_fail(client, "+ new", args.timeout, "integrated new-window row")
+        wait_screen_or_fail(client, "F12 focus nav", args.timeout, "terminal command bar")
+        wait_screen_or_fail(client, "click WINDOWS", args.timeout, "mouse-first rail hint")
 
         client.clear_buffer()
         client.write(
@@ -274,21 +277,21 @@ def main() -> int:
             ).encode()
         )
         wait_or_fail(client, CHILD_MARKER, args.timeout, "child terminal body")
-        wait_screen_or_fail(client, "F12 nav", args.timeout, "chrome after child clear")
+        wait_screen_or_fail(client, "F12 focus nav", args.timeout, "chrome after child clear")
 
         client.clear_buffer()
-        client.write(b"\x1bn")
-        wait_or_fail(client, "created window 2", args.timeout, "Alt-N new-window status")
-        wait_or_fail(client, "2:", args.timeout, "new window tab")
+        client.write(b"\x1b[<0;75;11M\x1b[<0;75;11m")
+        wait_or_fail(client, "created window 2", args.timeout, "sidebar new-window click")
+        wait_screen_or_fail(client, "2:", args.timeout, "clicked new window row")
 
         client.clear_buffer()
         client.write(F12)
         wait_or_fail(client, "WINDOWS", args.timeout, "navigation sidebar")
 
         print("OK macOS terminal chrome smoke")
-        print("default terminal mode chrome: visible")
+        print("default terminal mode chrome: visible with integrated rail")
         print(f"child body marker: {CHILD_MARKER}")
-        print("Alt-N new-window command: observed")
+        print("sidebar + new click: observed")
         print("F12 navigation handoff: observed")
         return 0
     except RuntimeError as exc:

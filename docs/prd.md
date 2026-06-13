@@ -1,12 +1,12 @@
 # tuimux PRD
 
 - **문서 버전**: 3.4
-- **대상 릴리스**: v0.2.0-alpha.30
+- **대상 릴리스**: v0.2.0-alpha.31
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.30의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.31의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 세션/윈도우/PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -34,8 +34,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - navigation mode에서 오른쪽 window 목록을 보고 `Tab`/arrow key로 window를 전환하고, `n`/`x`로 window를 만들고 닫을 수 있다.
 - child가 OSC 0/1/2로 terminal title을 설정하면 오른쪽 window 목록에 해당 title을 표시한다.
 - child shell이 자체 종료되면 non-last window는 목록에서 제거하고, 마지막 window는 새 shell로 대체한다.
-- split pane hotkey는 새 pane을 만들지 않고 deprecated status를 보여주며 core state를 바꾸지 않는다.
-- terminal mode는 상단 session/window tab strip과 하단 command/status strip을 항상 표시하고, 그 사이 terminal body에서 `btop`, `htop`, `nano` 같은 앱에 충분한 PTY 크기를 준다.
+- legacy split pane hotkey는 core state를 바꾸지 않는다.
+- terminal mode는 넓은 화면에서 오른쪽 integrated rail과 하단 command/status strip을 항상 표시하고, 좁은 화면에서는 compact tab strip으로 축약한다. terminal body에서는 `btop`, `htop`, `nano` 같은 앱에 충분한 PTY 크기를 준다.
 - terminal mode에서도 `Alt-N`, `Alt-S`, `Alt-Left`/`Alt-Right`로 window/session 작업을 할 수 있다.
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
@@ -61,7 +61,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 
 - `cargo fmt -- --check`와 `cargo test --quiet` 통과.
 - macOS ARM release build 성공.
-- macOS terminal-chrome smoke에서 기본 화면 top/bottom chrome, child body 실행, `Alt-N`, `F12` handoff가 통과한다.
+- macOS terminal-chrome smoke에서 기본 화면 integrated rail/compact chrome, child body 실행, rail `+ new` click, `F12` handoff가 통과한다.
 - `tuimux --doctor`가 tmux 부재를 실패로 보지 않는다.
 - detach 후 reattach smoke에서 shell 환경값이 유지된다.
 - navigation mode window 전환/생성/종료가 split-pane 조작 대신 동작한다.
@@ -73,13 +73,13 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C + `pbpaste` smoke test가 통과한다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, host bracketed paste 전달, child bracketed paste wrapper 보존이 통과한다.
-- macOS session-flow smoke에서 detach/reattach shell state 유지와 window-list workflow, split deprecated status가 통과한다.
+- macOS session-flow smoke에서 detach/reattach shell state 유지와 window-list workflow가 통과한다.
 - macOS no-tmux smoke에서 tmux 없는 PATH의 default TUI/doctor 성공과 `--native-client` 실패가 통과한다.
 - `--layout-preview`가 split-pane/resize 샘플이 아닌 terminal body + window-list preview를 출력한다.
 - macOS mouse-protocol smoke에서 child SGR mouse tracking 중 normal mouse forwarding과 Shift-drag selection override가 통과한다.
 - macOS scrollback smoke에서 실제 TUI의 mouse wheel, `PageUp`, `Home`, `End` active terminal history navigation과 scrollback 중 paste bottom 복귀가 통과한다.
 - macOS truecolor smoke에서 `NO_COLOR=1` 부모 환경에서도 child `38;2`/`48;2` SGR과 default reset이 실제 TUI output에 보존된다.
-- macOS resize smoke에서 host PTY resize 후 child가 `SIGWINCH`와 chrome을 제외한 새 `30x120` terminal body size를 관측한다.
+- macOS resize smoke에서 host PTY resize 후 child가 `SIGWINCH`와 integrated rail/chrome을 제외한 새 `30x92` terminal body size를 관측한다.
 - macOS alternate-screen smoke와 daemon regression에서 alternate-screen active/exit, primary screen 복귀, primary scrollback 격리가 통과한다.
 - macOS child-exit smoke에서 마지막 shell 종료 후 replacement shell이 명령을 받고, non-last shell 종료 후 window list에서 제거된다.
 - macOS window-title smoke에서 child OSC title이 오른쪽 window list에 표시된다.

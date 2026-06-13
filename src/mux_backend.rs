@@ -95,8 +95,9 @@ impl MuxBackend {
             MuxBackend::Local(mux) => {
                 mux.resize_active(width, height);
                 mux.drain_all();
+                let snapshot = local_snapshot(mux, width, height, selection);
                 mux.reap_finished_windows(width, height)?;
-                Ok(local_snapshot(mux, width, height, selection))
+                Ok(snapshot)
             }
         }
     }
@@ -840,8 +841,9 @@ mod unix_remote {
             } => {
                 mux.resize_active(width, height);
                 mux.drain_all();
+                let snapshot = local_snapshot(mux, width, height, selection);
                 match mux.reap_finished_windows(width, height) {
-                    Ok(_) => Response::Snapshot(local_snapshot(mux, width, height, selection)),
+                    Ok(_) => Response::Snapshot(snapshot),
                     Err(err) => Response::Error(err.to_string()),
                 }
             }

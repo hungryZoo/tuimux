@@ -2,7 +2,7 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.30 keeps the default runtime on the Rust-native path and brings
+v0.2.0-alpha.31 keeps the default runtime on the Rust-native path and brings
 the tuimux TUI back into the default terminal screen: terminal mode now shows a
 top session/window tab strip and a bottom command/status strip around the live
 PTY body. This prerelease keeps the OSC 52 clipboard loop from alpha.29 and
@@ -24,8 +24,8 @@ See:
 This is still a 0.x prerelease. Current behavior:
 
 - `tuimux` opens the Rust-native tuimux TUI by default.
-- Terminal mode shows persistent tuimux chrome: a top session/window tab strip and a bottom command/status strip.
-- The child PTY uses the terminal body between those two strips, so mouse and keyboard routing do not treat chrome cells as child terminal cells.
+- Terminal mode is now a full tuimux shell: wide terminals show a persistent right rail with Session, Detach, WINDOWS, close buttons, and `+ new`; narrow terminals fall back to compact top tabs.
+- The child PTY uses only the terminal body outside the chrome/rail, so mouse and keyboard routing do not treat TUI controls as child terminal cells.
 - `Alt-N` creates a window, `Alt-S` opens the session picker, and `Alt-Left`/`Alt-Right` switch windows while staying in terminal mode.
 - Press `F12` to switch between terminal mode and navigation/sidebar mode.
 - Sessions, windows, and each active PTY-backed shell are managed by the tuimux daemon, not by tmux.
@@ -44,7 +44,7 @@ This is still a 0.x prerelease. Current behavior:
 - Child truecolor foreground/background and default-color reset are preserved by the real TUI renderer, covered by the macOS color smoke.
 - Host resize reaches the active child PTY as a SIGWINCH with updated rows/columns, covered by the macOS resize smoke.
 - Alternate-screen output is visible while active, primary screen rendering is restored after exit, and alternate-screen text is kept out of primary scrollback.
-- If a child shell exits, non-last windows are pruned from the window list and the last window is replaced with a fresh shell, covered by the macOS child-exit smoke.
+- If a child shell exits, its final screen is exposed for one snapshot, then non-last windows are pruned and the last window is replaced with a fresh shell, covered by the macOS child-exit smoke.
 - `tuimux --native-client` is a fallback that opens a plain tmux client when tmux is installed.
 - `tuimux --doctor`, `--version`, and `--layout-preview` remain available.
 
@@ -56,8 +56,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.30/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.30 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.31/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.31 bash
 ```
 
 Verify:
@@ -99,5 +99,5 @@ python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.30` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.31` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.
