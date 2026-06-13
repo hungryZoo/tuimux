@@ -18,6 +18,7 @@ See:
 - [SRS](docs/srs.md)
 - [SDD](docs/sdd.md)
 - [PRD](docs/prd.md)
+- [btop terminal emulator skill](docs/skills/btop-terminal-emulator.md)
 
 ## Current Prerelease Scope
 
