@@ -59,7 +59,7 @@ struct Regions {
     terminal_panes: [Rect; 8],
     terminal_pane_count: usize,
     context_menu: Rect,
-    context_menu_items: [Rect; 3],
+    context_menu_items: [Rect; 4],
     context_menu_count: usize,
 }
 
@@ -115,6 +115,7 @@ struct ContextMenuState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextMenuAction {
+    Cut,
     Copy,
     Paste,
     Cancel,
@@ -128,8 +129,9 @@ struct TerminalModeLayout {
 
 const WINDOW_CLOSE_WIDTH: u16 = 3;
 const CONTEXT_MENU_WIDTH: u16 = 14;
-const CONTEXT_MENU_HEIGHT: u16 = 5;
-const CONTEXT_MENU_ACTIONS: [ContextMenuAction; 3] = [
+const CONTEXT_MENU_HEIGHT: u16 = 6;
+const CONTEXT_MENU_ACTIONS: [ContextMenuAction; 4] = [
+    ContextMenuAction::Cut,
     ContextMenuAction::Copy,
     ContextMenuAction::Paste,
     ContextMenuAction::Cancel,
@@ -280,6 +282,14 @@ impl UiState {
     }
 
     fn copy_selection(&mut self) -> bool {
+        self.copy_selected_text("copied", false)
+    }
+
+    fn cut_selection(&mut self) -> bool {
+        self.copy_selected_text("cut", true)
+    }
+
+    fn copy_selected_text(&mut self, verb: &str, clear_after: bool) -> bool {
         let Some(range) = self.selection_range() else {
             return false;
         };
@@ -292,7 +302,11 @@ impl UiState {
         }
         match clipboard::copy_text(&text) {
             Ok(()) => {
-                self.status = Some(format!("copied {} chars", text.chars().count()));
+                let chars = text.chars().count();
+                if clear_after {
+                    self.clear_selection();
+                }
+                self.status = Some(format!("{verb} {chars} chars"));
                 true
             }
             Err(e) => {
@@ -323,6 +337,15 @@ impl UiState {
                 self.status = Some("nothing selected".to_string());
                 return;
             }
+        }
+
+        if is_cut_shortcut(key) {
+            if self.selection_range().is_some() {
+                self.cut_selection();
+            } else {
+                self.status = Some("nothing selected".to_string());
+            }
+            return;
         }
 
         if is_paste_shortcut(key) {
@@ -461,6 +484,11 @@ fn is_paste_shortcut(key: KeyEvent) -> bool {
         && (key.modifiers == KeyModifiers::CONTROL
             || is_control_shift_shortcut(key.modifiers)
             || is_macos_shift_command(key.modifiers))
+}
+
+fn is_cut_shortcut(key: KeyEvent) -> bool {
+    shortcut_char(key, 'x')
+        && (is_control_shift_shortcut(key.modifiers) || is_macos_shift_command(key.modifiers))
 }
 
 fn shortcut_char(key: KeyEvent, expected: char) -> bool {
@@ -906,6 +934,10 @@ fn handle_context_menu_key(state: &mut UiState, key: KeyEvent) -> bool {
             perform_context_menu_action(state, menu.selected);
             true
         }
+        KeyCode::Char('x') | KeyCode::Char('X') => {
+            perform_context_menu_action(state, ContextMenuAction::Cut);
+            true
+        }
         KeyCode::Char('c') | KeyCode::Char('C') => {
             perform_context_menu_action(state, ContextMenuAction::Copy);
             true
@@ -958,6 +990,11 @@ fn handle_context_menu_mouse(state: &mut UiState, mouse: &MouseEvent) -> bool {
 fn perform_context_menu_action(state: &mut UiState, action: ContextMenuAction) {
     state.close_context_menu();
     match action {
+        ContextMenuAction::Cut => {
+            if !state.cut_selection() {
+                state.status = Some("nothing selected".to_string());
+            }
+        }
         ContextMenuAction::Copy => {
             if !state.copy_selection() {
                 state.status = Some("nothing selected".to_string());
@@ -1379,7 +1416,7 @@ fn render_context_menu(
     regions: &mut Regions,
 ) {
     regions.context_menu = Rect::default();
-    regions.context_menu_items = [Rect::default(); 3];
+    regions.context_menu_items = [Rect::default(); 4];
     regions.context_menu_count = 0;
 
     let Some(menu) = menu else {
@@ -1442,17 +1479,20 @@ fn context_menu_rect(root: Rect, anchor: (u16, u16)) -> Rect {
 
 fn context_menu_line(action: ContextMenuAction, width: u16, hot: bool) -> Line<'static> {
     let label = match action {
+        ContextMenuAction::Cut => "Cut",
         ContextMenuAction::Copy => "Copy",
         ContextMenuAction::Paste => "Paste",
         ContextMenuAction::Cancel => "Cancel",
     };
     let prefix = match action {
+        ContextMenuAction::Cut => "X",
         ContextMenuAction::Copy => "C",
         ContextMenuAction::Paste => "P",
         ContextMenuAction::Cancel => "Esc",
     };
     let text = fit_and_pad_text(&format!(" {prefix}  {label}"), width as usize);
     let color = match action {
+        ContextMenuAction::Cut => andromeda_nova(),
         ContextMenuAction::Copy => andromeda_starlight(),
         ContextMenuAction::Paste => andromeda_aurora(),
         ContextMenuAction::Cancel => andromeda_comet(),
@@ -2293,7 +2333,7 @@ mod tests {
     }
 
     #[test]
-    fn right_click_context_menu_renders_copy_paste_cancel() {
+    fn right_click_context_menu_renders_cut_copy_paste_cancel() {
         let mut state = test_state();
         state.context_menu = Some(ContextMenuState {
             anchor: (2, 2),
@@ -2313,14 +2353,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(full_screen.contains("MENU"), "{full_screen}");
+        assert!(full_screen.contains("Cut"), "{full_screen}");
         assert!(full_screen.contains("Copy"), "{full_screen}");
         assert!(full_screen.contains("Paste"), "{full_screen}");
         assert!(full_screen.contains("Cancel"), "{full_screen}");
-        assert_eq!(state.regions.context_menu_count, 3);
+        assert_eq!(state.regions.context_menu_count, 4);
         assert_eq!(
             hit_test(
-                state.regions.context_menu_items[0].x,
-                state.regions.context_menu_items[0].y,
+                state.regions.context_menu_items[1].x,
+                state.regions.context_menu_items[1].y,
                 &state.regions
             ),
             Some(Hotspot::ContextMenu(ContextMenuAction::Copy))
@@ -2333,7 +2374,7 @@ mod tests {
 
         assert_eq!(
             rect,
-            Rect::new(6, 3, CONTEXT_MENU_WIDTH, CONTEXT_MENU_HEIGHT)
+            Rect::new(6, 2, CONTEXT_MENU_WIDTH, CONTEXT_MENU_HEIGHT)
         );
     }
 
@@ -2390,7 +2431,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_shortcuts_support_host_copy_paste_variants() {
+    fn terminal_shortcuts_support_host_copy_cut_paste_variants() {
         assert!(is_copy_shortcut(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL
@@ -2413,6 +2454,14 @@ mod tests {
         )));
         assert!(is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(is_cut_shortcut(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT
+        )));
+        assert!(is_cut_shortcut(KeyEvent::new(
+            KeyCode::Char('x'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT
         )));
         assert!(!is_copy_shortcut(KeyEvent::new(
@@ -2425,6 +2474,14 @@ mod tests {
         )));
         assert!(!is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
+            KeyModifiers::SUPER
+        )));
+        assert!(!is_cut_shortcut(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_cut_shortcut(KeyEvent::new(
+            KeyCode::Char('x'),
             KeyModifiers::SUPER
         )));
     }

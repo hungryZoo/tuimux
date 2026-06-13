@@ -316,12 +316,14 @@ def main() -> int:
 
         right_click_menu = f"\x1b[<2;{x2};{y}M\x1b[<2;{x2};{y}m"
         client.write(right_click_menu.encode())
-        if not client.wait_contains("Copy", args.timeout):
+        if not client.wait_contains("Cut", args.timeout) or not client.wait_contains(
+            "Copy", args.timeout
+        ):
             print("right-click context menu did not appear", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
 
-        copy_item_click = f"\x1b[<0;{x2 + 2};{y + 1}M\x1b[<0;{x2 + 2};{y + 1}m"
+        copy_item_click = f"\x1b[<0;{x2 + 2};{y + 2}M\x1b[<0;{x2 + 2};{y + 2}m"
         client.write(copy_item_click.encode())
         time.sleep(0.5)
 
@@ -347,6 +349,22 @@ def main() -> int:
             )
             return 1
 
+        client.write(right_click_menu.encode())
+        if not client.wait_contains("Cut", args.timeout):
+            print("right-click cut menu did not appear", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        cut_item_click = f"\x1b[<0;{x2 + 2};{y + 1}M\x1b[<0;{x2 + 2};{y + 1}m"
+        client.write(cut_item_click.encode())
+        time.sleep(0.5)
+        cut_copied = get_clipboard()
+        if cut_copied != MARKER:
+            print(
+                f"right-click cut clipboard mismatch: expected {MARKER!r}, got {cut_copied!r}",
+                file=sys.stderr,
+            )
+            return 1
+
         time.sleep(3.0)
         clear_selection_click = "\x1b[<0;1;1M\x1b[<0;1;1m"
         client.write(clear_selection_click.encode())
@@ -363,7 +381,7 @@ def main() -> int:
             print("right-click paste menu did not appear", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
-        client.write(b"\x1b[<0;3;3M\x1b[<0;3;3m")
+        client.write(b"\x1b[<0;3;4M\x1b[<0;3;4m")
         client.read_for(0.2)
         client.write(b"\r")
         if not client.wait_contains(RIGHT_PASTE_OUTPUT, args.timeout):
@@ -410,6 +428,7 @@ def main() -> int:
         print("OK macOS UI selection smoke")
         print("selection highlight: reverse video observed after mouse-up")
         print(f"right-click menu copied: {right_copied}")
+        print(f"right-click menu cut: {cut_copied}")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
