@@ -39,6 +39,7 @@ enum Exit {
 enum Hotspot {
     SessionButton,
     DetachButton,
+    StatusPanel,
     MainPane,
     Window(usize),
     WindowClose(usize),
@@ -54,6 +55,7 @@ struct Regions {
     terminal_body: Rect,
     session_button: Rect,
     detach_button: Rect,
+    status_panel: Rect,
     new_window: Rect,
     windows: [Rect; 8],
     window_close: [Rect; 8],
@@ -105,6 +107,8 @@ struct TerminalModeLayout {
     terminal_body: Rect,
     side_rail: Option<Rect>,
 }
+
+const WINDOW_CLOSE_WIDTH: u16 = 3;
 
 fn andromeda_nebula() -> Color {
     Color::Rgb(0x00, 0xE8, 0xC6)
@@ -581,6 +585,9 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                         Some(Hotspot::DetachButton) | Some(Hotspot::ModalDetach) => {
                             return Ok(Exit::Detach);
                         }
+                        Some(Hotspot::StatusPanel) => {
+                            scroll_active_pane(state, 0);
+                        }
                         Some(Hotspot::MainPane) => {
                             state.terminal_mode = true;
                             state.status =
@@ -891,6 +898,7 @@ fn render_terminal_rail(
     regions.new_window = Rect::default();
     regions.session_button = Rect::default();
     regions.detach_button = Rect::default();
+    regions.status_panel = Rect::default();
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -934,7 +942,7 @@ fn render_terminal_rail(
     f.render_widget(detach, chunks[1]);
 
     render_terminal_windows(f, chunks[2], windows, hover, regions);
-    render_terminal_status(f, chunks[3], scrollback);
+    render_terminal_status(f, chunks[3], scrollback, hover, regions);
 }
 
 fn render_terminal_windows(
@@ -965,9 +973,11 @@ fn render_terminal_windows(
         let y = inner.y.saturating_add(row as u16);
         let row_rect = Rect::new(inner.x, y, inner.width, 1);
         let close_rect = Rect::new(
-            row_rect.x.saturating_add(row_rect.width.saturating_sub(2)),
+            row_rect
+                .x
+                .saturating_add(row_rect.width.saturating_sub(WINDOW_CLOSE_WIDTH)),
             y,
-            2.min(row_rect.width),
+            WINDOW_CLOSE_WIDTH.min(row_rect.width),
             1,
         );
         regions.windows[row] = row_rect;
@@ -1003,13 +1013,28 @@ fn render_terminal_windows(
     f.render_widget(List::new(items), inner);
 }
 
-fn render_terminal_status(f: &mut Frame, area: Rect, scrollback: usize) {
+fn render_terminal_status(
+    f: &mut Frame,
+    area: Rect,
+    scrollback: usize,
+    hover: Option<Hotspot>,
+    regions: &mut Regions,
+) {
+    regions.status_panel = area;
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let status_style = Style::default()
-        .fg(andromeda_comet())
-        .add_modifier(Modifier::BOLD);
+    let hot = hover == Some(Hotspot::StatusPanel);
+    let status_style = if hot {
+        Style::default()
+            .fg(Color::Black)
+            .bg(andromeda_comet())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(andromeda_comet())
+            .add_modifier(Modifier::BOLD)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(status_style)
@@ -1019,7 +1044,7 @@ fn render_terminal_status(f: &mut Frame, area: Rect, scrollback: usize) {
             &format!("scroll:{scrollback}"),
             area.width.saturating_sub(2) as usize,
         ),
-        Style::default().fg(andromeda_comet()),
+        status_style,
     )))
     .alignment(Alignment::Center)
     .block(block);
@@ -1401,9 +1426,11 @@ fn render_windows(
         let y = inner_top.saturating_add(row as u16);
         let row_rect = Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1);
         let close_rect = Rect::new(
-            row_rect.x.saturating_add(row_rect.width.saturating_sub(2)),
+            row_rect
+                .x
+                .saturating_add(row_rect.width.saturating_sub(WINDOW_CLOSE_WIDTH)),
             y,
-            2.min(row_rect.width),
+            WINDOW_CLOSE_WIDTH.min(row_rect.width),
             1,
         );
         regions.windows[row] = row_rect;
@@ -1547,12 +1574,13 @@ fn window_row_line(
 ) -> Line<'static> {
     let width = width as usize;
     let close_hot = hover == Some(Hotspot::WindowClose(row));
-    if width <= 2 {
-        return Line::from(Span::styled("✕".to_string(), close_style(close_hot)));
+    let close_width = WINDOW_CLOSE_WIDTH as usize;
+    if width <= close_width {
+        return Line::from(Span::styled(" X ".to_string(), close_style(close_hot)));
     }
 
     let label = format!("{marker} {}: {}", win.index, win.name);
-    let label_width = width.saturating_sub(2);
+    let label_width = width.saturating_sub(close_width);
     let label_len = label.chars().count();
     let label_text = if label_len >= label_width {
         label.chars().take(label_width).collect::<String>()
@@ -1574,19 +1602,20 @@ fn window_row_line(
 
     Line::from(vec![
         Span::styled(label_text, row_style),
-        Span::raw(" "),
-        Span::styled("✕", close_style(close_hot)),
+        Span::styled(" X ", close_style(close_hot)),
     ])
 }
 
 fn close_style(hot: bool) -> Style {
     if hot {
         Style::default()
-            .fg(andromeda_nova())
-            .bg(Color::Black)
+            .fg(Color::Black)
+            .bg(andromeda_nova())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(andromeda_nova())
+        Style::default()
+            .fg(andromeda_nova())
+            .add_modifier(Modifier::BOLD)
     }
 }
 
@@ -1634,6 +1663,9 @@ fn hit_test(x: u16, y: u16, regions: &Regions, modal_open: bool) -> Option<Hotsp
     }
     if contains(regions.detach_button, x, y) {
         return Some(Hotspot::DetachButton);
+    }
+    if contains(regions.status_panel, x, y) {
+        return Some(Hotspot::StatusPanel);
     }
     for idx in 0..regions.window_count {
         if contains(regions.window_close[idx], x, y) {
@@ -1958,6 +1990,15 @@ mod tests {
         );
         assert_eq!(
             hit_test(
+                state.regions.status_panel.x,
+                state.regions.status_panel.y,
+                &state.regions,
+                false
+            ),
+            Some(Hotspot::StatusPanel)
+        );
+        assert_eq!(
+            hit_test(
                 state.regions.windows[1].x,
                 state.regions.windows[1].y,
                 &state.regions,
@@ -1980,11 +2021,11 @@ mod tests {
     fn hit_test_prefers_window_close_x_over_window_row() {
         let mut regions = Regions::default();
         regions.windows[0] = Rect::new(10, 5, 20, 1);
-        regions.window_close[0] = Rect::new(28, 5, 2, 1);
+        regions.window_close[0] = Rect::new(27, 5, 3, 1);
         regions.window_count = 1;
 
         assert_eq!(
-            hit_test(28, 5, &regions, false),
+            hit_test(27, 5, &regions, false),
             Some(Hotspot::WindowClose(0))
         );
         assert_eq!(hit_test(12, 5, &regions, false), Some(Hotspot::Window(0)));
@@ -2000,9 +2041,9 @@ mod tests {
         };
         let row = window_row_line("▸", &active, 20, Some(Hotspot::WindowClose(0)), 0);
         let last = row.spans.last().expect("close span");
-        assert_eq!(last.content.as_ref(), "✕");
-        assert_eq!(last.style.fg, Some(andromeda_nova()));
-        assert_eq!(last.style.bg, Some(Color::Black));
+        assert_eq!(last.content.as_ref(), " X ");
+        assert_eq!(last.style.fg, Some(Color::Black));
+        assert_eq!(last.style.bg, Some(andromeda_nova()));
     }
 
     #[test]

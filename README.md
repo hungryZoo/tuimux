@@ -25,7 +25,7 @@ See:
 This is still a 0.x prerelease. Current behavior:
 
 - `tuimux` opens the Rust-native tuimux TUI by default.
-- Terminal mode is now a full tuimux shell: wide terminals show a boxed right rail with Session, Detach, WINDOWS, close buttons, `+ new`, and a Comet-colored STATUS panel that only shows `scroll:<count>`.
+- Terminal mode is now a full tuimux shell: wide terminals show a boxed right rail with Session, Detach, WINDOWS, 3-cell ` X ` close buttons, `+ new`, and a Comet-colored STATUS panel that only shows `scroll:<count>` and jumps to bottom when clicked.
 - Narrow terminals temporarily hide terminal-mode chrome instead of switching to compact top tabs, so apps such as `btop` can keep an honest 80-column PTY.
 - The PTY parser normalizes HVP cursor-position sequences (`CSI row;col f`) used by full-screen apps such as `btop`.
 - The child PTY uses only the terminal body outside the rail, so mouse and keyboard routing do not treat TUI controls as child terminal cells.

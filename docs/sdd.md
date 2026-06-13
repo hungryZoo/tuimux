@@ -363,7 +363,7 @@ terminal mode에서 root frame은 화면 폭에 따라 두 형태로 나뉜다. 
 └──────────────────────────────────────────────┘
 ```
 
-넓은 화면의 오른쪽 rail은 session button, detach button, active/inactive window rows, close button, 새 window row를 boxed control로 노출한다. windows 아래에는 별도 STATUS panel을 두고 `scroll:<count>`만 표시한다. transient message인 `created window ...`는 terminal-mode status panel에 표시하지 않는다. rail rect는 `Regions`에 별도 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 rail 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
+넓은 화면의 오른쪽 rail은 session button, detach button, active/inactive window rows, 3-cell ` X ` close button, 새 window row를 boxed control로 노출한다. windows 아래에는 별도 STATUS panel을 두고 `scroll:<count>`만 표시한다. STATUS panel을 클릭하면 active terminal scrollback을 bottom으로 이동해 `scroll:0` 상태로 돌아온다. transient message인 `created window ...`는 terminal-mode status panel에 표시하지 않는다. rail rect는 `Regions`에 별도 기록되며 `terminal_cell_at_pane()`에 포함되지 않는다. 따라서 rail 위 mouse click은 child mouse event로 전달되지 않고, terminal body 안의 drag/click만 selection 또는 child mouse protocol routing으로 들어간다.
 
 ### 4.4 Window Navigation
 
@@ -473,7 +473,7 @@ F12, q, Esc, or Detach button
 - crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
 - terminal row padding regression test: 긴 row 이후 짧은 row를 그렸을 때 stale glyph가 남지 않는지 확인.
 - UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거.
-- terminal-mode rail regression tests: 넓은 기본 terminal mode render buffer에 Session/Detach/WINDOWS rail, STATUS panel, `scroll:<count>`가 찍히고, rail이 terminal cell hit-test에서 제외되는지 확인. 좁은 화면에서는 compact top tab fallback 없이 전체 root가 terminal body가 되는지 확인.
+- terminal-mode rail regression tests: 넓은 기본 terminal mode render buffer에 Session/Detach/WINDOWS rail, 3-cell ` X ` close button, STATUS panel, `scroll:<count>`가 찍히고, rail과 STATUS click이 terminal cell hit-test에서 제외되는지 확인. 좁은 화면에서는 compact top tab fallback 없이 전체 root가 terminal body가 되는지 확인.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
 - daemon child-exit regression test: shell `exit` 직전 출력이 한 snapshot에 노출되고, 마지막 shell `exit` 후 replacement shell이 명령을 받을 수 있으며, non-last shell `exit` 후 window list에서 제거되는지 확인.

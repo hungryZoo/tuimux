@@ -20,6 +20,9 @@ ROWS = 24
 COLS = 120
 CHILD_MARKER = "TUIMUX_VISIBLE_TUI_CHILD"
 F12 = b"\x1b[24~"
+MOUSE_SCROLL_UP_AT_10_10 = b"\x1b[<64;10;10M"
+STATUS_CLICK = b"\x1b[<0;104;23M\x1b[<0;104;23m"
+STATUS_SCROLL_MARKER = "STATUS_CLICK_LINE_080"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -280,6 +283,25 @@ def main() -> int:
         wait_screen_or_fail(client, "scroll:0", args.timeout, "rail after child clear")
 
         client.clear_buffer()
+        client.write(
+            (
+                "python3 -c 'import sys; "
+                "sys.stdout.write(\"\\033[2J\\033[H\"); "
+                "[print(f\"STATUS_CLICK_LINE_{i:03d}\") for i in range(1, 81)]'"
+                "\r"
+            ).encode()
+        )
+        wait_screen_or_fail(
+            client, STATUS_SCROLL_MARKER, args.timeout, "status click scrollback fixture"
+        )
+        client.clear_buffer()
+        client.write(MOUSE_SCROLL_UP_AT_10_10)
+        wait_screen_or_fail(client, "scroll:3", args.timeout, "rail scrolled state")
+        client.clear_buffer()
+        client.write(STATUS_CLICK)
+        wait_screen_or_fail(client, "scroll:0", args.timeout, "status click bottom")
+
+        client.clear_buffer()
         client.write(b"\x1b[<0;104;9M\x1b[<0;104;9m")
         wait_screen_or_fail(client, "2:", args.timeout, "clicked new window row")
 
@@ -290,6 +312,7 @@ def main() -> int:
         print("OK macOS terminal chrome smoke")
         print("default terminal mode chrome: visible with boxed rail")
         print(f"child body marker: {CHILD_MARKER}")
+        print("status click bottom: observed")
         print("sidebar + new click: observed")
         print("F12 navigation handoff: observed")
         return 0
