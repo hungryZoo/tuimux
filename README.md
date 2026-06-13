@@ -2,12 +2,12 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.29 keeps the default runtime on the Rust-native path and focuses
-the product on a single full-size terminal surface selected from a window list.
-This prerelease completes the first OSC 52 clipboard loop: child apps can copy
-to the macOS system clipboard and query clipboard text back through terminal
-escape sequences. It preserves the recent OSC title, scrollback,
-alternate-screen, resize, color, selection, and child-exit checks.
+v0.2.0-alpha.30 keeps the default runtime on the Rust-native path and brings
+the tuimux TUI back into the default terminal screen: terminal mode now shows a
+top session/window tab strip and a bottom command/status strip around the live
+PTY body. This prerelease keeps the OSC 52 clipboard loop from alpha.29 and
+preserves the recent OSC title, scrollback, alternate-screen, resize, color,
+selection, and child-exit checks.
 Running `tuimux` attaches a ratatui client to tuimux's own Unix-socket daemon,
 which owns sessions, windows, and PTY-backed shell processes. `tmux` is
 no longer required for the default UI; the old plain tmux client remains
@@ -24,7 +24,9 @@ See:
 This is still a 0.x prerelease. Current behavior:
 
 - `tuimux` opens the Rust-native tuimux TUI by default.
-- Terminal mode is full-screen so full-screen tools receive the real host size.
+- Terminal mode shows persistent tuimux chrome: a top session/window tab strip and a bottom command/status strip.
+- The child PTY uses the terminal body between those two strips, so mouse and keyboard routing do not treat chrome cells as child terminal cells.
+- `Alt-N` creates a window, `Alt-S` opens the session picker, and `Alt-Left`/`Alt-Right` switch windows while staying in terminal mode.
 - Press `F12` to switch between terminal mode and navigation/sidebar mode.
 - Sessions, windows, and each active PTY-backed shell are managed by the tuimux daemon, not by tmux.
 - Navigation mode shows a right-side window list; `Tab` and arrow keys move between windows, `n` creates a window, and `x` closes the active window.
@@ -54,8 +56,8 @@ detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.29/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.29 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.30/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.30 bash
 ```
 
 Verify:
@@ -79,6 +81,7 @@ cargo build --release
 cargo fmt -- --check
 cargo test
 cargo run -- --layout-preview
+python3 scripts/smoke_macos_terminal_chrome.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_ui_selection.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_apps.py --binary target/debug/tuimux
 python3 scripts/smoke_macos_mouse_protocol.py --binary target/debug/tuimux
@@ -96,5 +99,5 @@ python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.29` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.30` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

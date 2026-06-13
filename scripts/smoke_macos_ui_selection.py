@@ -236,7 +236,7 @@ def main() -> int:
         client.read_for(0.6)
 
         # crossterm enables SGR mouse mode. Coordinates are 1-based.
-        y = 1
+        y = 2
         x1 = 1
         x2 = len(MARKER)
         drag = f"\x1b[<0;{x1};{y}M\x1b[<32;{x2};{y}M\x1b[<0;{x2};{y}m"

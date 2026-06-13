@@ -253,7 +253,7 @@ def main() -> int:
 
         # Shift-drag: crossterm reports modifier bit 4. tuimux should treat this
         # as a selection override even while the child owns normal mouse events.
-        y = 1
+        y = 2
         x1 = 1
         x2 = len(TARGET)
         shifted_drag = (
