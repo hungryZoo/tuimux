@@ -106,6 +106,30 @@ struct TerminalModeLayout {
     side_rail: Option<Rect>,
 }
 
+fn andromeda_nebula() -> Color {
+    Color::Rgb(0x00, 0xE8, 0xC6)
+}
+
+fn andromeda_starlight() -> Color {
+    Color::Rgb(0xF3, 0xD5, 0x6E)
+}
+
+fn andromeda_nova() -> Color {
+    Color::Rgb(0xFF, 0x00, 0x7A)
+}
+
+fn andromeda_comet() -> Color {
+    Color::Rgb(0x00, 0xB8, 0xD4)
+}
+
+fn andromeda_aurora() -> Color {
+    Color::Rgb(0x96, 0xE0, 0x72)
+}
+
+fn andromeda_cosmic() -> Color {
+    Color::Rgb(0xC7, 0x4D, 0xED)
+}
+
 impl UiState {
     /// Build initial state from the native multiplexer.
     fn bootstrap(initial_session: &str, cwd: PathBuf) -> anyhow::Result<Self> {
@@ -691,11 +715,7 @@ fn scroll_active_pane(state: &mut UiState, lines: i32) {
 fn new_window(state: &mut UiState) {
     let (width, height) = active_terminal_size(state);
     match state.mux.new_window(width, height) {
-        Ok(index) => {
-            state.status = Some(format!(
-                "created window {index} in '{}'",
-                state.current_session
-            ));
+        Ok(_) => {
             state.clear_selection();
             state.sync_terminal(width, height);
         }
@@ -766,7 +786,6 @@ fn ui(f: &mut Frame, state: &mut UiState) {
                 side_rail,
                 session_label,
                 &state.windows,
-                state.status.as_deref(),
                 state.terminal_scrollback,
                 state.hover,
                 &mut state.regions,
@@ -864,7 +883,6 @@ fn render_terminal_rail(
     area: Rect,
     session_label: &str,
     windows: &[Window],
-    status: Option<&str>,
     scrollback: usize,
     hover: Option<Hotspot>,
     regions: &mut Regions,
@@ -883,7 +901,8 @@ fn render_terminal_rail(
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
-            Constraint::Min(2),
+            Constraint::Min(4),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -896,34 +915,42 @@ fn render_terminal_rail(
         Style::default().add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block(Some("Session"), Color::Cyan, session_hot));
+    .block(button_block(
+        Some("Session"),
+        andromeda_nebula(),
+        session_hot,
+    ));
     f.render_widget(session, chunks[0]);
 
     let detach_hot = hover == Some(Hotspot::DetachButton);
     let detach = Paragraph::new(Line::from(Span::styled(
         "Detach",
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(andromeda_nova())
+            .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block(None, Color::Red, detach_hot));
+    .block(button_block(None, andromeda_nova(), detach_hot));
     f.render_widget(detach, chunks[1]);
 
-    render_terminal_windows(f, chunks[2], windows, status, scrollback, hover, regions);
+    render_terminal_windows(f, chunks[2], windows, hover, regions);
+    render_terminal_status(f, chunks[3], scrollback);
 }
 
 fn render_terminal_windows(
     f: &mut Frame,
     area: Rect,
     windows: &[Window],
-    status: Option<&str>,
-    scrollback: usize,
     hover: Option<Hotspot>,
     regions: &mut Regions,
 ) {
+    let windows_style = Style::default()
+        .fg(andromeda_starlight())
+        .add_modifier(Modifier::BOLD);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" WINDOWS ");
+        .border_style(windows_style)
+        .title(Span::styled(" WINDOWS ", windows_style));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -931,11 +958,7 @@ fn render_terminal_windows(
     }
 
     let capacity = inner.height as usize;
-    let reserved_info_rows = if capacity >= 4 { 2 } else { 0 };
-    let max_windows = capacity
-        .saturating_sub(reserved_info_rows)
-        .saturating_sub(1)
-        .min(regions.windows.len());
+    let max_windows = capacity.saturating_sub(1).min(regions.windows.len());
     let mut items = Vec::new();
 
     for (row, win) in windows.iter().take(max_windows).enumerate() {
@@ -966,33 +989,41 @@ fn render_terminal_windows(
         regions.new_window = Rect::new(inner.x, inner.y.saturating_add(row), inner.width, 1);
         let new_hot = hover == Some(Hotspot::NewWindow);
         let new_style = if new_hot {
-            Style::default().fg(Color::Black).bg(Color::Green)
+            Style::default().fg(Color::Black).bg(andromeda_aurora())
         } else {
-            Style::default().fg(Color::Green)
+            Style::default()
+                .fg(andromeda_aurora())
+                .add_modifier(Modifier::BOLD)
         };
         items.push(ListItem::new(Line::from(Span::styled(
             "  + new", new_style,
         ))));
     }
 
-    if items.len() < capacity {
-        items.push(ListItem::new(Line::from(Span::styled(
-            fit_bar_text(&format!("  scrollback:{scrollback}"), inner.width as usize),
-            Style::default().fg(Color::DarkGray),
-        ))));
-    }
-
-    if items.len() < capacity {
-        let hint = status
-            .filter(|text| !text.is_empty())
-            .unwrap_or("F12 nav Alt-N new");
-        items.push(ListItem::new(Line::from(Span::styled(
-            fit_bar_text(&format!("  {hint}"), inner.width as usize),
-            Style::default().fg(Color::Gray),
-        ))));
-    }
-
     f.render_widget(List::new(items), inner);
+}
+
+fn render_terminal_status(f: &mut Frame, area: Rect, scrollback: usize) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let status_style = Style::default()
+        .fg(andromeda_comet())
+        .add_modifier(Modifier::BOLD);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(status_style)
+        .title(Span::styled(" STATUS ", status_style));
+    let status = Paragraph::new(Line::from(Span::styled(
+        fit_bar_text(
+            &format!("scroll:{scrollback}"),
+            area.width.saturating_sub(2) as usize,
+        ),
+        Style::default().fg(andromeda_comet()),
+    )))
+    .alignment(Alignment::Center)
+    .block(block);
+    f.render_widget(status, area);
 }
 
 fn fit_bar_text(text: &str, width: usize) -> String {
@@ -1324,22 +1355,28 @@ fn render_sidebar(
         Style::default().add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block(Some("Session"), Color::Cyan, session_hot));
+    .block(button_block(
+        Some("Session"),
+        andromeda_nebula(),
+        session_hot,
+    ));
     f.render_widget(session, chunks[0]);
 
     let detach_hot = hover == Some(Hotspot::DetachButton);
     let detach = Paragraph::new(Line::from(Span::styled(
         "Detach",
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(andromeda_nova())
+            .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block(None, Color::Red, detach_hot));
+    .block(button_block(None, andromeda_nova(), detach_hot));
     f.render_widget(detach, chunks[1]);
 
     let status_text = fit_and_pad_text(status.unwrap_or_default(), chunks[2].width as usize);
     let status_line = Paragraph::new(Line::from(Span::styled(
         status_text,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(andromeda_comet()),
     )));
     f.render_widget(status_line, chunks[2]);
 
@@ -1392,9 +1429,11 @@ fn render_windows(
     );
     let new_hot = hover == Some(Hotspot::NewWindow);
     let new_style = if new_hot {
-        Style::default().fg(Color::Black).bg(Color::Green)
+        Style::default().fg(Color::Black).bg(andromeda_aurora())
     } else {
-        Style::default().fg(Color::Green)
+        Style::default()
+            .fg(andromeda_aurora())
+            .add_modifier(Modifier::BOLD)
     };
     win_items.push(ListItem::new(Line::from(Span::styled(
         "  + new", new_style,
@@ -1403,8 +1442,13 @@ fn render_windows(
     let windows = List::new(win_items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" WINDOWS "),
+            .border_style(Style::default().fg(andromeda_starlight()))
+            .title(Span::styled(
+                " WINDOWS ",
+                Style::default()
+                    .fg(andromeda_starlight())
+                    .add_modifier(Modifier::BOLD),
+            )),
     );
     f.render_widget(windows, area);
 }
@@ -1427,7 +1471,7 @@ fn render_session_modal(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(andromeda_nebula()));
     f.render_widget(block, area);
 
     regions.modal_session_count = 0;
@@ -1449,10 +1493,10 @@ fn render_session_modal(
         let mark = if active { "●" } else { " " };
         let hot = hover == Some(Hotspot::ModalSession(idx));
         let style = if hot {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default().fg(Color::Black).bg(andromeda_nebula())
         } else if active {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(andromeda_nebula())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -1475,20 +1519,22 @@ fn render_session_modal(
     let new_button = Paragraph::new(Line::from(Span::styled(
         "New Session",
         Style::default()
-            .fg(Color::Green)
+            .fg(andromeda_aurora())
             .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block(None, Color::Green, new_hot));
+    .block(button_block(None, andromeda_aurora(), new_hot));
     f.render_widget(new_button, actions[0]);
 
     let hot = hover == Some(Hotspot::ModalDetach);
     let detach = Paragraph::new(Line::from(Span::styled(
         "Detach",
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(andromeda_nova())
+            .add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
-    .block(button_block(None, Color::Red, hot));
+    .block(button_block(None, andromeda_nova(), hot));
     f.render_widget(detach, actions[1]);
 }
 
@@ -1516,14 +1562,14 @@ fn window_row_line(
 
     let row_hot = hover == Some(Hotspot::Window(row));
     let row_style = if row_hot {
-        Style::default().fg(Color::Black).bg(Color::Green)
+        Style::default().fg(Color::Black).bg(andromeda_starlight())
     } else if win.active {
         Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
+            .fg(Color::Black)
+            .bg(andromeda_cosmic())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
+        Style::default().fg(andromeda_starlight())
     };
 
     Line::from(vec![
@@ -1536,11 +1582,11 @@ fn window_row_line(
 fn close_style(hot: bool) -> Style {
     if hot {
         Style::default()
-            .fg(Color::Red)
+            .fg(andromeda_nova())
             .bg(Color::Black)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Red)
+        Style::default().fg(andromeda_nova())
     }
 }
 
@@ -1750,6 +1796,17 @@ mod tests {
         (0..width).map(|x| buffer.get(x, y).symbol()).collect()
     }
 
+    fn first_cell_style_for_text(
+        terminal: &Terminal<TestBackend>,
+        y: u16,
+        width: u16,
+        text: &str,
+    ) -> Style {
+        let line = rendered_line(terminal, y, width);
+        let x = line.find(text).expect("text is rendered") as u16;
+        terminal.backend().buffer().get(x, y).style()
+    }
+
     #[test]
     fn terminal_mode_narrow_layout_gives_full_area_to_pty() {
         let mut state = test_state();
@@ -1848,15 +1905,35 @@ mod tests {
         let session_title = rendered_line(&terminal, 0, 110);
         let session_label = rendered_line(&terminal, 1, 110);
         let sidebar_title = rendered_line(&terminal, 6, 110);
-        let scrollback = rendered_line(&terminal, 10, 110);
-        let hint = rendered_line(&terminal, 11, 110);
+        let status_title = rendered_line(&terminal, 11, 110);
+        let scrollback = rendered_line(&terminal, 12, 110);
 
         assert!(body.contains("BODY_LINE"), "{body:?}");
         assert!(session_title.contains("Session"), "{session_title:?}");
         assert!(session_label.contains("dev"), "{session_label:?}");
         assert!(sidebar_title.contains("WINDOWS"), "{sidebar_title:?}");
-        assert!(scrollback.contains("scrollback:7"), "{scrollback:?}");
-        assert!(hint.contains("F12 nav"), "{hint:?}");
+        assert!(status_title.contains("STATUS"), "{status_title:?}");
+        assert!(scrollback.contains("scroll:7"), "{scrollback:?}");
+        assert_eq!(
+            first_cell_style_for_text(&terminal, 0, 110, "Session").fg,
+            Some(andromeda_nebula())
+        );
+        assert_eq!(
+            first_cell_style_for_text(&terminal, 4, 110, "Detach").fg,
+            Some(andromeda_nova())
+        );
+        assert_eq!(
+            first_cell_style_for_text(&terminal, 6, 110, "WINDOWS").fg,
+            Some(andromeda_starlight())
+        );
+        assert_eq!(
+            first_cell_style_for_text(&terminal, 11, 110, "STATUS").fg,
+            Some(andromeda_comet())
+        );
+        assert_eq!(
+            first_cell_style_for_text(&terminal, 12, 110, "scroll:7").fg,
+            Some(andromeda_comet())
+        );
         assert_eq!(state.regions.terminal_body, Rect::new(0, 0, 90, 14));
         assert_eq!(terminal_cell_at_pane(0, 0, &state.regions), Some((0, 0, 0)));
         assert_eq!(terminal_cell_at_pane(90, 0, &state.regions), None);
@@ -1914,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn close_x_hover_gets_its_own_red_style() {
+    fn close_x_hover_gets_its_own_nova_style() {
         let active = Window {
             index: 1,
             name: "build".to_string(),
@@ -1924,7 +2001,7 @@ mod tests {
         let row = window_row_line("▸", &active, 20, Some(Hotspot::WindowClose(0)), 0);
         let last = row.spans.last().expect("close span");
         assert_eq!(last.content.as_ref(), "✕");
-        assert_eq!(last.style.fg, Some(Color::Red));
+        assert_eq!(last.style.fg, Some(andromeda_nova()));
         assert_eq!(last.style.bg, Some(Color::Black));
     }
 

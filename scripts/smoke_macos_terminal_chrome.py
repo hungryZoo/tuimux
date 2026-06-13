@@ -265,8 +265,8 @@ def main() -> int:
         wait_screen_or_fail(client, "WINDOWS", args.timeout, "integrated window rail")
         wait_screen_or_fail(client, "Detach", args.timeout, "integrated detach button")
         wait_screen_or_fail(client, "+ new", args.timeout, "integrated new-window row")
-        wait_screen_or_fail(client, "scrollback:0", args.timeout, "rail scrollback row")
-        wait_screen_or_fail(client, "F12 nav", args.timeout, "rail hint row")
+        wait_screen_or_fail(client, "STATUS", args.timeout, "integrated status panel")
+        wait_screen_or_fail(client, "scroll:0", args.timeout, "rail scroll row")
 
         client.clear_buffer()
         client.write(
@@ -277,11 +277,10 @@ def main() -> int:
             ).encode()
         )
         wait_or_fail(client, CHILD_MARKER, args.timeout, "child terminal body")
-        wait_screen_or_fail(client, "F12 nav", args.timeout, "rail after child clear")
+        wait_screen_or_fail(client, "scroll:0", args.timeout, "rail after child clear")
 
         client.clear_buffer()
         client.write(b"\x1b[<0;104;9M\x1b[<0;104;9m")
-        wait_screen_or_fail(client, "created window", args.timeout, "sidebar new-window click")
         wait_screen_or_fail(client, "2:", args.timeout, "clicked new window row")
 
         client.clear_buffer()
