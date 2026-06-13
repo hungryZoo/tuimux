@@ -40,10 +40,10 @@ This is still a 0.x prerelease. Current behavior:
 - Each window runs a real shell in a PTY, parsed with `vt100` and rendered with ratatui.
 - Mouse wheel scrolls shell history when the child program is not using mouse tracking; `PageUp`/`PageDown`, `Home`, and `End` work in navigation mode, and paste while scrolled back returns to the live bottom, covered by the macOS scrollback smoke.
 - In terminal mode, `Home`/`End` and macOS `Cmd-Shift-Left`/`Cmd-Shift-Right` move to the start/end of the active terminal input line.
-- Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen; macOS PTY smoke covers reverse-video selection highlight, drag + right-click context-menu Copy, drag + Ctrl-C + `pbpaste`, context-menu Paste, and child bracketed paste wrappers.
+- Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen; macOS PTY smoke covers reverse-video selection highlight, drag + right-click context-menu Copy, drag + Ctrl-C + `pbpaste`, context-menu Paste, child bracketed paste wrappers, and click-to-clear paste highlighting.
 - `Ctrl-C`/`Ctrl-Shift-C`/`Cmd-Shift-C` copy only when a drag selection exists; without a selection, plain `Ctrl-C` still reaches the child program as SIGINT. `Ctrl-V`/`Ctrl-Shift-V`/`Cmd-Shift-V` paste the system clipboard into the active PTY.
 - Child OSC 52 clipboard copy requests are decoded into the macOS system clipboard, and OSC 52 paste queries receive a base64 clipboard response.
-- Host paste is captured as a paste event and forwarded to the active PTY with child bracketed paste respected.
+- Host paste is captured as a paste event and forwarded to the active PTY with child bracketed paste respected; the next normal terminal click clears shell-side paste highlighting without breaking drag selection.
 - If the child program enables mouse tracking, simple left clicks and wheel events still go to the child, while a normal drag starts tuimux text selection, covered by the macOS mouse-protocol smoke.
 - Child truecolor foreground/background and default-color reset are preserved by the real TUI renderer, covered by the macOS color smoke.
 - Host resize reaches the active child PTY as a SIGWINCH with updated rows/columns, covered by the macOS resize smoke.

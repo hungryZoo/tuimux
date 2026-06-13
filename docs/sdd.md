@@ -197,6 +197,7 @@ pub struct PtyTerminal {
 - `send_paste()`는 child bracketed paste mode를 감지해 paste wrapper를 적용한다.
 - `send_mouse_event()`는 child가 mouse protocol을 활성화한 경우에만 SGR/normal mouse sequence를 전달한다.
 - key/paste/child mouse event는 scrollback viewport를 bottom으로 되돌린다.
+- shell line editor가 bracketed paste 뒤에 남긴 paste highlight는 UI가 paste 성공 상태를 기억한 뒤 다음 일반 terminal left click에서 left/right cursor 왕복 입력을 보내 해제한다.
 
 스크롤백:
 
@@ -227,6 +228,7 @@ struct UiState {
     terminal_mouse_protocol_active: bool,
     terminal_scrollback: usize,
     selection: Option<SelectionState>,
+    paste_highlight_pending: bool,
 }
 ```
 
@@ -277,6 +279,7 @@ struct SelectionState {
 - selection이 없으면 plain Ctrl-C는 active PTY로 전달해 foreground child interrupt로 동작하게 하고, Cmd-C/Super-C/Cmd-Shift-C/Super-Shift-C는 일반 문자 `c`로 누수하지 않는다.
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Super-Shift-V는 `clipboard::read_text()` 결과를 active PTY에 paste한다. Linux host마다 shortcut 전달 방식이 다를 수 있어 Control, Control-Shift, Super-Shift 계열을 모두 허용한다.
 - Home/End는 active PTY에 line start/end key로 전달한다. macOS에서는 Cmd-Shift-Left/Cmd-Shift-Right를 UI client에서 Home/End key로 정규화해 active PTY에 전달한다.
+- paste 성공 후 `paste_highlight_pending`을 세운다. child mouse protocol이 꺼진 terminal body에서 다음 left click이 발생하면 UI는 pending 상태를 내리고 left/right cursor key를 active PTY로 보내 shell-side paste highlight를 지운 뒤 기존 selection gesture 처리를 계속한다.
 - 우클릭은 host terminal context menu를 직접 열 수 없으므로, TUI 안에 context menu를 띄워 native에 가까운 copy/paste 동작으로 에뮬레이션한다.
 - context menu는 Copy, Paste, Cancel 항목을 갖는다. Copy는 selection이 있을 때 `copy_selection()`으로 system clipboard에 복사하고, Paste는 `clipboard::read_text()` 결과를 active PTY에 paste한다.
 
@@ -453,6 +456,8 @@ crossterm PasteEvent
   -> Request::SendPaste { text }
   -> daemon active terminal PtyTerminal::send_paste()
   -> child bracketed paste mode이면 ESC [ 200 ~ / ESC [ 201 ~ wrapper 적용
+  -> UI paste_highlight_pending = true
+  -> 다음 일반 terminal left click에서 left/right cursor 왕복 입력으로 paste highlight 해제
 ```
 
 ### 4.7 Detach와 Reattach
@@ -490,8 +495,9 @@ F12, q, Esc, or Detach button
 - daemon window-title regression test: child OSC 2 title이 snapshot window/pane metadata에 반영되는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
-- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click context menu의 Copy, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, context menu의 Paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지 확인.
+- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click context menu의 Copy, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, context menu의 Paste가 child PTY에서 실행되는지, child가 bracketed paste mode일 때 wrapper를 받는지, paste 후 일반 terminal click이 clear 입력을 보내는지 확인.
 - keyboard shortcut unit tests: Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Super-Shift-C copy predicate, 선택 없는 plain Ctrl-C interrupt fallback, Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Super-Shift-V paste predicate, Cmd-Shift-Left/Cmd-Shift-Right to Home/End 정규화, Home/End PTY key encoding을 확인.
+- paste highlight regression test: paste 성공 후 pending 상태가 켜지고 click-clear 경로에서 상태가 내려가는지 확인한다.
 - macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 boxed right rail과 scrollback/hint rows가 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
 - macOS mouse-protocol smoke script: raw child가 `1002`/`1006` SGR mouse tracking을 켠 뒤 normal left click forwarding, normal drag tuimux selection, selection Ctrl-C child 누수 방지를 확인.

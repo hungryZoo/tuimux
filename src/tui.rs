@@ -77,6 +77,7 @@ struct UiState {
     terminal_mode: bool,
     selection: Option<SelectionState>,
     pending_left_down: Option<PendingMouseDown>,
+    paste_highlight_pending: bool,
     context_menu: Option<ContextMenuState>,
     terminal_axis: PaneAxis,
     terminal_separators: Vec<PaneSeparator>,
@@ -168,6 +169,7 @@ impl UiState {
             terminal_mode: true,
             selection: None,
             pending_left_down: None,
+            paste_highlight_pending: false,
             context_menu: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
@@ -248,6 +250,7 @@ impl UiState {
     fn clear_selection(&mut self) {
         self.selection = None;
         self.pending_left_down = None;
+        self.paste_highlight_pending = false;
     }
 
     fn open_context_menu(&mut self, x: u16, y: u16) {
@@ -335,6 +338,11 @@ impl UiState {
             self.clear_selection();
         }
 
+        self.paste_highlight_pending = false;
+        self.send_terminal_key_event(key);
+    }
+
+    fn send_terminal_key_event(&mut self, key: KeyEvent) {
         if let Some(key) = KeyInput::from_event(key) {
             if let Err(e) = self.mux.send_key(key) {
                 self.status = Some(format!("terminal input failed: {e}"));
@@ -344,13 +352,20 @@ impl UiState {
 
     fn send_terminal_paste(&mut self, text: &str) {
         self.clear_selection();
-        if let Err(e) = self.mux.send_paste(text) {
-            self.status = Some(format!("terminal paste failed: {e}"));
+        match self.mux.send_paste(text) {
+            Ok(()) => {
+                self.paste_highlight_pending = !text.is_empty();
+            }
+            Err(e) => {
+                self.paste_highlight_pending = false;
+                self.status = Some(format!("terminal paste failed: {e}"));
+            }
         }
     }
 
     fn paste_clipboard(&mut self) -> bool {
         self.clear_selection();
+        self.paste_highlight_pending = false;
         match clipboard::read_text() {
             Ok(text) if text.is_empty() => {
                 self.status = Some("clipboard is empty".to_string());
@@ -360,6 +375,7 @@ impl UiState {
                 let chars = text.chars().count();
                 match self.mux.send_paste(&text) {
                     Ok(()) => {
+                        self.paste_highlight_pending = true;
                         self.status = Some(format!("pasted {chars} chars"));
                         true
                     }
@@ -376,6 +392,16 @@ impl UiState {
         }
     }
 
+    fn clear_paste_highlight_on_click(&mut self) {
+        if !self.paste_highlight_pending {
+            return;
+        }
+
+        self.paste_highlight_pending = false;
+        self.send_terminal_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        self.send_terminal_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    }
+
     fn send_terminal_mouse(
         &mut self,
         kind: MouseEventKind,
@@ -383,6 +409,7 @@ impl UiState {
         col: u16,
         modifiers: KeyModifiers,
     ) {
+        self.paste_highlight_pending = false;
         if let Some(mouse) = MouseInput::from_parts(kind, row, col, modifiers) {
             if let Err(e) = self.mux.send_mouse(mouse) {
                 self.status = Some(format!("terminal mouse failed: {e}"));
@@ -652,6 +679,9 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                     let child_wants_mouse = state.pane_mouse_protocol_active(pane_row);
                     let selection_gesture =
                         mouse.modifiers.contains(KeyModifiers::SHIFT) || !child_wants_mouse;
+                    if clicked_left && !child_wants_mouse {
+                        state.clear_paste_highlight_on_click();
+                    }
 
                     if !child_wants_mouse {
                         match mouse.kind {
@@ -2011,6 +2041,7 @@ mod tests {
             terminal_mode: true,
             selection: None,
             pending_left_down: None,
+            paste_highlight_pending: false,
             context_menu: None,
             terminal_axis: PaneAxis::default(),
             terminal_separators: Vec::new(),
@@ -2660,6 +2691,19 @@ mod tests {
         state.send_terminal_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
 
         assert!(state.selection.is_none());
+    }
+
+    #[test]
+    fn successful_paste_marks_highlight_pending_until_click_clear() {
+        let mut state = test_state();
+
+        state.send_terminal_paste("pasted text");
+
+        assert!(state.paste_highlight_pending);
+
+        state.clear_paste_highlight_on_click();
+
+        assert!(!state.paste_highlight_pending);
     }
 
     #[test]

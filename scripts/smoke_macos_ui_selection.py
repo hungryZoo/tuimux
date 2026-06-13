@@ -36,6 +36,10 @@ RIGHT_PASTE_OUTPUT = f"RIGHT_PASTE_RAN:{RIGHT_PASTE_MARKER}"
 CHILD_PASTE_MARKER = "TUIMUX_CHILD_BRACKETED_TARGET"
 CHILD_PASTE_READY = "CHILD_BRACKETED_READY"
 CHILD_PASTE_OK = "CHILD_BRACKETED_OK"
+PASTE_CLICK_MARKER = "TUIMUX_PASTE_CLICK_CLEAR_TARGET"
+PASTE_CLICK_READY = "PASTE_CLICK_CLEAR_READY"
+PASTE_CLICK_WAITING = "PASTE_CLICK_CLEAR_WAITING"
+PASTE_CLICK_OK = "PASTE_CLICK_CLEAR_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -164,7 +168,7 @@ def stop_daemon(binary: Path, session: str) -> None:
     )
 
 
-def child_bracketed_paste_probe_command(payload: str) -> str:
+def child_bracketed_paste_probe_command(payload: str, script_path: Path) -> str:
     probe = f"""
 import os
 import select
@@ -196,7 +200,56 @@ try:
 finally:
     termios.tcsetattr(fd, termios.TCSADRAIN, old)
 """
-    return f"python3 -c {shlex.quote(probe)}"
+    script_path.write_text(probe, encoding="utf-8")
+    return f"python3 {shlex.quote(str(script_path))}"
+
+
+def paste_click_clear_probe_command(payload: str, script_path: Path) -> str:
+    probe = f"""
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+expected = b"\\x1b[200~" + {payload.encode()!r} + b"\\x1b[201~"
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+try:
+    tty.setraw(fd)
+    os.write(sys.stdout.fileno(), b"\\x1b[?2004h{PASTE_CLICK_READY}\\r\\n")
+    data = b""
+    deadline = time.time() + 5.0
+    while time.time() < deadline and b"\\x1b[201~" not in data:
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            chunk = os.read(fd, 1024)
+            if not chunk:
+                break
+            data += chunk
+    if data != expected:
+        os.write(sys.stdout.fileno(), b"PASTE_CLICK_BAD_PASTE:" + data.hex().encode() + b"\\r\\n")
+    else:
+        os.write(sys.stdout.fileno(), b"\\x1b[47;30m" + {payload.encode()!r} + b"\\x1b[0m\\r\\n{PASTE_CLICK_WAITING}\\r\\n")
+        click_data = b""
+        deadline = time.time() + 5.0
+        while time.time() < deadline and b"\\x1b[D\\x1b[C" not in click_data:
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                chunk = os.read(fd, 1024)
+                if not chunk:
+                    break
+                click_data += chunk
+        if b"\\x1b[D\\x1b[C" in click_data:
+            os.write(sys.stdout.fileno(), b"\\x1b[?2004l{PASTE_CLICK_OK}\\r\\n")
+        else:
+            os.write(sys.stdout.fileno(), b"\\x1b[?2004lPASTE_CLICK_BAD_CLEAR:" + click_data.hex().encode() + b"\\r\\n")
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+"""
+    script_path.write_text(probe, encoding="utf-8")
+    return f"python3 {shlex.quote(str(script_path))}"
 
 
 def has_reverse_video_highlight(output: bytes, text: str) -> bool:
@@ -216,12 +269,20 @@ def main() -> int:
     require_macos()
 
     trap_file = Path("/tmp") / f"tuimux-ui-copy-int-{os.getpid()}"
+    child_paste_script = Path("/tmp") / f"tuimux-child-bracketed-{os.getpid()}.py"
+    paste_click_script = Path("/tmp") / f"tuimux-paste-click-clear-{os.getpid()}.py"
     trap_file.unlink(missing_ok=True)
+    child_paste_script.unlink(missing_ok=True)
+    paste_click_script.unlink(missing_ok=True)
     set_clipboard(SENTINEL)
 
     client = PtyClient(binary, args.session)
     try:
         client.read_for(1.5)
+        if not client.wait_contains("WINDOWS", args.timeout):
+            print("tuimux UI did not become ready", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
         command = (
             f"rm -f {trap_file}; "
             "printf '\\033[2J\\033[H'; "
@@ -306,7 +367,9 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
-        child_probe_command = child_bracketed_paste_probe_command(CHILD_PASTE_MARKER)
+        child_probe_command = child_bracketed_paste_probe_command(
+            CHILD_PASTE_MARKER, child_paste_script
+        )
         client.write((child_probe_command + "\r").encode())
         if not client.wait_contains(CHILD_PASTE_READY, args.timeout):
             print("child bracketed paste probe did not become ready", file=sys.stderr)
@@ -320,17 +383,40 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
+        paste_click_command = paste_click_clear_probe_command(
+            PASTE_CLICK_MARKER, paste_click_script
+        )
+        client.write((paste_click_command + "\r").encode())
+        if not client.wait_contains(PASTE_CLICK_READY, args.timeout):
+            print("paste click clear probe did not become ready", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        paste_click_payload = f"\x1b[200~{PASTE_CLICK_MARKER}\x1b[201~"
+        client.write(paste_click_payload.encode())
+        if not client.wait_contains(PASTE_CLICK_WAITING, args.timeout):
+            print("paste click clear probe did not receive bracketed paste", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<0;1;1M\x1b[<0;1;1m")
+        if not client.wait_contains(PASTE_CLICK_OK, args.timeout):
+            print("terminal click did not clear paste highlight state", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+
         print("OK macOS UI selection smoke")
         print("selection highlight: reverse video observed after mouse-up")
         print(f"right-click menu copied: {right_copied}")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
+        print("paste highlight click clear: observed")
         print("foreground child SIGINT: not observed")
         return 0
     finally:
         client.close()
         trap_file.unlink(missing_ok=True)
+        child_paste_script.unlink(missing_ok=True)
+        paste_click_script.unlink(missing_ok=True)
         if not args.keep_daemon:
             stop_daemon(binary, args.session)
 
