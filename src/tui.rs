@@ -821,16 +821,16 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                 }
             }
             Event::Mouse(mouse) => {
+                if should_clear_paste_highlight_for_click(state, &mouse) {
+                    state.clear_paste_highlight_on_click();
+                }
+
                 if handle_context_menu_mouse(state, &mouse) {
                     continue;
                 }
 
                 if handle_context_menu_request(state, mouse.kind, mouse.column, mouse.row) {
                     continue;
-                }
-
-                if should_clear_paste_highlight_for_click(state, &mouse) {
-                    state.clear_paste_highlight_on_click();
                 }
 
                 if handle_pending_left_down(state, &mouse) {
@@ -1030,9 +1030,7 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
 }
 
 fn should_clear_paste_highlight_for_click(state: &UiState, mouse: &MouseEvent) -> bool {
-    if !state.paste_highlight_pending
-        || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-    {
+    if !state.paste_highlight_pending || !matches!(mouse.kind, MouseEventKind::Down(_)) {
         return false;
     }
 
@@ -2966,6 +2964,14 @@ mod tests {
             &state,
             &chrome_click
         ));
+
+        let right_click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 15,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(should_clear_paste_highlight_for_click(&state, &right_click));
 
         state.terminal_mouse_protocol_active = true;
         let terminal_click = MouseEvent {

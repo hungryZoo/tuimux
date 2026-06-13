@@ -40,6 +40,9 @@ PASTE_CLICK_MARKER = "TUIMUX_PASTE_CLICK_CLEAR_TARGET"
 PASTE_CLICK_READY = "PASTE_CLICK_CLEAR_READY"
 PASTE_CLICK_WAITING = "PASTE_CLICK_CLEAR_WAITING"
 PASTE_CLICK_OK = "PASTE_CLICK_CLEAR_OK"
+CUT_PASTE_CLICK_READY = "CUT_PASTE_CLICK_CLEAR_READY"
+CUT_PASTE_CLICK_WAITING = "CUT_PASTE_CLICK_CLEAR_WAITING"
+CUT_PASTE_CLICK_OK = "CUT_PASTE_CLICK_CLEAR_OK"
 CUT_DELETE_MARKER = "TUIMUX_CUT_DELETE_TARGET"
 CUT_DELETE_READY = "CUT_DELETE_READY"
 CUT_DELETE_OK = "CUT_DELETE_OK"
@@ -211,7 +214,13 @@ finally:
     return f"python3 {shlex.quote(str(script_path))}"
 
 
-def paste_click_clear_probe_command(payload: str, script_path: Path) -> str:
+def paste_click_clear_probe_command(
+    payload: str,
+    script_path: Path,
+    ready_marker: str = PASTE_CLICK_READY,
+    waiting_marker: str = PASTE_CLICK_WAITING,
+    ok_marker: str = PASTE_CLICK_OK,
+) -> str:
     probe = f"""
 import os
 import select
@@ -225,7 +234,7 @@ fd = sys.stdin.fileno()
 old = termios.tcgetattr(fd)
 try:
     tty.setraw(fd)
-    os.write(sys.stdout.fileno(), b"\\x1b[?2004h{PASTE_CLICK_READY}\\r\\n")
+    os.write(sys.stdout.fileno(), b"\\x1b[?2004h{ready_marker}\\r\\n")
     data = b""
     deadline = time.time() + 5.0
     while time.time() < deadline and b"\\x1b[201~" not in data:
@@ -238,7 +247,7 @@ try:
     if data != expected:
         os.write(sys.stdout.fileno(), b"PASTE_CLICK_BAD_PASTE:" + data.hex().encode() + b"\\r\\n")
     else:
-        os.write(sys.stdout.fileno(), b"\\x1b[47;30m" + {payload.encode()!r} + b"\\x1b[0m\\r\\n{PASTE_CLICK_WAITING}\\r\\n")
+        os.write(sys.stdout.fileno(), b"\\x1b[47;30m" + {payload.encode()!r} + b"\\x1b[0m\\r\\n{waiting_marker}\\r\\n")
         click_data = b""
         deadline = time.time() + 5.0
         while (
@@ -253,7 +262,7 @@ try:
                     break
                 click_data += chunk
         if b"\\x1b[D\\x1b[C" in click_data or b"\\x1bOD\\x1bOC" in click_data:
-            os.write(sys.stdout.fileno(), b"\\x1b[?2004l{PASTE_CLICK_OK}\\r\\n")
+            os.write(sys.stdout.fileno(), b"\\x1b[?2004l{ok_marker}\\r\\n")
         else:
             os.write(sys.stdout.fileno(), b"\\x1b[?2004lPASTE_CLICK_BAD_CLEAR:" + click_data.hex().encode() + b"\\r\\n")
 finally:
@@ -572,6 +581,36 @@ def main() -> int:
             )
             return 1
 
+        cut_paste_click_command = paste_click_clear_probe_command(
+            CUT_DELETE_MARKER,
+            paste_click_script,
+            CUT_PASTE_CLICK_READY,
+            CUT_PASTE_CLICK_WAITING,
+            CUT_PASTE_CLICK_OK,
+        )
+        client.write((cut_paste_click_command + "\r").encode())
+        if not client.wait_contains(CUT_PASTE_CLICK_READY, args.timeout):
+            print("cut paste click clear probe did not become ready", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<2;1;1M\x1b[<2;1;1m")
+        if not client.wait_contains("Paste", args.timeout):
+            print("cut clipboard paste menu did not appear", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<0;3;4M\x1b[<0;3;4m")
+        if not client.wait_contains(CUT_PASTE_CLICK_WAITING, args.timeout):
+            print("cut clipboard context paste did not reach child", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b[<2;1;1M\x1b[<2;1;1m")
+        if not client.wait_contains(CUT_PASTE_CLICK_OK, args.timeout):
+            print("right-click did not clear cut clipboard paste highlight", file=sys.stderr)
+            print(client.tail(), file=sys.stderr)
+            return 1
+        client.write(b"\x1b")
+        client.read_for(0.2)
+
         edit_prefix = "PRE"
         backspace_target = "BACKSPACE"
         edit_suffix = "POST"
@@ -657,6 +696,7 @@ def main() -> int:
         print(f"right-click menu copied: {right_copied}")
         print(f"right-click menu cut: {cut_copied}")
         print(f"right-click menu cut deleted: {cut_deleted}")
+        print("cut clipboard context paste click clear: observed")
         print("Backspace deleted editable selection: observed")
         print("Delete deleted editable selection: observed")
         print("text input replaced editable selection: observed")
