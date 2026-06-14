@@ -1,12 +1,12 @@
 # tuimux PRD
 
 - **문서 버전**: 4.0
-- **대상 릴리스**: v0.2.0-alpha.38
+- **대상 릴리스**: v0.2.0-alpha.39
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.38의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 하나의 persistent mux 안에서 window list와 PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.39의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 하나의 persistent mux 안에서 window list와 PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -43,11 +43,12 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - shell scrollback을 mouse wheel, `PageUp`/`PageDown`, `Home`, `End`로 볼 수 있다.
 - mouse selection은 mouse-up 이후 유지되며 선택된 텍스트는 daemon이 active PTY screen에서 추출한다.
 - terminal body left click은 drag가 아니면 active input cursor를 clicked cell로 이동하고, drag는 selection을 만든다.
-- selection이 있을 때 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C는 system clipboard copy로 동작하고, selection이 없을 때 plain Ctrl-C는 child interrupt로 남는다.
-- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V는 system clipboard paste로 동작한다.
-- terminal mode의 Home/End와 macOS Cmd-Shift-Left/Cmd-Shift-Right는 input line start/end 이동으로 동작한다.
+- active input cursor가 보일 때 plain Shift+방향키는 text editor처럼 keyboard selection을 확장한다. Shift+Up/Down은 shell history가 아니라 현재 terminal body 폭 기준의 시각적 줄 이동으로 동작한다.
+- selection이 있을 때 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Win-Shift-C는 system clipboard copy로 동작하고, selection이 없을 때 plain Ctrl-C는 child interrupt로 남는다.
+- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Win-Shift-V는 system clipboard paste로 동작한다.
+- terminal mode의 Home/End와 Cmd-Shift-Left/Cmd-Shift-Right/Win-Shift-Left/Win-Shift-Right는 input line start/end 이동으로 동작한다.
 - 우클릭은 TUI context menu를 열고 Cut, Copy, Paste, Cancel을 제공한다.
-- Cmd-Shift-X는 editable selection이면 선택 텍스트를 system clipboard에 복사한 뒤 커서를 선택 끝으로 이동하고 Backspace로 삭제하며, 삭제할 수 없는 출력 화면 선택이면 복사 후 tuimux selection을 해제한다.
+- Cmd-Shift-X/Win-Shift-X는 editable selection이면 선택 텍스트를 system clipboard에 복사한 뒤 커서를 선택 끝으로 이동하고 Backspace로 삭제하며, 삭제할 수 없는 출력 화면 선택이면 복사 후 tuimux selection을 해제한다.
 - editable selection이 있을 때 Backspace/Delete는 선택 영역을 삭제하고, 일반 문자 입력과 Ctrl-V paste는 선택 영역을 삭제한 뒤 replacement text를 입력한다. 이 동작은 soft wrap과 hard newline을 포함한 여러 줄 선택에서도 유지되어야 하며, 빈칸까지 드래그한 tail은 삭제 대상이 아니다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
 - host paste는 paste event 또는 raw bracketed-paste key sequence로 처리한다.
@@ -81,8 +82,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - 열린 client가 있는 상태에서 두 번째 client가 snapshot/window/scrollback command를 수행하고 세 번째 client가 shutdown할 수 있다.
 - `btop`, `htop`, `nano`, `llmfit --help`가 native terminal surface에서 실행된다.
 - daemon snapshot에서 btop의 cpu/proc panel과 mouse protocol state가 정상으로 관측된다.
-- drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C copy shortcut 정책과 `pbpaste` smoke test가 통과한다.
-- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V paste shortcut, editable selection 위 Ctrl-V replacement, Home/End/Cmd-Shift-Left/Cmd-Shift-Right line-boundary shortcut regression test가 통과한다.
+- drag selection이 mouse-up 이후 화면에 reverse-video highlight로 남고 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Win-Shift-C copy shortcut 정책과 `pbpaste` smoke test가 통과한다.
+- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Win-Shift-V paste shortcut, editable selection 위 Ctrl-V replacement, Shift+방향키 keyboard selection, Home/End/Cmd-Shift-Left/Cmd-Shift-Right/Win-Shift-Left/Win-Shift-Right line-boundary shortcut regression test가 통과한다.
 - 붙여넣기 뒤 일반 mouse click이 쉘의 paste highlight pending 상태를 해제하고 기존 drag selection/context menu 흐름을 깨지 않는다. terminal body left click은 clear 전용으로 소비되어 child 입력줄에 mouse escape를 남기지 않는다.
 - UI selection lifecycle과 daemon selected-text/highlight regression test가 통과한다.
 - macOS PTY UI smoke에서 drag selection, right-click context menu Cut/Copy, Cut의 Backspace child 전달, Backspace/delete/text/Ctrl-V replacement editable selection, Ctrl-C clipboard copy, foreground child SIGINT 미전달, context menu Paste와 Ctrl-V Paste 실행, child bracketed paste wrapper 보존이 통과한다.

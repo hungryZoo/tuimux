@@ -1,13 +1,13 @@
 # tuimux SDD
 
 - **문서 버전**: 4.10
-- **대상 릴리스**: v0.2.0-alpha.38
+- **대상 릴리스**: v0.2.0-alpha.39
 - **작성일**: 2026-06-13
 - **상태**: Rust-native daemon-backed multiplexer 설계
 
 ## 1. 설계 목표
 
-기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.38 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 넓은 화면에는 오른쪽 boxed rail을 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다. 위/아래 status bar와 compact top-tab fallback은 btop 같은 full-screen 앱의 PTY 크기를 보존하기 위해 비활성화한다.
+기존 tuimux의 가장 큰 문제는 main pane이 실제 terminal이 아니라 tmux output을 간접적으로 보여주는 느낌을 준다는 점이었다. v0.2.0-alpha.39 릴리스는 default path에서 tmux를 제거한 daemon-backed 구조를 유지하고, 제품 UX와 native mux core를 split-pane이 아니라 window-list 중심의 terminal workflow로 정리한다. 또한 기본 terminal mode에서도 넓은 화면에는 오른쪽 boxed rail을 보여, 사용자가 `F12`를 누르기 전에도 tuimux 조작면이 보이게 한다. 위/아래 status bar와 compact top-tab fallback은 btop 같은 full-screen 앱의 PTY 크기를 보존하기 위해 비활성화한다.
 
 핵심 목표는 다음과 같다.
 
@@ -265,8 +265,11 @@ struct SelectionState {
     anchor: (u16, u16),
     focus: (u16, u16),
     dragging: bool,
+    kind: SelectionKind,
 }
 ```
+
+`SelectionKind::MouseInclusive`는 drag가 잡은 양끝 cell을 그대로 포함한다. `SelectionKind::KeyboardBoundary`는 `anchor`와 `focus`를 cursor boundary로 해석해서 `min(anchor, focus)..max(anchor, focus)` 직전 cell까지만 `SelectionRange`로 변환한다. 이 분리가 있어야 Shift+Left 한 번으로 커서 왼쪽 한 글자만 선택하고, 커서 오른쪽 글자가 함께 잡히는 회귀를 막을 수 있다.
 
 동작:
 
@@ -277,12 +280,14 @@ struct SelectionState {
 - child mouse protocol 상태와 무관하게 wheel 동작은 기존 정책을 유지한다. child mouse protocol이 켜져 있으면 child로 전달하고, 꺼져 있으면 tuimux scrollback으로 처리한다.
 - mouse-up은 drag-in-progress 상태를 종료하지만 selection 자체를 지우지 않는다.
 - selection이 zero-width이면 지운다.
-- 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C copy는 selection을 유지한다. Backspace/Delete/일반 문자 입력은 cursor가 숨겨져 있지 않고 selection이 editable 범위로 해석되면 먼저 selection을 삭제하거나 대체한다.
-- Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Super-Shift-C는 selection이 있을 때만 copy로 처리한다.
-- selection이 없으면 plain Ctrl-C는 active PTY로 전달해 foreground child interrupt로 동작하게 하고, Cmd-C/Super-C/Cmd-Shift-C/Super-Shift-C는 일반 문자 `c`로 누수하지 않는다.
-- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Super-Shift-V는 `clipboard::read_text()` 결과를 active PTY에 paste한다. Linux host마다 shortcut 전달 방식이 다를 수 있어 Control, Control-Shift, Super-Shift 계열을 모두 허용한다. pseudo terminal에서 raw `^C`/`^V` byte가 들어오는 경우도 같은 shortcut으로 정규화한다.
-- Ctrl-Shift-X/Cmd-Shift-X/Super-Shift-X는 selection이 있을 때 선택 텍스트를 clipboard에 복사한다. selection이 editable로 해석되면 active PTY에 Left/Right를 보내 cursor를 selection 끝으로 이동한 뒤 선택 글자 수만큼 Backspace를 보내 선택을 삭제한다. hard newline은 삭제 문자 1개이자 다음 화면 행 col 0 이동으로 계산하고, soft wrap은 newline 없이 같은 logical text로 계산한다. 이 조건이 아니면 출력 화면처럼 편집할 수 없는 selection으로 보고 복사 후 tuimux selection만 해제한다.
-- Home/End는 active PTY에 line start/end key로 전달한다. macOS에서는 Cmd-Shift-Left/Cmd-Shift-Right를 UI client에서 Home/End key로 정규화해 active PTY에 전달한다.
+- terminal mode에서 active input cursor가 보이고 plain Shift+방향키가 들어오면 `KeyboardBoundary` selection을 만들거나 확장한다. Shift+Left/Right는 한 cell, Shift+Up/Down은 active pane width만큼 boundary를 옮긴다. PTY에는 Up/Down key를 보내지 않고 raw `ESC[D`/`ESC[C` 반복으로 cursor를 움직여 shell history가 바뀌지 않게 한다.
+- `KeyboardBoundary` selection을 삭제/대체할 때는 daemon snapshot의 `terminal_cursor`가 raw cursor movement보다 한 frame 늦을 수 있으므로 편집 cursor를 `selection.focus`로 계산한다.
+- 새 key input이나 paste는 selection을 지운다. 단, Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Win-Shift-C copy는 selection을 유지한다. Backspace/Delete/일반 문자 입력은 cursor가 숨겨져 있지 않고 selection이 editable 범위로 해석되면 먼저 selection을 삭제하거나 대체한다.
+- Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Win-Shift-C/Super-Shift-C/META-Shift-C/HYPER-Shift-C는 selection이 있을 때만 copy로 처리한다.
+- selection이 없으면 plain Ctrl-C는 active PTY로 전달해 foreground child interrupt로 동작하게 하고, Cmd/Win/Super/META/HYPER 계열 C shortcut은 일반 문자 `c`로 누수하지 않는다.
+- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Win-Shift-V/Super-Shift-V/META-Shift-V/HYPER-Shift-V는 `clipboard::read_text()` 결과를 active PTY에 paste한다. Linux host마다 shortcut 전달 방식이 다를 수 있어 Control, Control-Shift, Super/META/HYPER-Shift 계열을 모두 허용한다. pseudo terminal에서 raw `^C`/`^V` byte가 들어오는 경우도 같은 shortcut으로 정규화한다.
+- Ctrl-Shift-X/Cmd-Shift-X/Win-Shift-X/Super-Shift-X/META-Shift-X/HYPER-Shift-X는 selection이 있을 때 선택 텍스트를 clipboard에 복사한다. selection이 editable로 해석되면 active PTY에 Left/Right를 보내 cursor를 selection 끝으로 이동한 뒤 선택 글자 수만큼 Backspace를 보내 선택을 삭제한다. hard newline은 삭제 문자 1개이자 다음 화면 행 col 0 이동으로 계산하고, soft wrap은 newline 없이 같은 logical text로 계산한다. 이 조건이 아니면 출력 화면처럼 편집할 수 없는 selection으로 보고 복사 후 tuimux selection만 해제한다.
+- Home/End는 active PTY에 line start/end key로 전달한다. Cmd-Shift-Left/Right와 Win-Shift-Left/Right처럼 launcher modifier가 Shift와 함께 들어온 arrow key는 UI client에서 Home/End key로 정규화해 active PTY에 전달한다.
 - paste는 host paste event, context menu Paste, shortcut paste 모두 `paste_text()`로 모은다. `paste_text()`는 terminal mode를 켜고, editable selection이 있으면 `delete_selection_for_replacement()`로 먼저 삭제한 뒤 active PTY에 paste하고 `paste_highlight_pending`을 세운다.
 - raw key 입력 tail이 `ESC [ 201 ~`와 일치하면 raw bracketed paste가 끝난 것으로 보고 같은 pending 상태를 세운다. 다음 terminal body left click이 발생하면 UI는 context menu 처리보다 먼저 pending 상태를 내리고 `terminal_cursor`, pane width, clicked local cell을 이용해 visual cursor delta를 계산한다. delta가 음수면 raw `ESC[D`, 양수면 raw `ESC[C`를 반복해 clicked cell로 input cursor를 이동시키고 shell-side paste highlight가 그 과정에서 사라지게 한다. 같은 left click의 mouse event는 child로 누수되지 않게 소비한다.
 - 우클릭은 host terminal context menu를 직접 열 수 없으므로, TUI 안에 context menu를 띄워 native에 가까운 cut/copy/paste 동작으로 에뮬레이션한다.
@@ -290,12 +295,12 @@ struct SelectionState {
 
 terminal mode에서 copy shortcut은 다음 순서로 처리된다.
 
-1. UI가 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Super-Shift-C를 받으면 `selection_range()`를 확인한다.
+1. UI가 Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Win-Shift-C/Super-Shift-C/META-Shift-C/HYPER-Shift-C를 받으면 `selection_range()`를 확인한다.
 2. selection이 있으면 `Request::SelectedText`로 daemon에서 텍스트를 추출한다.
 3. UI process가 `clipboard::copy_text()`로 system clipboard에 복사한다.
 4. copy 성공/실패와 무관하게 copy shortcut을 소비하고 Ctrl-C byte를 PTY로 보내지 않는다.
 5. selection이 없고 plain Ctrl-C이면 일반 Ctrl-C byte를 daemon의 active PTY로 보낸다.
-6. selection이 없고 Cmd-C/Super-C/Cmd-Shift-C/Super-Shift-C이면 child에 `c`를 보내지 않고 status만 갱신한다.
+6. selection이 없고 Cmd/Win/Super/META/HYPER 계열 C shortcut이면 child에 `c`를 보내지 않고 status만 갱신한다.
 
 이 설계는 macOS 기본 Terminal처럼 “텍스트를 선택한 상태의 Ctrl-C는 복사”라는 동작을 우선한다. 우클릭은 crossterm mouse capture 때문에 host terminal 메뉴를 그대로 띄우지는 못하지만, Cut/Copy/Paste/Cancel context menu를 TUI 위에 표시해 복붙 흐름을 줄인다.
 
@@ -433,12 +438,13 @@ crossterm KeyEvent
   -> F12이면 mode toggle
   -> Alt-N / Alt-Left / Alt-Right이면 terminal mode에서도 tuimux command 처리
   -> terminal_mode이거나 paste shortcut이거나 selection이 있는 copy/cut shortcut이면 UiState::send_terminal_key()
-     -> Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C + selection이면 clipboard copy
+     -> Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Win-Shift-C + selection이면 clipboard copy
      -> Ctrl-C + no selection이면 child interrupt
-     -> Cmd-C/Super-C/Cmd-Shift-C + no selection이면 consume
-     -> Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V이면 clipboard paste
+     -> Cmd/Win/Super/META/HYPER 계열 C shortcut + no selection이면 consume
+     -> Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Win-Shift-V이면 clipboard paste
      -> paste는 paste_text()에서 terminal_mode=true, selection replacement, active PTY paste, paste_highlight_pending 순서로 처리
-     -> Cmd-Shift-Left/Cmd-Shift-Right이면 Home/End로 정규화
+     -> plain Shift+방향키이면 visible input cursor 기준 KeyboardBoundary selection 확장과 raw left/right cursor movement
+     -> Cmd/Win/Super/META/HYPER + Shift + Left/Right이면 Home/End로 정규화
      -> 아니면 Request::SendKey
   -> navigation mode이면 sidebar/window/scrollback shortcut 처리
 ```
@@ -500,7 +506,7 @@ F12, q, Esc, or Detach button
 - ratatui paragraph truecolor buffer preservation tests.
 - crossterm backend truecolor SGR emission tests with parent `NO_COLOR` override.
 - terminal row padding regression test: 긴 row 이후 짧은 row를 그렸을 때 stale glyph가 남지 않는지 확인.
-- UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, 일반 key input 시 선택 제거, child mouse tracking click 대기 상태가 drag로 바뀌면 selection으로 전환되는지, 일반 left click은 selection 대신 clicked cell cursor move로 처리되는지 확인.
+- UI selection lifecycle regression tests: mouse-up 후 선택 유지, zero-width 선택 제거, plain Shift+방향키 keyboard boundary selection, keyboard selection의 한 글자/soft-wrap range 변환, 일반 key input 시 선택 제거, child mouse tracking click 대기 상태가 drag로 바뀌면 selection으로 전환되는지, 일반 left click은 selection 대신 clicked cell cursor move로 처리되는지 확인.
 - terminal-mode rail regression tests: 넓은 기본 terminal mode render buffer에 Detach/WINDOWS rail, 3-cell ` X ` close button, STATUS panel, `scroll:<count>`가 찍히고, Session panel이 없으며, rail과 STATUS click이 terminal cell hit-test에서 제외되는지 확인. 좁은 화면에서는 compact top tab fallback 없이 전체 root가 terminal body가 되는지 확인.
 - daemon multi-client regression test.
 - daemon window workflow regression test: `NewWindow`, `SelectWindowByRow`, `KillWindowByRow`가 split command 없이 window list state를 갱신하는지 확인.
@@ -509,8 +515,8 @@ F12, q, Esc, or Detach button
 - daemon window-title regression test: child OSC 2 title이 snapshot window/pane metadata에 반영되는지 확인.
 - daemon scrollback regression test: shell에서 50줄 출력, `ScrollPane` 요청, snapshot scrollback 증가와 cursor hide 확인.
 - daemon selected-text regression test: PTY 화면의 선택 좌표에서 `SelectedText`가 텍스트를 반환하고 selection snapshot이 inverse style을 표시하는지 확인.
-- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click context menu의 Cut/Copy, Cut이 editable selection에서 cursor 이동과 Backspace를 child까지 보내는지, Backspace/Delete/일반 문자/Ctrl-V paste/Ctrl-Shift-X cut이 selection을 삭제/대체하는지, soft wrap selection replacement와 hard newline selection Backspace 삭제가 raw child line editor의 `prefix + replacement + suffix` 규칙을 만족하는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, context menu의 Paste와 Ctrl-V paste가 child PTY에서 실행되는지, Cut clipboard context paste 뒤 right click이 clear 입력을 보내는지, child가 bracketed paste mode일 때 wrapper를 받는지, raw bracketed paste 후 click이 clear 입력을 보내는지 확인.
-- keyboard shortcut unit tests: Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Super-Shift-C copy predicate, raw `^C` normalization, 선택 없는 plain Ctrl-C interrupt fallback, Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Super-Shift-V paste predicate, raw `^V` normalization, Cmd-Shift-Left/Cmd-Shift-Right to Home/End 정규화, Home/End PTY key encoding을 확인.
+- macOS PTY UI smoke script: 실제 TUI client를 pseudo terminal에서 실행하고 SGR mouse drag 후 mouse-up frame에 reverse-video selection highlight가 남는지, right-click context menu의 Cut/Copy, Cut이 editable selection에서 cursor 이동과 Backspace를 child까지 보내는지, Backspace/Delete/일반 문자/Ctrl-V paste/Ctrl-Shift-X cut/Shift-Left keyboard selection이 selection을 삭제/대체하는지, soft wrap selection replacement와 hard newline selection Backspace 삭제가 raw child line editor의 `prefix + replacement + suffix` 규칙을 만족하는지, Ctrl-C, `pbpaste`, foreground child SIGINT trap 미발생, context menu의 Paste와 Ctrl-V paste가 child PTY에서 실행되는지, Cut clipboard context paste 뒤 right click이 clear 입력을 보내는지, child가 bracketed paste mode일 때 wrapper를 받는지, raw bracketed paste 후 click이 clear 입력을 보내는지 확인.
+- keyboard shortcut unit tests: Ctrl-C/Ctrl-Shift-C/Cmd-Shift-C/Win-Shift-C/Super/META/HYPER-Shift-C copy predicate, raw `^C` normalization, 선택 없는 plain Ctrl-C interrupt fallback, Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Win-Shift-V/Super/META/HYPER-Shift-V paste predicate, raw `^V` normalization, plain Shift+방향키 selection predicate, Cmd/Win/Super/META/HYPER-Shift-Left/Right to Home/End 정규화, Home/End PTY key encoding을 확인.
 - paste highlight regression test: paste 성공 후 pending 상태가 켜지고 click-clear 경로에서 상태가 내려가는지 확인한다.
 - macOS terminal-chrome smoke script: 실제 TUI client 기본 화면에서 boxed right rail과 scrollback/hint rows가 보이는지, child terminal body가 계속 명령을 실행하는지, rail `+ new` mouse click과 `F12` navigation handoff가 동작하는지 확인.
 - macOS app smoke script: 실제 TUI client 안에서 `llmfit --help`, `btop`, `htop`, `nano`를 실행해 output/full-screen UI/input/save/exit 동작을 확인.
@@ -554,7 +560,7 @@ F12, q, Esc, or Detach button
 - 같은 daemon에 reattach 후 `echo $TUIMUX_PERSIST_MARK`가 `alive` 출력
 - `btop`, `htop`, `nano`, `llmfit --help` 실행 확인
 - mouse drag selection, Ctrl-C, `pbpaste`가 선택 텍스트 반환 확인
-- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V paste, editable selection 위 Ctrl-V replacement, Home/End/Cmd-Shift-Left/Cmd-Shift-Right line start/end 이동 확인
+- Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V/Win-Shift-V paste, editable selection 위 Ctrl-V replacement, plain Shift+방향키 keyboard selection, Home/End/Cmd-Shift-Left/Cmd-Shift-Right/Win-Shift-Left/Win-Shift-Right line start/end 이동 확인
 - mouse-up 이후 선택 텍스트가 reverse-video highlight로 남는지 확인
 - 일반 shell에서 normal left click은 clicked cell로 input cursor를 이동하고, child mouse tracking 중 normal left click은 child로 전달되며, normal drag는 tuimux selection으로 처리되는지 확인
 - 우클릭 context menu에서 Cut, Copy, Paste, Cancel이 표시되고 Cut/Copy/Paste가 동작하는지 확인
@@ -577,10 +583,10 @@ F12, q, Esc, or Detach button
 
 ## 6. 릴리스 설계
 
-v0.2.0-alpha.38 릴리스는 macOS Apple Silicon만 대상으로 한다.
+v0.2.0-alpha.39 릴리스는 macOS Apple Silicon만 대상으로 한다.
 
 - GitHub Actions `release.yml`은 `aarch64-apple-darwin` tarball만 만든다.
-- release asset 이름은 `tuimux-v0.2.0-alpha.38-aarch64-apple-darwin.tar.gz`다.
+- release asset 이름은 `tuimux-v0.2.0-alpha.39-aarch64-apple-darwin.tar.gz`다.
 - `SHA256SUMS`를 같이 게시한다.
 - installer는 OS/architecture를 확인하고 macOS ARM이 아니면 즉시 실패한다.
 - installer는 tmux를 설치하거나 `.tmux.conf`를 수정하지 않는다.
@@ -588,8 +594,8 @@ v0.2.0-alpha.38 릴리스는 macOS Apple Silicon만 대상으로 한다.
 설치 명령:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.38/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.38 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.39/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.39 bash
 ```
 
 ## 7. 알려진 한계와 다음 단계

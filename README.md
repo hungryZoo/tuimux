@@ -2,7 +2,7 @@
 
 `tuimux` is an early Rust-native, prefix-free, mouse-first terminal multiplexer.
 
-v0.2.0-alpha.38 keeps the default runtime on the Rust-native path, restores the
+v0.2.0-alpha.39 keeps the default runtime on the Rust-native path, restores the
 boxed Detach/WINDOWS/STATUS rail beside the live terminal, fixes btop-style
 cursor positioning, and tightens terminal interaction so copy, cut, paste,
 click, drag, and right-click menu paths behave consistently. Editable
@@ -43,10 +43,11 @@ This is still a 0.x prerelease. Current behavior:
 - Multiple clients can connect to the same daemon concurrently; they currently share active window state.
 - Each window runs a real shell in a PTY, parsed with `vt100` and rendered with ratatui.
 - Mouse wheel scrolls shell history when the child program is not using mouse tracking; `PageUp`/`PageDown`, `Home`, and `End` work in navigation mode, and paste while scrolled back returns to the live bottom, covered by the macOS scrollback smoke.
-- In terminal mode, `Home`/`End` and macOS `Cmd-Shift-Left`/`Cmd-Shift-Right` move to the start/end of the active terminal input line.
+- In terminal mode, `Home`/`End`, `Cmd-Shift-Left`/`Cmd-Shift-Right`, and `Win-Shift-Left`/`Win-Shift-Right` move to the start/end of the active terminal input line when the host terminal forwards those modifier keys.
+- When the active input cursor is visible, plain `Shift+Arrow` extends a text-editor-like selection from the cursor; `Shift+Up`/`Shift+Down` move by one visual row without triggering shell history.
 - Mouse selection is visibly preserved after mouse-up and selected text is extracted by the daemon from the active PTY screen. Left click without drag moves the active input cursor to the clicked cell; drag creates selection; right-click opens the TUI Cut/Copy/Paste/Cancel menu.
-- macOS PTY smoke covers reverse-video selection highlight, drag + right-click context-menu Cut/Copy, Cut Backspace delivery for editable selections, hard multi-line Backspace deletion, soft-wrap text replacement, Backspace/delete/text/Ctrl-V replacement for editable selections, drag + Ctrl-C + `pbpaste`, context-menu Paste and Ctrl-V Paste execution, child bracketed paste wrappers, paste cursor-move clearing, and a real zsh visual check for final cursor column.
-- `Ctrl-C`/`Ctrl-Shift-C`/`Cmd-Shift-C` copy only when a drag selection exists; `Ctrl-Shift-X`/`Cmd-Shift-X` cut editable selections by copying then moving the cursor and sending Backspace, and otherwise fall back to copy + selection clear for non-editable screen text. Backspace/Delete consume editable selections, including soft-wrapped and hard multi-line selections, and normal text or Ctrl-V paste replaces them. Without a selection, plain `Ctrl-C` still reaches the child program as SIGINT. `Ctrl-V`/`Ctrl-Shift-V`/`Cmd-Shift-V` paste the system clipboard into the active PTY through the same paste path as context-menu Paste.
+- macOS PTY smoke covers reverse-video selection highlight, drag + right-click context-menu Cut/Copy, Cut Backspace delivery for editable selections, Shift-Left keyboard selection deletion, hard multi-line Backspace deletion, soft-wrap text replacement, Backspace/delete/text/Ctrl-V replacement for editable selections, drag + Ctrl-C + `pbpaste`, context-menu Paste, Ctrl-V Paste, and Super-Shift-V Paste execution, child bracketed paste wrappers, paste cursor-move clearing, and a real zsh visual check for final cursor column.
+- `Ctrl-C`/`Ctrl-Shift-C`/`Cmd-Shift-C`/`Win-Shift-C` copy when a mouse or keyboard selection exists; `Ctrl-Shift-X`/`Cmd-Shift-X`/`Win-Shift-X` cut editable selections by copying then moving the cursor and sending Backspace, and otherwise fall back to copy + selection clear for non-editable screen text. Backspace/Delete consume editable selections, including soft-wrapped and hard multi-line selections, and normal text or Ctrl-V paste replaces them. Without a selection, plain `Ctrl-C` still reaches the child program as SIGINT. `Ctrl-V`/`Ctrl-Shift-V`/`Cmd-Shift-V`/`Win-Shift-V` paste the system clipboard into the active PTY through the same paste path as context-menu Paste.
 - Child OSC 52 clipboard copy requests are decoded into the macOS system clipboard, and OSC 52 paste queries receive a base64 clipboard response.
 - Host paste is handled as either a paste event or raw bracketed-paste key sequence; the next terminal-body left click moves the active input cursor to the clicked cell, which clears shell-side paste highlighting without leaking mouse bytes to the child.
 - If the child program enables mouse tracking, simple left clicks and wheel events still go to the child, while a normal drag starts tuimux text selection, covered by the macOS mouse-protocol smoke.
@@ -60,13 +61,42 @@ This is still a 0.x prerelease. Current behavior:
 Important alpha limitation: daemon state is in-memory only. Windows survive UI
 detach/reattach, but not daemon shutdown, reboot, or `tuimux --stop-server`.
 
+## Keyboard Shortcuts
+
+`Cmd` and `Win` below are treated as the same “launcher” modifier family inside tuimux. Crossterm can receive that family as `SUPER`, `META`, or `HYPER`, and tuimux enables keyboard-enhancement parsing so terminals that support it can forward those keys even when tuimux is running on a remote server.
+
+If your local terminal reserves a shortcut and never sends it to the remote PTY, tuimux cannot see it. In that case use the `Ctrl-Shift-*` variant or the right-click menu.
+
+| Context | Shortcut | Action |
+| --- | --- | --- |
+| Global | `F12` | Toggle terminal mode and navigation/sidebar mode. |
+| Terminal mode | `Alt-N` | Create a new window. |
+| Terminal mode | `Alt-Left` / `Alt-Right` | Switch active window. |
+| Terminal input | `Home` / `End` | Move to start/end of the active input line. |
+| Terminal input | `Cmd-Shift-Left` / `Cmd-Shift-Right` | Same as `Home` / `End`. |
+| Terminal input | `Win-Shift-Left` / `Win-Shift-Right` | Same as `Home` / `End`. |
+| Terminal input | `Shift-Left` / `Shift-Right` | Extend keyboard selection by one character. |
+| Terminal input | `Shift-Up` / `Shift-Down` | Extend keyboard selection by one visual row without triggering shell history. |
+| Selection | `Ctrl-C` | Copy selection; without selection, plain `Ctrl-C` is sent to the child process. |
+| Selection | `Ctrl-Shift-C` / `Cmd-Shift-C` / `Win-Shift-C` | Copy selection. Without selection, the launcher variants are consumed instead of typing `c`. |
+| Editable selection | `Ctrl-Shift-X` / `Cmd-Shift-X` / `Win-Shift-X` | Cut selection: copy to system clipboard, then delete editable text with cursor movement and Backspace. |
+| Paste | `Ctrl-V` / `Ctrl-Shift-V` / `Cmd-Shift-V` / `Win-Shift-V` | Paste system clipboard into the active PTY; editable selections are replaced first. |
+| Mouse | left click | Move active input cursor to the clicked terminal cell, or clear an existing selection. |
+| Mouse | left drag | Create a text selection. |
+| Mouse | right click | Open the Cut / Copy / Paste / Cancel context menu. |
+| Navigation mode | `Tab` / arrow keys | Move between windows. |
+| Navigation mode | `n` | Create a new window. |
+| Navigation mode | `x` | Close the active window. |
+| Navigation mode | `PageUp` / `PageDown` / `Home` / `End` | Navigate scrollback. |
+| Navigation mode | `q` / `Esc` / `Ctrl-C` | Exit the UI client. |
+
 ## Install
 
 The current prerelease publishes macOS Apple Silicon only.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.38/scripts/install.sh | \
-  TUIMUX_VERSION=v0.2.0-alpha.38 bash
+curl -fsSL https://raw.githubusercontent.com/hungryZoo/tuimux/v0.2.0-alpha.39/scripts/install.sh | \
+  TUIMUX_VERSION=v0.2.0-alpha.39 bash
 ```
 
 Verify:
@@ -108,5 +138,5 @@ python3 scripts/smoke_macos_no_tmux.py --binary target/debug/tuimux
 
 ## Release
 
-Pushing a tag like `v0.2.0-alpha.38` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v0.2.0-alpha.39` triggers `.github/workflows/release.yml`,
 which currently publishes a GitHub prerelease for macOS Apple Silicon only.

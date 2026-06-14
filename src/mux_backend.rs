@@ -476,6 +476,12 @@ fn modifiers_to_bits(modifiers: KeyModifiers) -> u8 {
     if modifiers.contains(KeyModifiers::SUPER) {
         bits |= 1 << 3;
     }
+    if modifiers.contains(KeyModifiers::HYPER) {
+        bits |= 1 << 4;
+    }
+    if modifiers.contains(KeyModifiers::META) {
+        bits |= 1 << 5;
+    }
     bits
 }
 
@@ -492,6 +498,12 @@ fn bits_to_modifiers(bits: u8) -> KeyModifiers {
     }
     if bits & (1 << 3) != 0 {
         modifiers.insert(KeyModifiers::SUPER);
+    }
+    if bits & (1 << 4) != 0 {
+        modifiers.insert(KeyModifiers::HYPER);
+    }
+    if bits & (1 << 5) != 0 {
+        modifiers.insert(KeyModifiers::META);
     }
     modifiers
 }

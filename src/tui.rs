@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::style::force_color_output;
@@ -97,6 +98,13 @@ struct SelectionState {
     anchor: (u16, u16),
     focus: (u16, u16),
     dragging: bool,
+    kind: SelectionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionKind {
+    MouseInclusive,
+    KeyboardBoundary,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -230,12 +238,21 @@ impl UiState {
 
     fn selection_range(&self) -> Option<SelectionRange> {
         let selection = self.selection?;
-        (selection.anchor != selection.focus).then_some(SelectionRange::new(
-            selection.anchor.0,
-            selection.anchor.1,
-            selection.focus.0,
-            selection.focus.1,
-        ))
+        match selection.kind {
+            SelectionKind::MouseInclusive => {
+                (selection.anchor != selection.focus).then_some(SelectionRange::new(
+                    selection.anchor.0,
+                    selection.anchor.1,
+                    selection.focus.0,
+                    selection.focus.1,
+                ))
+            }
+            SelectionKind::KeyboardBoundary => keyboard_boundary_selection_range(
+                selection.anchor,
+                selection.focus,
+                self.selection_pane_width(selection.pane),
+            ),
+        }
     }
 
     fn begin_selection(&mut self, pane: usize, row: u16, col: u16) {
@@ -245,6 +262,7 @@ impl UiState {
             anchor: (row, col),
             focus: (row, col),
             dragging: false,
+            kind: SelectionKind::MouseInclusive,
         });
     }
 
@@ -378,7 +396,7 @@ impl UiState {
         text: &str,
     ) -> Option<EditableSelectionDelete> {
         let range = range.normalized();
-        let Some((cursor_row, cursor_col)) = self.terminal_cursor else {
+        let Some((cursor_row, cursor_col)) = self.editable_selection_cursor() else {
             return None;
         };
         if self.terminal_hide_cursor {
@@ -422,7 +440,22 @@ impl UiState {
 
     fn active_selection_pane_width(&self) -> usize {
         self.selection
-            .and_then(|selection| self.terminal_panes.get(selection.pane))
+            .map(|selection| self.selection_pane_width(selection.pane))
+            .unwrap_or_else(|| self.regions.terminal_body.width.max(1) as usize)
+    }
+
+    fn editable_selection_cursor(&self) -> Option<(u16, u16)> {
+        match self.selection {
+            Some(selection) if selection.kind == SelectionKind::KeyboardBoundary => {
+                Some(selection.focus)
+            }
+            _ => self.terminal_cursor,
+        }
+    }
+
+    fn selection_pane_width(&self, pane: usize) -> usize {
+        self.terminal_panes
+            .get(pane)
             .map(|pane| pane.rect.width)
             .unwrap_or(self.regions.terminal_body.width)
             .max(1) as usize
@@ -496,9 +529,13 @@ impl UiState {
             return;
         }
 
+        if self.extend_keyboard_selection(key) {
+            return;
+        }
+
         let key = terminal_line_boundary_key(key).unwrap_or(key);
 
-        if key.modifiers.contains(KeyModifiers::SUPER) {
+        if key.modifiers.intersects(launcher_modifier_bits()) {
             self.status = Some("shortcut ignored".to_string());
             return;
         }
@@ -511,6 +548,64 @@ impl UiState {
         }
 
         self.send_terminal_key_to_child(key);
+    }
+
+    fn extend_keyboard_selection(&mut self, key: KeyEvent) -> bool {
+        if self.terminal_hide_cursor {
+            return false;
+        }
+        let pane = self.active_terminal_pane_index();
+        let width = self.selection_pane_width(pane);
+        let Some(delta) = keyboard_selection_delta(key, width) else {
+            return false;
+        };
+        let Some((cursor_row, cursor_col)) = self.terminal_cursor else {
+            return false;
+        };
+
+        let cursor_index = visual_index(cursor_row, cursor_col, width);
+        let (anchor, current_index) = match self.selection {
+            Some(selection)
+                if selection.pane == pane && selection.kind == SelectionKind::KeyboardBoundary =>
+            {
+                (
+                    selection.anchor,
+                    visual_index(selection.focus.0, selection.focus.1, width),
+                )
+            }
+            _ => (index_to_cell(cursor_index, width), cursor_index),
+        };
+        let target_index = offset_index(current_index, delta);
+        let focus = index_to_cell(target_index, width);
+        if anchor == focus {
+            self.clear_selection();
+        } else {
+            self.pending_left_down = None;
+            self.selection = Some(SelectionState {
+                pane,
+                anchor,
+                focus,
+                dragging: false,
+                kind: SelectionKind::KeyboardBoundary,
+            });
+        }
+
+        self.paste_highlight_pending = false;
+        let actual_delta = target_index as i128 - current_index as i128;
+        if let Some(bytes) = cursor_move_bytes(clamp_i128_to_i32(actual_delta), false) {
+            if let Err(e) = self.mux.send_raw_bytes(&bytes) {
+                self.status = Some(format!("cursor move failed: {e}"));
+            }
+        }
+        true
+    }
+
+    fn active_terminal_pane_index(&self) -> usize {
+        self.panes
+            .iter()
+            .position(|pane| pane.active)
+            .or_else(|| (!self.terminal_panes.is_empty()).then_some(0))
+            .unwrap_or(0)
     }
 
     fn observe_raw_bracketed_paste_key(&mut self, key: KeyEvent) -> bool {
@@ -684,7 +779,7 @@ fn is_copy_shortcut(key: KeyEvent) -> bool {
     (shortcut_char(key, 'c') || raw_control_char(key, 'c'))
         && (is_plain_control_c(key)
             || is_control_shift_shortcut(key.modifiers)
-            || is_macos_shift_command(key.modifiers))
+            || is_launcher_shift_shortcut(key.modifiers))
 }
 
 fn is_plain_control_c(key: KeyEvent) -> bool {
@@ -697,18 +792,18 @@ fn is_paste_shortcut(key: KeyEvent) -> bool {
         || (shortcut_char(key, 'v')
             && (key.modifiers == KeyModifiers::CONTROL
                 || is_control_shift_shortcut(key.modifiers)
-                || is_macos_shift_command(key.modifiers)))
+                || is_launcher_shift_shortcut(key.modifiers)))
 }
 
 fn is_cut_shortcut(key: KeyEvent) -> bool {
     shortcut_char(key, 'x')
-        && (is_control_shift_shortcut(key.modifiers) || is_macos_shift_command(key.modifiers))
+        && (is_control_shift_shortcut(key.modifiers) || is_launcher_shift_shortcut(key.modifiers))
 }
 
 fn is_selection_edit_key(key: KeyEvent) -> bool {
     if key
         .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | launcher_modifier_bits())
     {
         return false;
     }
@@ -739,10 +834,10 @@ fn raw_control_char(key: KeyEvent, expected: char) -> bool {
 
 fn terminal_line_boundary_key(key: KeyEvent) -> Option<KeyEvent> {
     match (key.code, key.modifiers) {
-        (KeyCode::Left, modifiers) if is_macos_shift_command(modifiers) => {
+        (KeyCode::Left, modifiers) if is_launcher_shift_shortcut(modifiers) => {
             Some(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))
         }
-        (KeyCode::Right, modifiers) if is_macos_shift_command(modifiers) => {
+        (KeyCode::Right, modifiers) if is_launcher_shift_shortcut(modifiers) => {
             Some(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
         }
         _ => None,
@@ -761,17 +856,21 @@ fn raw_key_sequence_char(key: KeyEvent) -> Option<char> {
     }
 }
 
-fn is_macos_shift_command(modifiers: KeyModifiers) -> bool {
-    modifiers.contains(KeyModifiers::SUPER)
-        && modifiers.contains(KeyModifiers::SHIFT)
-        && !modifiers.contains(KeyModifiers::CONTROL)
-        && !modifiers.contains(KeyModifiers::ALT)
+fn launcher_modifier_bits() -> KeyModifiers {
+    KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::HYPER
+}
+
+fn is_launcher_shift_shortcut(modifiers: KeyModifiers) -> bool {
+    let allowed = KeyModifiers::SHIFT | launcher_modifier_bits();
+    modifiers.contains(KeyModifiers::SHIFT)
+        && modifiers.intersects(launcher_modifier_bits())
+        && modifiers.difference(allowed).is_empty()
 }
 
 fn is_control_shift_shortcut(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::CONTROL)
         && modifiers.contains(KeyModifiers::SHIFT)
-        && !modifiers.contains(KeyModifiers::SUPER)
+        && !modifiers.intersects(launcher_modifier_bits())
         && !modifiers.contains(KeyModifiers::ALT)
 }
 
@@ -816,7 +915,8 @@ fn setup() -> io::Result<Term> {
         stdout,
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
@@ -831,6 +931,7 @@ fn restore(terminal: &mut Term) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         DisableMouseCapture,
         DisableBracketedPaste
@@ -1175,6 +1276,62 @@ fn cursor_move_bytes(delta: i32, force_movement: bool) -> Option<Vec<u8>> {
 
 fn visual_index(row: u16, col: u16, width: usize) -> usize {
     row as usize * width.max(1) + col as usize
+}
+
+fn index_to_cell(index: usize, width: usize) -> (u16, u16) {
+    let width = width.max(1);
+    (
+        (index / width).min(u16::MAX as usize) as u16,
+        (index % width).min(u16::MAX as usize) as u16,
+    )
+}
+
+fn offset_index(index: usize, delta: i32) -> usize {
+    if delta < 0 {
+        index.saturating_sub(delta.unsigned_abs() as usize)
+    } else {
+        index.saturating_add(delta as usize)
+    }
+}
+
+fn clamp_i128_to_i32(value: i128) -> i32 {
+    value.clamp(i32::MIN as i128, i32::MAX as i128) as i32
+}
+
+fn keyboard_selection_delta(key: KeyEvent, width: usize) -> Option<i32> {
+    if key.modifiers != KeyModifiers::SHIFT {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Left => Some(-1),
+        KeyCode::Right => Some(1),
+        KeyCode::Up => Some(-(width.max(1).min(i32::MAX as usize) as i32)),
+        KeyCode::Down => Some(width.max(1).min(i32::MAX as usize) as i32),
+        _ => None,
+    }
+}
+
+fn keyboard_boundary_selection_range(
+    anchor: (u16, u16),
+    focus: (u16, u16),
+    width: usize,
+) -> Option<SelectionRange> {
+    let width = width.max(1);
+    let anchor_index = visual_index(anchor.0, anchor.1, width);
+    let focus_index = visual_index(focus.0, focus.1, width);
+    let (start, end) = if anchor_index <= focus_index {
+        (anchor_index, focus_index)
+    } else {
+        (focus_index, anchor_index)
+    };
+    if start == end {
+        return None;
+    }
+
+    let (start_row, start_col) = index_to_cell(start, width);
+    let (end_row, end_col) = index_to_cell(end.saturating_sub(1), width);
+    Some(SelectionRange::new(start_row, start_col, end_row, end_col))
 }
 
 fn editable_delete_char_count(text: &str) -> usize {
@@ -2781,6 +2938,14 @@ mod tests {
         )));
         assert!(is_copy_shortcut(KeyEvent::new(
             KeyCode::Char('c'),
+            KeyModifiers::META | KeyModifiers::SHIFT
+        )));
+        assert!(is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::HYPER | KeyModifiers::SHIFT
+        )));
+        assert!(is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT
         )));
         assert!(is_paste_shortcut(KeyEvent::new(
@@ -2790,6 +2955,14 @@ mod tests {
         assert!(is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
             KeyModifiers::SUPER | KeyModifiers::SHIFT
+        )));
+        assert!(is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::META | KeyModifiers::SHIFT
+        )));
+        assert!(is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::HYPER | KeyModifiers::SHIFT
         )));
         assert!(is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
@@ -2806,6 +2979,14 @@ mod tests {
         assert!(is_cut_shortcut(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::SUPER | KeyModifiers::SHIFT
+        )));
+        assert!(is_cut_shortcut(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::META | KeyModifiers::SHIFT
+        )));
+        assert!(is_cut_shortcut(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::HYPER | KeyModifiers::SHIFT
         )));
         assert!(is_cut_shortcut(KeyEvent::new(
             KeyCode::Char('x'),
@@ -2818,11 +2999,19 @@ mod tests {
         assert!(!is_copy_shortcut(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::SUPER
+        )));
+        assert!(!is_copy_shortcut(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::META
         )));
         assert!(!is_paste_shortcut(KeyEvent::new(
             KeyCode::Char('v'),
             KeyModifiers::SUPER
         )));
+        assert!(!is_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::HYPER
+        )));
         assert!(!is_cut_shortcut(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::CONTROL
@@ -2830,6 +3019,10 @@ mod tests {
         assert!(!is_cut_shortcut(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::SUPER
+        )));
+        assert!(!is_cut_shortcut(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::META
         )));
     }
 
@@ -2858,7 +3051,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_command_arrows_map_to_terminal_home_end() {
+    fn launcher_shift_arrows_map_to_terminal_home_end() {
         assert_eq!(
             terminal_line_boundary_key(KeyEvent::new(
                 KeyCode::Left,
@@ -2871,6 +3064,22 @@ mod tests {
             terminal_line_boundary_key(KeyEvent::new(
                 KeyCode::Right,
                 KeyModifiers::SUPER | KeyModifiers::SHIFT
+            ))
+            .map(|key| (key.code, key.modifiers)),
+            Some((KeyCode::End, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            terminal_line_boundary_key(KeyEvent::new(
+                KeyCode::Left,
+                KeyModifiers::META | KeyModifiers::SHIFT
+            ))
+            .map(|key| (key.code, key.modifiers)),
+            Some((KeyCode::Home, KeyModifiers::NONE))
+        );
+        assert_eq!(
+            terminal_line_boundary_key(KeyEvent::new(
+                KeyCode::Right,
+                KeyModifiers::HYPER | KeyModifiers::SHIFT
             ))
             .map(|key| (key.code, key.modifiers)),
             Some((KeyCode::End, KeyModifiers::NONE))
@@ -3115,6 +3324,114 @@ mod tests {
         state.finish_selection(2, 3);
 
         assert!(state.selection.is_none());
+    }
+
+    #[test]
+    fn keyboard_boundary_selection_represents_single_cells() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 10, 5);
+
+        state.selection = Some(SelectionState {
+            pane: 0,
+            anchor: (1, 5),
+            focus: (1, 4),
+            dragging: false,
+            kind: SelectionKind::KeyboardBoundary,
+        });
+        assert_eq!(
+            state.selection_range(),
+            Some(SelectionRange::new(1, 4, 1, 4))
+        );
+
+        state.selection = Some(SelectionState {
+            pane: 0,
+            anchor: (1, 5),
+            focus: (1, 6),
+            dragging: false,
+            kind: SelectionKind::KeyboardBoundary,
+        });
+        assert_eq!(
+            state.selection_range(),
+            Some(SelectionRange::new(1, 5, 1, 5))
+        );
+    }
+
+    #[test]
+    fn keyboard_boundary_selection_crosses_soft_wraps_by_width() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 10, 5);
+
+        state.selection = Some(SelectionState {
+            pane: 0,
+            anchor: (1, 9),
+            focus: (2, 1),
+            dragging: false,
+            kind: SelectionKind::KeyboardBoundary,
+        });
+
+        assert_eq!(
+            state.selection_range(),
+            Some(SelectionRange::new(1, 9, 2, 0))
+        );
+    }
+
+    #[test]
+    fn shift_arrow_extends_selection_from_visible_cursor() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 10, 5);
+        state.terminal_cursor = Some((2, 5));
+        state.terminal_hide_cursor = false;
+
+        assert!(state.extend_keyboard_selection(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)));
+        assert_eq!(
+            state.selection_range(),
+            Some(SelectionRange::new(2, 4, 2, 4))
+        );
+
+        assert!(state.extend_keyboard_selection(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)));
+        assert_eq!(
+            state.selection_range(),
+            Some(SelectionRange::new(1, 4, 2, 4))
+        );
+    }
+
+    #[test]
+    fn shift_arrow_selection_uses_editable_delete_pipeline() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 10, 5);
+        state.terminal_cursor = Some((2, 5));
+        state.terminal_hide_cursor = false;
+        state.selection = Some(SelectionState {
+            pane: 0,
+            anchor: (2, 5),
+            focus: (2, 4),
+            dragging: false,
+            kind: SelectionKind::KeyboardBoundary,
+        });
+
+        assert_eq!(
+            state.editable_selection_delete(state.selection_range().unwrap(), "x"),
+            Some(EditableSelectionDelete {
+                left_moves: 0,
+                right_moves: 1,
+                backspaces: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn shift_arrow_selection_is_plain_shift_only() {
+        assert_eq!(
+            keyboard_selection_delta(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT), 10),
+            Some(-1)
+        );
+        assert_eq!(
+            keyboard_selection_delta(
+                KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER | KeyModifiers::SHIFT),
+                10
+            ),
+            None
+        );
     }
 
     #[test]

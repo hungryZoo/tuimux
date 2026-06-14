@@ -35,6 +35,8 @@ RIGHT_PASTE_MARKER = "TUIMUX_UI_RIGHT_PASTE_TARGET"
 RIGHT_PASTE_OUTPUT = f"RIGHT_PASTE_RAN:{RIGHT_PASTE_MARKER}"
 SHORTCUT_PASTE_MARKER = "TUIMUX_UI_SHORTCUT_PASTE_TARGET"
 SHORTCUT_PASTE_OUTPUT = f"SHORTCUT_PASTE_RAN:{SHORTCUT_PASTE_MARKER}"
+LAUNCHER_PASTE_MARKER = "TUIMUX_UI_LAUNCHER_PASTE_TARGET"
+LAUNCHER_PASTE_OUTPUT = f"LAUNCHER_PASTE_RAN:{LAUNCHER_PASTE_MARKER}"
 CHILD_PASTE_MARKER = "TUIMUX_CHILD_BRACKETED_TARGET"
 CHILD_PASTE_READY = "CHILD_BRACKETED_READY"
 CHILD_PASTE_OK = "CHILD_BRACKETED_OK"
@@ -61,6 +63,7 @@ DELETE_DELETE_OK = "DELETE_DELETE_OK"
 REPLACE_DELETE_OK = "REPLACE_DELETE_OK"
 PASTE_REPLACE_OK = "PASTE_REPLACE_OK"
 SHORTCUT_CUT_DELETE_OK = "SHORTCUT_CUT_DELETE_OK"
+KEYBOARD_SHIFT_DELETE_OK = "KEYBOARD_SHIFT_DELETE_OK"
 WRAP_REPLACE_OK = "WRAP_REPLACE_OK"
 HARD_MULTILINE_DELETE_OK = "HARD_MULTILINE_DELETE_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
@@ -498,12 +501,14 @@ def main() -> int:
 
     trap_file = Path("/tmp") / f"tuimux-ui-copy-int-{os.getpid()}"
     shortcut_paste_file = Path("/tmp") / f"tuimux-shortcut-paste-{os.getpid()}"
+    launcher_paste_file = Path("/tmp") / f"tuimux-launcher-paste-{os.getpid()}"
     child_paste_script = Path("/tmp") / f"tuimux-child-bracketed-{os.getpid()}.py"
     paste_click_script = Path("/tmp") / f"tuimux-paste-click-clear-{os.getpid()}.py"
     cut_delete_script = Path("/tmp") / f"tuimux-cut-delete-{os.getpid()}.py"
     edit_delete_script = Path("/tmp") / f"tuimux-edit-delete-{os.getpid()}.py"
     trap_file.unlink(missing_ok=True)
     shortcut_paste_file.unlink(missing_ok=True)
+    launcher_paste_file.unlink(missing_ok=True)
     child_paste_script.unlink(missing_ok=True)
     paste_click_script.unlink(missing_ok=True)
     cut_delete_script.unlink(missing_ok=True)
@@ -638,6 +643,28 @@ def main() -> int:
             print("Ctrl-V pasted command output did not appear", file=sys.stderr)
             print(f"clipboard before Ctrl-V: {shortcut_clipboard!r}", file=sys.stderr)
             print(client.excerpt_around(SHORTCUT_PASTE_MARKER), file=sys.stderr)
+            return 1
+
+        launcher_paste_payload = (
+            "printf '\\033[2J\\033[H'; "
+            f"printf 'LAUNCHER_PASTE_RAN:%s\\n' {LAUNCHER_PASTE_MARKER}; "
+            f"printf 'LAUNCHER_PASTE_RAN:%s\\n' {LAUNCHER_PASTE_MARKER} > "
+            f"{shlex.quote(str(launcher_paste_file))}"
+            "\n"
+        )
+        set_clipboard(launcher_paste_payload)
+        launcher_clipboard = get_clipboard()
+        client.write(b"\x1b[118;10u")
+        client.read_for(0.5)
+        client.write(b"\r")
+        client.read_for(0.5)
+        if not wait_file_contains(launcher_paste_file, LAUNCHER_PASTE_OUTPUT, args.timeout):
+            print("Super-Shift-V pasted command output did not appear", file=sys.stderr)
+            print(
+                f"clipboard before Super-Shift-V: {launcher_clipboard!r}",
+                file=sys.stderr,
+            )
+            print(client.excerpt_around(LAUNCHER_PASTE_MARKER), file=sys.stderr)
             return 1
 
         child_probe_command = child_bracketed_paste_probe_command(
@@ -908,6 +935,28 @@ def main() -> int:
             )
             return 1
 
+        keyboard_shift_target = "SHIFTKEY"
+        keyboard_shift_suffix = "TAIL"
+        keyboard_shift_command = edit_delete_probe_command(
+            edit_prefix,
+            keyboard_shift_target,
+            keyboard_shift_suffix,
+            "",
+            KEYBOARD_SHIFT_DELETE_OK,
+            edit_delete_script,
+        )
+        client.write((keyboard_shift_command + "\r").encode())
+        client.read_for(0.8)
+        client.write(b"\x1b[D" * len(keyboard_shift_suffix))
+        client.read_for(0.2)
+        client.write(b"\x1b[1;2D" * len(keyboard_shift_target))
+        client.read_for(0.3)
+        client.write(b"\x7f")
+        if not client.wait_contains(KEYBOARD_SHIFT_DELETE_OK, args.timeout):
+            print("Shift-Left did not create an editable keyboard selection", file=sys.stderr)
+            print(client.excerpt_around("EDIT_DELETE_BAD"), file=sys.stderr)
+            return 1
+
         wrapped_replace_prefix = "A" * 78
         wrapped_replace_target = "WRAPDEL"
         wrapped_replace = "q"
@@ -1004,12 +1053,14 @@ def main() -> int:
         print("Delete deleted editable selection: observed")
         print("text input replaced editable selection: observed")
         print("Ctrl-Shift-X cut editable selection: observed")
+        print("Shift-Left keyboard selection deleted editable selection: observed")
         print("text input replaced wrapped editable selection: observed")
         print("Backspace deleted hard multi-line editable selection: observed")
         print("Ctrl-V replaced editable selection: observed")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
         print(f"Ctrl-V pasted command output: {SHORTCUT_PASTE_OUTPUT}")
+        print(f"Super-Shift-V pasted command output: {LAUNCHER_PASTE_OUTPUT}")
         print("child bracketed paste wrapper: observed")
         print("paste highlight click cursor move: observed")
         print("mouse-mode paste highlight cursor move: observed")
@@ -1019,6 +1070,7 @@ def main() -> int:
         client.close()
         trap_file.unlink(missing_ok=True)
         shortcut_paste_file.unlink(missing_ok=True)
+        launcher_paste_file.unlink(missing_ok=True)
         child_paste_script.unlink(missing_ok=True)
         paste_click_script.unlink(missing_ok=True)
         cut_delete_script.unlink(missing_ok=True)
