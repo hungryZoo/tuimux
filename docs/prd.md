@@ -1,12 +1,12 @@
 # tuimux PRD
 
 - **문서 버전**: 4.0
-- **대상 릴리스**: v0.2.0-alpha.37
+- **대상 릴리스**: v0.2.0-alpha.38
 - **작성일**: 2026-06-13
 
 ## 1. 제품 방향
 
-tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.37의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 하나의 persistent mux 안에서 window list와 PTY를 tuimux daemon이 직접 소유한다.
+tuimux는 prefix를 외우지 않고 mouse-first로 다룰 수 있는 terminal multiplexer다. v0.2.0-alpha.38의 기본 실행 경로는 tmux wrapper가 아니라 Rust-native daemon-backed multiplexer이며, 하나의 persistent mux 안에서 window list와 PTY를 tuimux daemon이 직접 소유한다.
 
 tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, mouse, visual fidelity를 tuimux UI 안에서 세밀하게 제어하기 어렵다. 따라서 tmux C 코드는 참고하되, tuimux runtime은 Rust로 직접 구현한다.
 
@@ -17,6 +17,7 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - terminal pane이 “진짜 터미널”처럼 느껴지지 않으면 full-screen 앱이 깨진다.
 - mouse drag 후 선택이 사라지면 복사 흐름이 macOS Terminal과 다르게 느껴진다.
 - 우클릭 복사/붙여넣기가 TUI 안에서 끊기면 shell 사용 중 복붙 흐름이 계속 마찰을 만든다.
+- 여러 화면줄에 걸친 입력 선택이 Backspace/Delete/문자 입력으로 지워지지 않으면 텍스트 에디터처럼 쓸 수 없다.
 - Ctrl-C가 항상 child program으로 전달되면 선택 텍스트 복사와 process interrupt가 충돌한다.
 - UI를 닫을 때 shell/window state까지 사라지면 multiplexer로 믿고 쓰기 어렵다.
 - shell이 `exit`로 종료됐는데 window가 stale 화면으로 남으면 실제 terminal이 아니라 frozen preview처럼 느껴진다.
@@ -46,8 +47,8 @@ tmux는 안정적이지만 사용자가 원하는 native selection, clipboard, m
 - Ctrl-V/Ctrl-Shift-V/Cmd-Shift-V는 system clipboard paste로 동작한다.
 - terminal mode의 Home/End와 macOS Cmd-Shift-Left/Cmd-Shift-Right는 input line start/end 이동으로 동작한다.
 - 우클릭은 TUI context menu를 열고 Cut, Copy, Paste, Cancel을 제공한다.
-- Cmd-Shift-X는 현재 입력줄 선택이면 선택 텍스트를 system clipboard에 복사한 뒤 커서를 선택 끝으로 이동하고 Backspace로 삭제하며, 삭제할 수 없는 출력 화면 선택이면 복사 후 tuimux selection을 해제한다.
-- 현재 입력줄 선택이 있을 때 Backspace/Delete는 선택 영역을 삭제하고, 일반 문자 입력과 Ctrl-V paste는 선택 영역을 삭제한 뒤 replacement text를 입력한다.
+- Cmd-Shift-X는 editable selection이면 선택 텍스트를 system clipboard에 복사한 뒤 커서를 선택 끝으로 이동하고 Backspace로 삭제하며, 삭제할 수 없는 출력 화면 선택이면 복사 후 tuimux selection을 해제한다.
+- editable selection이 있을 때 Backspace/Delete는 선택 영역을 삭제하고, 일반 문자 입력과 Ctrl-V paste는 선택 영역을 삭제한 뒤 replacement text를 입력한다. 이 동작은 soft wrap과 hard newline을 포함한 여러 줄 선택에서도 유지되어야 하며, 빈칸까지 드래그한 tail은 삭제 대상이 아니다.
 - child의 OSC 52 clipboard copy 요청은 macOS system clipboard로 이어지고, paste query는 clipboard text를 PTY response로 돌려받는다.
 - host paste는 paste event 또는 raw bracketed-paste key sequence로 처리한다.
 - 붙여넣기 직후 쉘이 표시한 paste highlight는 다음 일반 mouse click에서 드래그 선택 해제처럼 사라진다. down/up 이벤트 종류와 child mouse/application-cursor mode와 무관해야 하며, 우클릭 context menu 요청도 이 clear 경로보다 먼저 paste highlight를 지워야 한다.

@@ -106,6 +106,7 @@ struct PendingMouseDown {
     col: u16,
     modifiers: KeyModifiers,
     child_wants_mouse: bool,
+    clear_selection_on_click: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -383,23 +384,33 @@ impl UiState {
         if self.terminal_hide_cursor {
             return None;
         }
-        if range.start_row != range.end_row || cursor_row != range.start_row {
-            return None;
+        if cursor_row != range.end_row {
+            let width = self.active_selection_pane_width();
+            let cursor_index = visual_index(cursor_row, cursor_col, width);
+            let start_index = visual_index(range.start_row, range.start_col, width);
+            if cursor_index < start_index {
+                return None;
+            }
         }
 
-        let delete_count = text.chars().filter(|ch| *ch != '\n').count();
+        let delete_count = editable_delete_char_count(text);
         if delete_count == 0 {
             return None;
         }
-        let delete_at_col = if cursor_col == range.end_col {
-            range.end_col
+
+        let width = self.active_selection_pane_width();
+        let cursor_index = visual_index(cursor_row, cursor_col, width);
+        let delete_at_index = editable_delete_target_index(range, text, width);
+        let (left_moves, right_moves) = if cursor_index > delete_at_index {
+            (
+                (cursor_index - delete_at_index).min(u16::MAX as usize) as u16,
+                0,
+            )
         } else {
-            range.end_col.saturating_add(1)
-        };
-        let (left_moves, right_moves) = if cursor_col > delete_at_col {
-            (cursor_col - delete_at_col, 0)
-        } else {
-            (0, delete_at_col - cursor_col)
+            (
+                0,
+                (delete_at_index - cursor_index).min(u16::MAX as usize) as u16,
+            )
         };
 
         Some(EditableSelectionDelete {
@@ -407,6 +418,14 @@ impl UiState {
             right_moves,
             backspaces: delete_count,
         })
+    }
+
+    fn active_selection_pane_width(&self) -> usize {
+        self.selection
+            .and_then(|selection| self.terminal_panes.get(selection.pane))
+            .map(|pane| pane.rect.width)
+            .unwrap_or(self.regions.terminal_body.width)
+            .max(1) as usize
     }
 
     fn delete_selection_for_edit_key(&mut self, key: KeyEvent) -> bool {
@@ -1023,6 +1042,7 @@ fn run_loop(terminal: &mut Term, state: &mut UiState) -> io::Result<Exit> {
                                 col,
                                 modifiers: mouse.modifiers,
                                 child_wants_mouse,
+                                clear_selection_on_click: state.selection.is_some(),
                             });
                             continue;
                         }
@@ -1102,6 +1122,10 @@ fn handle_pending_left_down(state: &mut UiState, mouse: &MouseEvent) -> bool {
             let (row, col) =
                 terminal_cell_for_pane(mouse.column, mouse.row, &state.regions, pending.pane)
                     .unwrap_or((pending.row, pending.col));
+            if pending.clear_selection_on_click {
+                state.clear_selection();
+                return true;
+            }
             if pending.child_wants_mouse && state.terminal_mode {
                 state.send_terminal_mouse(
                     MouseEventKind::Down(MouseButton::Left),
@@ -1147,6 +1171,38 @@ fn cursor_move_bytes(delta: i32, force_movement: bool) -> Option<Vec<u8>> {
         std::cmp::Ordering::Equal => return None,
     }
     Some(bytes)
+}
+
+fn visual_index(row: u16, col: u16, width: usize) -> usize {
+    row as usize * width.max(1) + col as usize
+}
+
+fn editable_delete_char_count(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn editable_delete_target_index(range: SelectionRange, text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let range = range.normalized();
+    let mut row = range.start_row as usize;
+    let mut col = range.start_col as usize;
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\n' {
+            row = row.saturating_add(1);
+            col = 0;
+            continue;
+        }
+
+        col = col.saturating_add(1);
+        if col >= width && chars.peek().is_some_and(|next| *next != '\n') {
+            row = row.saturating_add(col / width);
+            col %= width;
+        }
+    }
+
+    row.saturating_mul(width).saturating_add(col)
 }
 
 fn handle_paste_highlight_mouse(state: &mut UiState, mouse: &MouseEvent) -> bool {
@@ -3071,6 +3127,7 @@ mod tests {
             col: 2,
             modifiers: KeyModifiers::NONE,
             child_wants_mouse: true,
+            clear_selection_on_click: false,
         });
 
         let handled = handle_pending_left_down(
@@ -3089,6 +3146,37 @@ mod tests {
             state.selection_range(),
             Some(SelectionRange::new(1, 2, 1, 8))
         );
+    }
+
+    #[test]
+    fn plain_terminal_click_clears_existing_selection() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 20, 5);
+        state.terminal_cursor = Some((1, 4));
+        state.terminal_hide_cursor = false;
+        state.begin_selection(0, 1, 1);
+        state.finish_selection(1, 5);
+        state.pending_left_down = Some(PendingMouseDown {
+            pane: 0,
+            row: 1,
+            col: 2,
+            modifiers: KeyModifiers::NONE,
+            child_wants_mouse: false,
+            clear_selection_on_click: true,
+        });
+
+        let handled = handle_pending_left_down(
+            &mut state,
+            &MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 2,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+
+        assert!(handled);
+        assert!(state.selection.is_none());
     }
 
     #[test]
@@ -3216,18 +3304,77 @@ mod tests {
     }
 
     #[test]
+    fn editable_selection_delete_treats_soft_wrapped_input_as_one_line() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 10, 5);
+        state.terminal_cursor = Some((3, 2));
+        state.terminal_hide_cursor = false;
+
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 8, 3, 8), "ABCD"),
+            Some(EditableSelectionDelete {
+                left_moves: 0,
+                right_moves: 0,
+                backspaces: 4,
+            })
+        );
+
+        state.terminal_cursor = Some((3, 9));
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 8, 3, 8), "ABCD"),
+            Some(EditableSelectionDelete {
+                left_moves: 7,
+                right_moves: 0,
+                backspaces: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn editable_selection_delete_treats_hard_multiline_selection_as_editable_text() {
+        let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 10, 5);
+        state.terminal_cursor = Some((3, 3));
+        state.terminal_hide_cursor = false;
+
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 2, 3, 9), "ab\ncde"),
+            Some(EditableSelectionDelete {
+                left_moves: 0,
+                right_moves: 0,
+                backspaces: 6,
+            })
+        );
+
+        state.terminal_cursor = Some((4, 0));
+        assert_eq!(
+            state.editable_selection_delete(SelectionRange::new(2, 2, 3, 9), "ab\ncde"),
+            Some(EditableSelectionDelete {
+                left_moves: 7,
+                right_moves: 0,
+                backspaces: 6,
+            })
+        );
+    }
+
+    #[test]
     fn editable_selection_delete_rejects_non_editable_selection() {
         let mut state = test_state();
+        state.regions.terminal_body = Rect::new(0, 0, 10, 5);
         state.terminal_cursor = Some((2, 8));
         state.terminal_hide_cursor = false;
 
         assert_eq!(
-            state.editable_selection_delete(SelectionRange::new(1, 5, 1, 7), "abc"),
+            state.editable_selection_delete(SelectionRange::new(3, 5, 4, 7), "abc"),
             None
         );
         assert_eq!(
-            state.editable_selection_delete(SelectionRange::new(2, 5, 3, 7), "abc"),
-            None
+            state.editable_selection_delete(SelectionRange::new(1, 5, 2, 7), "ab\nc"),
+            Some(EditableSelectionDelete {
+                left_moves: 7,
+                right_moves: 0,
+                backspaces: 4,
+            })
         );
 
         state.terminal_hide_cursor = true;

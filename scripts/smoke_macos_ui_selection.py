@@ -61,6 +61,8 @@ DELETE_DELETE_OK = "DELETE_DELETE_OK"
 REPLACE_DELETE_OK = "REPLACE_DELETE_OK"
 PASTE_REPLACE_OK = "PASTE_REPLACE_OK"
 SHORTCUT_CUT_DELETE_OK = "SHORTCUT_CUT_DELETE_OK"
+WRAP_REPLACE_OK = "WRAP_REPLACE_OK"
+HARD_MULTILINE_DELETE_OK = "HARD_MULTILINE_DELETE_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -399,7 +401,8 @@ try:
     tty.setraw(fd)
     line = bytearray(prefix + target + suffix)
     cursor = len(line)
-    os.write(sys.stdout.fileno(), b"\\x1b[2J\\x1b[H{EDIT_DELETE_READY}\\r\\n" + bytes(line))
+    display_line = bytes(line).replace(b"\\n", b"\\r\\n")
+    os.write(sys.stdout.fileno(), b"\\x1b[2J\\x1b[H{EDIT_DELETE_READY}\\r\\n" + display_line)
     data = b""
     escape = b""
     deadline = time.time() + 5.0
@@ -514,6 +517,8 @@ def main() -> int:
             print("tuimux UI did not become ready", file=sys.stderr)
             print(client.tail(), file=sys.stderr)
             return 1
+        clear_selection_click = "\x1b[<0;1;1M\x1b[<0;1;1m"
+
         command = (
             f"rm -f {trap_file}; "
             "printf '\\033[2J\\033[H'; "
@@ -593,7 +598,6 @@ def main() -> int:
             return 1
 
         time.sleep(3.0)
-        clear_selection_click = "\x1b[<0;1;1M\x1b[<0;1;1m"
         client.write(clear_selection_click.encode())
         client.read_for(0.2)
 
@@ -904,6 +908,64 @@ def main() -> int:
             )
             return 1
 
+        wrapped_replace_prefix = "A" * 78
+        wrapped_replace_target = "WRAPDEL"
+        wrapped_replace = "q"
+        wrapped_replace_command = edit_delete_probe_command(
+            wrapped_replace_prefix,
+            wrapped_replace_target,
+            "",
+            wrapped_replace,
+            WRAP_REPLACE_OK,
+            edit_delete_script,
+        )
+        client.write((wrapped_replace_command + "\r").encode())
+        client.read_for(0.8)
+        wrapped_edit_x1 = (len(wrapped_replace_prefix) % 80) + 1
+        wrapped_edit_y1 = edit_y + (len(wrapped_replace_prefix) // 80)
+        wrapped_edit_tail_x = 20
+        wrapped_edit_tail_y = wrapped_edit_y1 + 1
+        wrapped_edit_drag = (
+            f"\x1b[<0;{wrapped_edit_x1};{wrapped_edit_y1}M"
+            f"\x1b[<32;{wrapped_edit_tail_x};{wrapped_edit_tail_y}M"
+            f"\x1b[<0;{wrapped_edit_tail_x};{wrapped_edit_tail_y}m"
+        )
+        client.write(wrapped_edit_drag.encode())
+        client.read_for(0.3)
+        client.write(wrapped_replace.encode())
+        if not client.wait_contains(WRAP_REPLACE_OK, args.timeout):
+            print("text input did not replace the wrapped editable selection", file=sys.stderr)
+            print(client.excerpt_around("EDIT_DELETE_BAD"), file=sys.stderr)
+            return 1
+
+        hard_multiline_target = "HARD\nLINES"
+        hard_multiline_command = edit_delete_probe_command(
+            edit_prefix,
+            hard_multiline_target,
+            edit_suffix,
+            "",
+            HARD_MULTILINE_DELETE_OK,
+            edit_delete_script,
+        )
+        client.write((hard_multiline_command + "\r").encode())
+        client.read_for(0.8)
+        hard_x1 = len(edit_prefix) + 1
+        hard_y1 = edit_y
+        hard_x2 = len("LINES")
+        hard_y2 = edit_y + 1
+        hard_drag = (
+            f"\x1b[<0;{hard_x1};{hard_y1}M"
+            f"\x1b[<32;{hard_x2};{hard_y2}M"
+            f"\x1b[<0;{hard_x2};{hard_y2}m"
+        )
+        client.write(hard_drag.encode())
+        client.read_for(0.3)
+        client.write(b"\x7f")
+        if not client.wait_contains(HARD_MULTILINE_DELETE_OK, args.timeout):
+            print("Backspace did not delete the hard multi-line selection", file=sys.stderr)
+            print(client.excerpt_around("EDIT_DELETE_BAD"), file=sys.stderr)
+            return 1
+
         paste_target = "PASTESEL"
         paste_replacement = "pv"
         paste_replace_command = edit_delete_probe_command(
@@ -942,6 +1004,8 @@ def main() -> int:
         print("Delete deleted editable selection: observed")
         print("text input replaced editable selection: observed")
         print("Ctrl-Shift-X cut editable selection: observed")
+        print("text input replaced wrapped editable selection: observed")
+        print("Backspace deleted hard multi-line editable selection: observed")
         print("Ctrl-V replaced editable selection: observed")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")

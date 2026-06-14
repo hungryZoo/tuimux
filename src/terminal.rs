@@ -126,24 +126,6 @@ impl SelectionRange {
         (range.start_row, range.start_col) <= (row, col)
             && (row, col) <= (range.end_row, range.end_col)
     }
-
-    fn selected_cols_for_row(self, row: u16) -> Option<(u16, u16)> {
-        let range = self.normalized();
-        if row < range.start_row || row > range.end_row {
-            return None;
-        }
-        let start = if row == range.start_row {
-            range.start_col
-        } else {
-            0
-        };
-        let end = if row == range.end_row {
-            range.end_col
-        } else {
-            u16::MAX
-        };
-        Some((start, end))
-    }
 }
 
 #[derive(Debug, Default)]
@@ -198,6 +180,28 @@ impl vt100::Callbacks for TerminalCallbacks {
             self.pending_clipboard_paste = Some(response_selector(selector));
         }
     }
+}
+
+fn selected_text_from_screen(screen: &vt100::Screen, selection: SelectionRange) -> String {
+    let (rows, cols) = screen.size();
+    if rows == 0 || cols == 0 {
+        return String::new();
+    }
+
+    let range = selection.normalized();
+    let start_row = range.start_row.min(rows.saturating_sub(1));
+    let end_row = range.end_row.min(rows.saturating_sub(1));
+    if start_row > end_row {
+        return String::new();
+    }
+
+    let start_col = range.start_col.min(cols);
+    let end_col_exclusive = range.end_col.saturating_add(1).min(cols);
+    if start_row == end_row && start_col >= end_col_exclusive {
+        return String::new();
+    }
+
+    screen.contents_between(start_row, start_col, end_row, end_col_exclusive)
 }
 
 pub struct PtyTerminal {
@@ -351,7 +355,6 @@ impl PtyTerminal {
 
         for row in 0..rows {
             let mut last_used_col = None;
-            let selected_cols = selection.and_then(|range| range.selected_cols_for_row(row));
             for col in 0..cols {
                 let Some(cell) = screen.cell(row, col) else {
                     continue;
@@ -360,12 +363,7 @@ impl PtyTerminal {
                     continue;
                 }
                 let style = TerminalStyle::from_cell(cell);
-                if cell.has_contents()
-                    || !style.is_default()
-                    || selected_cols
-                        .map(|(start, end)| col >= start && col <= end)
-                        .unwrap_or(false)
-                {
+                if cell.has_contents() || !style.is_default() {
                     last_used_col = Some(if cell.is_wide() {
                         col.saturating_add(1)
                     } else {
@@ -468,49 +466,7 @@ impl PtyTerminal {
     }
 
     pub fn selected_text(&self, selection: SelectionRange) -> String {
-        let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
-        if rows == 0 || cols == 0 {
-            return String::new();
-        }
-
-        let range = selection.normalized();
-        let start_row = range.start_row.min(rows.saturating_sub(1));
-        let end_row = range.end_row.min(rows.saturating_sub(1));
-        let mut lines = Vec::new();
-
-        for row in start_row..=end_row {
-            let start_col = if row == range.start_row {
-                range.start_col
-            } else {
-                0
-            }
-            .min(cols.saturating_sub(1));
-            let end_col = if row == range.end_row {
-                range.end_col
-            } else {
-                cols.saturating_sub(1)
-            }
-            .min(cols.saturating_sub(1));
-
-            let mut line = String::new();
-            for col in start_col..=end_col {
-                let Some(cell) = screen.cell(row, col) else {
-                    continue;
-                };
-                if cell.is_wide_continuation() {
-                    continue;
-                }
-                if cell.has_contents() {
-                    line.push_str(cell.contents());
-                } else {
-                    line.push(' ');
-                }
-            }
-            lines.push(line.trim_end().to_string());
-        }
-
-        lines.join("\n")
+        selected_text_from_screen(self.parser.screen(), selection)
     }
 
     pub fn bracketed_paste(&self) -> bool {
@@ -1137,6 +1093,38 @@ mod tests {
         assert_eq!(
             TerminalStyle::from_cell(bg).bg,
             TerminalColor::Rgb(78, 90, 123)
+        );
+    }
+
+    #[test]
+    fn selected_text_follows_soft_wrap_without_padding() {
+        let mut parser = vt100::Parser::new(4, 10, 0);
+        parser.process(b"1234567890ABC");
+
+        assert!(parser.screen().row_wrapped(0));
+        assert_eq!(
+            selected_text_from_screen(parser.screen(), SelectionRange::new(0, 8, 1, 8)),
+            "90ABC"
+        );
+    }
+
+    #[test]
+    fn selected_text_keeps_explicit_line_breaks_but_not_blank_drag_tail() {
+        let mut parser = vt100::Parser::new(4, 10, 0);
+        parser.process(b"foo\r\nbar");
+
+        assert!(!parser.screen().row_wrapped(0));
+        assert_eq!(
+            selected_text_from_screen(parser.screen(), SelectionRange::new(0, 0, 1, 8)),
+            "foo\nbar"
+        );
+        assert_eq!(
+            selected_text_from_screen(parser.screen(), SelectionRange::new(1, 1, 1, 9)),
+            "ar"
+        );
+        assert_eq!(
+            selected_text_from_screen(parser.screen(), SelectionRange::new(1, 5, 1, 9)),
+            ""
         );
     }
 
