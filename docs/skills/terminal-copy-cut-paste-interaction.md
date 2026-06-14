@@ -63,6 +63,7 @@ uv run python scripts/smoke_macos_scrollback.py
 - Backspace, Delete, 일반 문자 입력이 editable selection을 삭제하거나 대체한다.
 - Ctrl-V paste가 shell 명령으로 실행된다.
 - Ctrl-V paste가 editable selection을 먼저 삭제하고 replacement text를 넣는다.
+- Ctrl-Shift-X cut이 editable selection을 clipboard로 복사하고 line buffer에서는 삭제한다.
 - context menu Paste가 child bracketed paste wrapper와 paste highlight clear 경로를 보존한다.
 - Copy/Cut으로 얻은 clipboard text를 붙여넣은 뒤 left click이 paste highlight를 지우고 cursor movement를 보낸다.
 
@@ -73,6 +74,20 @@ uv run python scripts/smoke_macos_scrollback.py
 - 최종 cursor column이 clicked column으로 이동한다.
 - paste가 아닌 일반 left click도 입력 커서를 clicked column으로 이동한다.
 - mouse escape byte가 shell 입력줄에 남지 않는다.
+
+## line editor probe 설계
+
+텍스트 편집 기능은 child가 받은 byte 개수만 보면 안 된다. `scripts/smoke_macos_ui_selection.py`의 editable selection probe는 raw mode child 안에 작은 line editor를 두고 다음을 직접 시뮬레이션한다.
+
+- 초기 buffer: `prefix + target + suffix`
+- cursor: line 끝
+- `ESC[D`/`ESCOD`: cursor left
+- `ESC[C`/`ESCOC`: cursor right
+- `DEL`/Backspace: cursor 앞 글자 삭제
+- printable byte: cursor 위치에 insert
+- `ESC[3~`: cursor 위치 글자 delete
+
+최종 buffer가 정확히 `prefix + replacement + suffix`일 때만 OK를 출력한다. 예를 들어 Backspace/Delete/Ctrl-Shift-X는 replacement가 빈 문자열이므로 `prefix + suffix`가 되어야 하고, 일반 문자와 Ctrl-V paste는 각각 입력된 replacement가 target 자리를 차지해야 한다. 이 방식은 “Backspace가 target 길이만큼 왔다” 같은 약한 검증보다 강하다.
 
 ## 회귀 방지 체크리스트
 

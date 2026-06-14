@@ -60,6 +60,7 @@ BACKSPACE_DELETE_OK = "BACKSPACE_DELETE_OK"
 DELETE_DELETE_OK = "DELETE_DELETE_OK"
 REPLACE_DELETE_OK = "REPLACE_DELETE_OK"
 PASTE_REPLACE_OK = "PASTE_REPLACE_OK"
+SHORTCUT_CUT_DELETE_OK = "SHORTCUT_CUT_DELETE_OK"
 SENTINEL = "TUIMUX_CLIPBOARD_SENTINEL"
 ROWS = 24
 COLS = 100
@@ -332,24 +333,38 @@ old = termios.tcgetattr(fd)
 try:
     tty.setraw(fd)
     os.write(sys.stdout.fileno(), b"\\x1b[2J\\x1b[H{CUT_DELETE_READY}\\r\\n" + payload)
-    deleted = 0
+    line = bytearray(payload)
+    cursor = len(line)
+    data = b""
     deadline = time.time() + 5.0
-    while time.time() < deadline and deleted < len(payload):
+    while time.time() < deadline and line:
         ready, _, _ = select.select([fd], [], [], 0.1)
         if ready:
             chunk = os.read(fd, 1024)
             if not chunk:
                 break
+            data += chunk
             for byte in chunk:
                 if byte == 0x7f:
-                    deleted += 1
-                    os.write(sys.stdout.fileno(), b"\\b \\b")
+                    if cursor > 0:
+                        del line[cursor - 1]
+                        cursor -= 1
+                        os.write(sys.stdout.fileno(), b"\\b \\b")
                 elif byte == 0x03:
                     raise KeyboardInterrupt
-    if deleted == len(payload):
+    if not line:
         os.write(sys.stdout.fileno(), b"\\r\\n{CUT_DELETE_OK}\\r\\n")
     else:
-        os.write(sys.stdout.fileno(), b"\\r\\nCUT_DELETE_BAD:" + str(deleted).encode() + b"\\r\\n")
+        os.write(
+            sys.stdout.fileno(),
+            b"\\r\\nCUT_DELETE_BAD:line="
+            + bytes(line).hex().encode()
+            + b",cursor="
+            + str(cursor).encode()
+            + b",data="
+            + data.hex().encode()
+            + b"\\r\\n",
+        )
 finally:
     termios.tcsetattr(fd, termios.TCSADRAIN, old)
 """
@@ -377,18 +392,19 @@ prefix = {prefix.encode()!r}
 target = {target.encode()!r}
 suffix = {suffix.encode()!r}
 replacement = {replacement.encode()!r}
-requires_replacement = {bool(replacement)!r}
+expected = prefix + replacement + suffix
 fd = sys.stdin.fileno()
 old = termios.tcgetattr(fd)
 try:
     tty.setraw(fd)
-    os.write(sys.stdout.fileno(), b"\\x1b[2J\\x1b[H{EDIT_DELETE_READY}\\r\\n" + prefix + target + suffix)
+    line = bytearray(prefix + target + suffix)
+    cursor = len(line)
+    os.write(sys.stdout.fileno(), b"\\x1b[2J\\x1b[H{EDIT_DELETE_READY}\\r\\n" + bytes(line))
     data = b""
+    escape = b""
     deadline = time.time() + 5.0
     while time.time() < deadline:
-        dels = data.count(b"\\x7f")
-        has_replacement = (not requires_replacement) or replacement in data
-        if dels >= len(target) and has_replacement:
+        if bytes(line) == expected:
             break
         ready, _, _ = select.select([fd], [], [], 0.1)
         if ready:
@@ -396,18 +412,60 @@ try:
             if not chunk:
                 break
             data += chunk
+
+            i = 0
+            while i < len(chunk):
+                byte = chunk[i:i+1]
+                if escape:
+                    escape += byte
+                    if escape in (b"\\x1b[D", b"\\x1bOD"):
+                        cursor = max(0, cursor - 1)
+                        escape = b""
+                    elif escape in (b"\\x1b[C", b"\\x1bOC"):
+                        cursor = min(len(line), cursor + 1)
+                        escape = b""
+                    elif escape == b"\\x1b[3~":
+                        if cursor < len(line):
+                            del line[cursor]
+                        escape = b""
+                    elif len(escape) >= 6:
+                        escape = b""
+                    i += 1
+                    continue
+
+                if byte == b"\\x1b":
+                    escape = byte
+                elif byte == b"\\x7f":
+                    if cursor > 0:
+                        del line[cursor - 1]
+                        cursor -= 1
+                elif byte in (b"\\r", b"\\n"):
+                    pass
+                elif 0x20 <= chunk[i] <= 0x7e:
+                    line[cursor:cursor] = byte
+                    cursor += 1
+                i += 1
+
     lefts = data.count(b"\\x1b[D") + data.count(b"\\x1bOD")
+    rights = data.count(b"\\x1b[C") + data.count(b"\\x1bOC")
     dels = data.count(b"\\x7f")
-    has_replacement = (not requires_replacement) or replacement in data
-    if lefts >= len(suffix) and dels >= len(target) and has_replacement:
+    if bytes(line) == expected:
         os.write(sys.stdout.fileno(), b"\\r\\n{ok_marker}\\r\\n")
     else:
         os.write(
             sys.stdout.fileno(),
             b"\\r\\nEDIT_DELETE_BAD:lefts="
             + str(lefts).encode()
+            + b",rights="
+            + str(rights).encode()
             + b",dels="
             + str(dels).encode()
+            + b",cursor="
+            + str(cursor).encode()
+            + b",line="
+            + bytes(line).hex().encode()
+            + b",expected="
+            + expected.hex().encode()
             + b",data="
             + data.hex().encode()
             + b"\\r\\n",
@@ -814,6 +872,38 @@ def main() -> int:
             print(client.tail(), file=sys.stderr)
             return 1
 
+        shortcut_cut_target = "CUTKEY"
+        shortcut_cut_command = edit_delete_probe_command(
+            edit_prefix,
+            shortcut_cut_target,
+            edit_suffix,
+            "",
+            SHORTCUT_CUT_DELETE_OK,
+            edit_delete_script,
+        )
+        client.write((shortcut_cut_command + "\r").encode())
+        client.read_for(0.8)
+        edit_x2 = len(edit_prefix) + len(shortcut_cut_target)
+        edit_drag = (
+            f"\x1b[<0;{edit_x1};{edit_y}M"
+            f"\x1b[<32;{edit_x2};{edit_y}M"
+            f"\x1b[<0;{edit_x2};{edit_y}m"
+        )
+        client.write(edit_drag.encode())
+        client.read_for(0.3)
+        client.write(b"\x1b[120;6u")
+        if not client.wait_contains(SHORTCUT_CUT_DELETE_OK, args.timeout):
+            print("Ctrl-Shift-X did not cut the editable selection", file=sys.stderr)
+            print(client.excerpt_around("EDIT_DELETE_BAD"), file=sys.stderr)
+            return 1
+        shortcut_cut_clipboard = get_clipboard()
+        if shortcut_cut_clipboard != shortcut_cut_target:
+            print(
+                f"Ctrl-Shift-X clipboard mismatch: expected {shortcut_cut_target!r}, got {shortcut_cut_clipboard!r}",
+                file=sys.stderr,
+            )
+            return 1
+
         paste_target = "PASTESEL"
         paste_replacement = "pv"
         paste_replace_command = edit_delete_probe_command(
@@ -851,6 +941,7 @@ def main() -> int:
         print("Backspace deleted editable selection: observed")
         print("Delete deleted editable selection: observed")
         print("text input replaced editable selection: observed")
+        print("Ctrl-Shift-X cut editable selection: observed")
         print("Ctrl-V replaced editable selection: observed")
         print(f"Ctrl-C copied: {copied}")
         print(f"right-click menu pasted command output: {RIGHT_PASTE_OUTPUT}")
